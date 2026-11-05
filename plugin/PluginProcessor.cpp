@@ -25,13 +25,13 @@ class tiles 5
 
 floor carpet
 ceiling tiles
-wall 0 0 8 0 wall
-wall 8 0 8 6 wall
-wall 8 6 0 6 wall
-wall 0 6 0 0 wall
+wall 0 8 0 0 wall
+wall 0 0 6 0 wall
+wall 6 0 6 8 wall
+wall 6 8 0 8 wall
 
-listener 6 3 1.5 180
-source Voice 2 3 1.5 0
+listener 3 2 1.5 90
+source Voice 3 6 1.5 -90
 
 receiver L 6 3 1.5  55 0.5
 receiver R 6 3 1.5 -55 0.5

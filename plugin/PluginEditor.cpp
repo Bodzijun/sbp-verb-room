@@ -115,10 +115,6 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     addAndMakeVisible(autoViewBtn);
     autoViewBtn.setToggleState(true, juce::dontSendNotification);
     autoViewBtn.onClick = [this] { setAutoView(autoViewBtn.getToggleState()); };
-    addAndMakeVisible(faceUpBtn);
-    faceUpBtn.setToggleState(faceUp, juce::dontSendNotification);
-    faceUpBtn.setTooltip("Plan orientation: the listener looks up (+x), so the left/right of the picture is the listener's left/right. Off: x to the right.");
-    faceUpBtn.onClick = [this] { faceUp = faceUpBtn.getToggleState(); setAutoView(true); repaint(); };
     for (auto* b : {&toolMove, &toolBox, &toolAdd, &toolFloorZone, &toolCeilZone}) { b->setClickingTogglesState(true); b->setRadioGroupId(101); }
     viewTop.setToggleState(true, juce::dontSendNotification);
     viewTop.setTooltip("Plan view from above (x, y)");
@@ -1177,7 +1173,11 @@ void VerbEditor::paint(juce::Graphics& g) {
     verb::Scene sc = proc.getDisplayScene(home);
     double lis[4];
     for (int k = 0; k < 4; ++k) lis[k] = paramValue(verbp::kListener, k);
-    if (!rightDragging) viewPsi = lis[3] * verb::kPi / 180.0;  // the listener's heading is up; frozen while aiming so the map does not spin under the pointer
+    if (viewPsiSerial != proc.getLoadSerial() || relatchView) {  // the listener's heading is up when a room loads; then the map holds still while the listener turns
+        viewPsi = lis[3] * verb::kPi / 180.0;
+        viewPsiSerial = proc.getLoadSerial();
+        relatchView = false;
+    }
     if (!lockView) view = makeView(sc, lis);
     if (autoFit) {  // remember the fitted view: the free view starts from it
         vCx = view.minX + view.area.getWidth() / (2 * view.scale);
@@ -1469,7 +1469,6 @@ void VerbEditor::resized() {
     place({&toolDelete, &toolUndo});
     place({&toolClear});
     autoViewBtn.setBounds(viewBar.removeFromRight(100));
-    faceUpBtn.setBounds(viewBar.removeFromRight(112));
     for (auto* t : {&viewTop, &viewFront, &viewSide, &viewIso}) { t->setBounds(viewBar.removeFromLeft(54)); viewBar.removeFromLeft(2); }
 
     {

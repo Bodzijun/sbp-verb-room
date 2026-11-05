@@ -65,6 +65,7 @@ public:
         zoneLayerCeiling = ceiling;
         selectSurface(ceiling ? SelKind::CeilZone : SelKind::FloorZone, index);
     }
+    double testViewPsi() const { return viewPsi; }
     int testPickCount(double wx, double wy) { const auto sc = proc.getDisplayScene(); return (int)pickCandidates(sc, view.toScreen(wx, wy)).size(); }  // surfaces under a world point
     void testSetLayer(int layer, int mode) { layerMode[layer] = mode; updateLayerButtons(); }
     void showPage(int tabIndex, int object) {                            // tab 0 Objects, 1 Surfaces, 2 Mix; object < 0 keeps the selection
@@ -114,9 +115,10 @@ private:
             return {(float)std::sin(psi - a), (float)-std::cos(a - psi)};
         }
     };
-    bool faceUp = true;     // plan orientation: the listener's front points up, whatever its yaw (left/right on the screen = the listener's)
-    double viewPsi = 0;     // the heading used for that rotation; frozen while the listener is being aimed
-    juce::ToggleButton faceUpBtn{"Listener up"};
+    bool faceUp = false;     // plan orientation: the listener's front points up, whatever its yaw (left/right on the screen = the listener's)
+    double viewPsi = 0;     // the heading used for that rotation: taken when a room is loaded or "Listener up" is switched on, then kept, so turning the listener does not spin the map
+    uint64_t viewPsiSerial = ~0ull;
+    bool relatchView = false;
     struct Row {
         juce::Label label;
         juce::Slider slider;

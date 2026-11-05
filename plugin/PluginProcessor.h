@@ -69,6 +69,7 @@ public:
     // ceiling, height); the result is validated, kept in the saved state and pushed to the running engine without
     // interrupting the audio. Rejected edits (too many walls, bad indices) change nothing.
     void editScene(const std::function<void(verb::Scene&)>& fn);
+    uint64_t getLoadSerial() const { return loadSerial.load(); }  // increments when a new engine is built (a room is loaded, the output is changed)
     uint64_t getSceneSerial() const { return sceneSerial.load(); }  // increments on every change of the room or the setup
 
     // ---- sources and outputs (message thread; structural changes rebuild the engine in the background) ----

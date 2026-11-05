@@ -97,14 +97,14 @@ int main() {
             return en;
         };
         auto settleBlocks = [&](int n) { for (int i = 0; i < n; ++i) { buf.clear(); p.processBlock(buf, midi); } };
-        setP(p, "s1x", 2.0);  // back to the scene position (the automation test above moved it)
+        setP(p, "s1x", 3.0);  // back to the scene position (the automation test above moved it)
         settleBlocks(400);
         const double eOpenRoom = early(10);
         const size_t wallsBefore = p.getDisplayScene().walls.size();
         p.editScene([](verb::Scene& s) {
             verb::Material m = verb::surfacePresets()[0];  // Concrete
             s.mats.push_back(m);
-            s.walls.push_back(verb::Wall{4.0, 0.0, 4.0, 6.0, (int)s.mats.size() - 1});
+            s.walls.push_back(verb::Wall{0.0, 4.0, 6.0, 4.0, (int)s.mats.size() - 1});  // between the source (3, 6) and the listener (3, 2)
         });
         // early paths follow within a control period; the late field is re-traced on a worker thread (seconds)
         juce::Thread::sleep(6000);
@@ -145,7 +145,7 @@ int main() {
         // positions are free: the listener far outside the room (and above the ceiling) must not break anything,
         // and must come back to the same level
         {
-            setP(p, "lx", 6.0); setP(p, "ly", 3.0);
+            setP(p, "lx", 3.0); setP(p, "ly", 2.0);
             settleBlocks(200);
             const double eHome = early(10);
             setP(p, "lx", -40.0); setP(p, "ly", 25.0); setP(p, "lz", 29.0);
@@ -159,7 +159,7 @@ int main() {
             }
             check(fin, "listener far outside the room: output finite");
             check(p.getDisplayScene().walls.size() > 0 && std::fabs(p.apvts.getRawParameterValue("lx")->load() + 40.f) < 1e-3f, "outside position is kept (not clamped to the walls)");
-            setP(p, "lx", 6.0); setP(p, "ly", 3.0); setP(p, "lz", 1.5);
+            setP(p, "lx", 3.0); setP(p, "ly", 2.0); setP(p, "lz", 1.5);
             settleBlocks(300);
             const double eBack = early(10);
             check(std::fabs(10 * std::log10(eBack / eHome)) < 1.0, "back inside: the same level as before");
@@ -200,7 +200,7 @@ int main() {
         q.prepareToPlay(48000, 256);
         q.setStateInformation(mb.getData(), (int)mb.getSize());
         check(waitReady(q, 60), "scene restored from saved state");
-        check(std::fabs(q.apvts.getRawParameterValue("s1x")->load() - 2.0f) < 1e-3f, "automated parameter value restored");
+        check(std::fabs(q.apvts.getRawParameterValue("s1x")->load() - 3.0f) < 1e-3f, "automated parameter value restored");
         check(q.getSceneName() == p.getSceneName(), "scene name restored");
         {   // the input meters are an option saved with the project
             p.setInputMetersEnabled(false);
@@ -220,8 +220,8 @@ int main() {
         r.prepareToPlay(48000, 256);
         check(waitReady(r, 60), "setup for orientation / scaling / free points loads");
         auto param = [&](const char* id) { return (double)r.apvts.getRawParameterValue(id)->load(); };
-        setP(r, "s1x", 2.0); setP(r, "s1y", 3.0);
-        r.orientObject(0, 2.0, 10.0);
+        setP(r, "s1x", 3.0); setP(r, "s1y", 6.0);
+        r.orientObject(0, 3.0, 10.0);
         const double az1 = param("s1az");
         r.orientObject(verbp::kListener, param("lx"), param("ly") - 8.0);
         const double yaw1 = param("laz");  // the listener's yaw uses the "az" component id
@@ -232,8 +232,8 @@ int main() {
         const double s1x0 = param("s1x"), lx0 = param("lx");
         r.scaleRoom(2.0, true);
         const auto big = r.getDisplayScene();
-        const bool bigOk = std::fabs(big.walls[0].ax - (-4.0)) < 1e-6 && std::fabs(big.walls[0].bx - 12.0) < 1e-6 && std::fabs(big.height - 6.0) < 1e-6 &&
-                           std::fabs(param("s1x") - (4.0 + (s1x0 - 4.0) * 2.0)) < 1e-3 && std::fabs(param("lx") - (4.0 + (lx0 - 4.0) * 2.0)) < 1e-3;
+        const bool bigOk = std::fabs(big.walls[1].ax - (-3.0)) < 1e-6 && std::fabs(big.walls[1].bx - 9.0) < 1e-6 && std::fabs(big.height - 6.0) < 1e-6 &&
+                           std::fabs(param("s1x") - (3.0 + (s1x0 - 3.0) * 2.0)) < 1e-3 && std::fabs(param("lx") - (3.0 + (lx0 - 3.0) * 2.0)) < 1e-3;
         r.scaleRoom(0.5, true);
         const auto back = r.getDisplayScene();
         check(bigOk && std::fabs(back.walls[0].ax - before.walls[0].ax) < 1e-6 && std::fabs(back.height - before.height) < 1e-6 && std::fabs(param("s1x") - s1x0) < 1e-3,
@@ -241,11 +241,11 @@ int main() {
         r.scaleWall(0, 0.5);
         const auto sw = r.getDisplayScene();
         check(std::fabs(std::hypot(sw.walls[0].bx - sw.walls[0].ax, sw.walls[0].by - sw.walls[0].ay) - 4.0) < 1e-6 &&
-                  std::fabs(0.5 * (sw.walls[0].ax + sw.walls[0].bx) - 4.0) < 1e-6,
+                  std::fabs(0.5 * (sw.walls[0].ay + sw.walls[0].by) - 4.0) < 1e-6,
               "scaleWall halves a segment about its midpoint");
 
         // free channel points: moving a point 2 m towards the listener makes its sound arrive 2 m / c earlier
-        setP(r, "s1az", 0.0);
+        setP(r, "s1az", -90.0);  // faces the listener, which is below the source
         {
             auto v = r.getSources();
             v[0].name = "Pair"; v[0].format = 1; v[0].channels = 2; v[0].firstIn = 0; v[0].spread = 1.0; v[0].freePoints = true;
@@ -788,7 +788,7 @@ receiver R 0 0 1.5 0 0
                 check(plates == 1 && cs.walls.size() >= 11, "the car has a bonnet plate and the engine-bay walls");
             }
             // the stems sit where they should: tailpipes behind the cabin, engine in front (read back from the parameters)
-            auto px = [&](int src) { return p.apvts.getRawParameterValue(verbp::paramId(src, 0))->load(); };
+            auto px = [&](int src) { return p.apvts.getRawParameterValue(verbp::paramId(src, 1))->load(); };  // the car drives up the plan: "forward" is y
             std::printf("  x positions: Exhaust A %.1f, Exhaust B %.1f, Intake %.1f, Engine block %.1f\n", px(0), px(1), px(2), px(3));
             check(px(0) < -1.6 && px(1) > 1.5 && px(4) > 1.5 && px(3) < 1.0, "tailpipe behind the car, the engine ahead of the firewall, the gearbox in the tunnel");
             // sound: an impulse in cylinder 1 (input 15) and in the tailpipe (input 1) arrives finite, the engine one is more muffled by the firewall
@@ -1007,7 +1007,7 @@ receiver R 0 0 1.5 0 0
             try {
                 std::istringstream is(roomFile.loadFileAsString().toStdString());
                 auto sc = verb::parseScene(is, "exported room");
-                roomOk = sc.walls.size() >= 4 && sc.hasListener && !sc.sources.empty() && std::fabs(sc.listenerPos.x - 3.0) < 0.05;
+                roomOk = sc.walls.size() >= 4 && sc.hasListener && !sc.sources.empty() && std::fabs(sc.listenerPos.x - 1.7) < 0.05;  // the room is turned so that the listener looks up at the source
             } catch (...) {}
         }
         check(roomOk, "the room is written next to the IRs and reads back with the current listener position");

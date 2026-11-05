@@ -52,6 +52,49 @@ inline verb::Scene box(double w, double d, double h, const char* wall, const cha
     return s;
 }
 
+// Turns a whole room about the origin so that the listener looks UP the plan (+y) at the sources, which are then above it:
+// the left of the listener is the left of the picture. `deg` < 1000: turn by exactly that angle; otherwise the angle is taken
+// from the listener to the centre of the sources. With `shift` the room is moved so that its walls start at 0, 0.
+inline void listenerUp(verb::Scene& s, double deg = 1e9, bool shift = true) {
+    if (deg > 1000.0) {
+        if (!s.hasListener || s.sources.empty()) return;
+        double cx = 0, cy = 0;
+        for (auto& t : s.sources) { cx += t.pos.x; cy += t.pos.y; }
+        cx /= (double)s.sources.size();
+        cy /= (double)s.sources.size();
+        if (std::hypot(cx - s.listenerPos.x, cy - s.listenerPos.y) < 1e-6) return;
+        deg = 90.0 - std::atan2(cy - s.listenerPos.y, cx - s.listenerPos.x) * 180.0 / verb::kPi;
+    }
+    const double a = deg * verb::kPi / 180.0, c = std::cos(a), sn = std::sin(a);
+    auto rot = [&](double& x, double& y) { const double nx = c * x - sn * y, ny = sn * x + c * y; x = nx; y = ny; };
+    for (auto& w : s.walls) { rot(w.ax, w.ay); rot(w.bx, w.by); }
+    for (auto* zl : {&s.floorZones, &s.ceilZones})
+        for (auto& z : *zl)
+            for (auto& p : z.poly) rot(p.first, p.second);
+    for (auto* tl : {&s.sources, &s.receivers})
+        for (auto& t : *tl) { rot(t.pos.x, t.pos.y); t.azimuthDeg += deg; }
+    rot(s.listenerPos.x, s.listenerPos.y);
+    s.listenerYaw += deg;
+    while (s.listenerYaw > 180.0) s.listenerYaw -= 360.0;
+    while (s.listenerYaw <= -180.0) s.listenerYaw += 360.0;
+    for (auto* tl : {&s.sources, &s.receivers})
+        for (auto& t : *tl) {
+            while (t.azimuthDeg > 180.0) t.azimuthDeg -= 360.0;
+            while (t.azimuthDeg <= -180.0) t.azimuthDeg += 360.0;
+        }
+    if (!shift || s.walls.empty()) return;
+    double x0 = 1e18, y0 = 1e18;
+    for (auto& w : s.walls) { x0 = std::min({x0, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); }
+    for (auto& w : s.walls) { w.ax -= x0; w.bx -= x0; w.ay -= y0; w.by -= y0; }
+    for (auto* zl : {&s.floorZones, &s.ceilZones})
+        for (auto& z : *zl)
+            for (auto& p : z.poly) { p.first -= x0; p.second -= y0; }
+    for (auto* tl : {&s.sources, &s.receivers})
+        for (auto& t : *tl) { t.pos.x -= x0; t.pos.y -= y0; }
+    s.listenerPos.x -= x0;
+    s.listenerPos.y -= y0;
+}
+
 inline void clutter(verb::Scene& s, int count, double hMax = 1.6, int seed = 7) {
     s.clutter.count = count;
     s.clutter.hMax = hMax;
@@ -193,6 +236,7 @@ inline BuiltinRoom carRoom(bool withEngineSim) {
     s.hasListener = true;
     s.listenerPos = {0.0, 0.38, 1.0};
     s.listenerYaw = 0;
+    detail::listenerUp(s, 90.0, false);  // the car drives up the plan: the driver is at the bottom, the engine at the top
     verb::sanitizeScene(s);
     verb::compactMaterials(s);
     BuiltinRoom r;
@@ -259,6 +303,7 @@ inline std::vector<BuiltinRoom> builtinRooms() {
     }
     std::vector<BuiltinRoom> out;
     for (auto& e : v) {
+        detail::listenerUp(e.second);  // the listener at the bottom, looking up at the sources
         verb::sanitizeScene(e.second);
         verb::compactMaterials(e.second);
         BuiltinRoom r;
