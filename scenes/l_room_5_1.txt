@@ -1,0 +1,38 @@
+# L-shaped room with an inner partition (obstacle) and an open-air side; 5.1 virtual mic array.
+sr 48000
+length 3.0
+height 3.0
+order 3
+rays 80000
+
+#            125   250   500   1k    2k    4k    8k   scatter
+material plaster 0.02 0.03 0.04 0.05 0.06 0.07 0.08 0.05
+material carpet  0.05 0.10 0.25 0.45 0.65 0.70 0.70 0.15
+material curtain 0.10 0.30 0.55 0.70 0.75 0.75 0.70 0.20
+material glass   0.18 0.06 0.04 0.03 0.02 0.02 0.02 0.02
+
+floor carpet
+ceiling plaster
+
+# outer walls (L shape)
+wall 0 0 10 0 plaster
+wall 10 0 10 4 plaster
+wall 10 4 5 4 glass
+wall 5 4 5 8 plaster
+wall 5 8 0 8 plaster
+wall 0 8 0 0 curtain
+
+# partition with a gap (door) -- acts as occluder
+wall 3 0 3 3 plaster
+wall 3 5 3 8 plaster
+
+source Man 2 6 1.7
+source Source 8 1.5 1.2
+
+# 5.1 virtual mic array at listener position (facing +x)
+receiver L   7 3 1.5  30 0.5
+receiver R   7 3 1.5 -30 0.5
+receiver C   7 3 1.5   0 0.5
+receiver LFE 7 3 1.5   0 0 -120   # placeholder so channels follow the 5.1 order L R C LFE Ls Rs
+receiver Ls  7 3 1.5 110 0.5
+receiver Rs  7 3 1.5 -110 0.5

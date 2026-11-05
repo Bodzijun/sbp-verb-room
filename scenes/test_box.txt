@@ -1,0 +1,20 @@
+# Closed 8 x 6 x 3 m box, uniform alpha 0.2 -> Eyring RT60 ~ 0.58 s (Sabine ~ 0.64 s)
+sr 48000
+length 2.0
+height 3.0
+order 3
+rays 50000
+
+material wall 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.05
+
+floor wall
+ceiling wall
+wall 0 0 8 0 wall
+wall 8 0 8 6 wall
+wall 8 6 0 6 wall
+wall 0 6 0 0 wall
+
+source S1 2 3 1.5
+# stereo pair: two cardioids, 110 degrees apart (listener looks along +x)
+receiver L 6 3.0 1.5 55 0.5
+receiver R 6 3.0 1.5 -55 0.5

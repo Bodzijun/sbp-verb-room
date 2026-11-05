@@ -1,0 +1,9 @@
+build*/
+out/
+archive/
+publish/
+*.obj
+*.pdb
+*.ilk
+*.map
+.vs/

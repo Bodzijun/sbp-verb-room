@@ -1,0 +1,12 @@
+# Anechoic test: fully absorbing floor, no walls, open sky. Output = direct sound only.
+sr 48000
+length 1.0
+height 6.0
+order 2
+rays 1000
+
+material absorb 1 1 1 1 1 1 1 0
+floor absorb
+
+source S -80 0 1.5
+receiver M 0 0 1.5 0 0

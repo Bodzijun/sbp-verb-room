@@ -1,0 +1,12 @@
+# One floor reflection only: carpet floor, nothing else. Source and receiver are high above the floor so the
+# reflection arrives ~27 ms after the direct sound and can be analysed on its own.
+sr 48000
+length 1.0
+height 10.0
+order 1
+
+material carpet 0.05 0.10 0.25 0.45 0.65 0.70 0.70 0.15
+floor carpet
+
+source S 0 0 6
+receiver M 3 0 6 0 0
