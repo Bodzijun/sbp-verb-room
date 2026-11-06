@@ -247,6 +247,177 @@ inline BuiltinRoom carRoom(bool withEngineSim) {
     return r;
 }
 
+// ---- concert halls with an orchestra on risers, for orchestration ----
+// Frame while building: x across (to the right as the audience sees it), y from the front edge of the stage (y = 0) towards the
+// back wall (+y); the audience is at y < 0. The listener looks at the stage (+y), so with the plan as drawn the orchestra is
+// ABOVE the listener. Every instrument group is one mono source (input channel 1, 2, 3 ... in the order of the list), at the
+// place and height it really has: the strings on the stage, the woodwinds on the first riser, the brass on the second, the
+// timpani and percussion on the third. The names say what each group is.
+struct Player {
+    const char* name;
+    double x, y;  // metres: across, depth from the front edge of the stage
+    int riser;    // 0 stage floor, 1..3 riser steps
+    double up;    // height of the instrument above the floor it stands on
+};
+
+struct HallSpec {
+    std::string name;
+    double width, audienceDepth, stageDepth, height;
+    const char* wall;
+    const char* backWall;                     // the wall behind the audience
+    double stageH, riserStep;                 // stage above the audience floor, height of each riser step
+    double riserY[3];                         // depth (from the front edge) where riser 1, 2, 3 start
+    double zoneX0, zoneX1, zoneY0, zoneY1;   // the seated audience, same frame
+    double lisX, lisY, lisZ;                  // the listener
+    double canopyZ;                           // reflector over the stage (0 = none)
+    double length;
+};
+
+inline BuiltinRoom orchestraRoom(const HallSpec& h, const std::vector<Player>& players) {
+    verb::Scene s;
+    s.sr = 48000;
+    s.length = h.length;
+    s.height = h.height;
+    s.order = 2;
+    s.mats = verb::surfacePresets();
+    s.floorMat = verb::presetIndexByName("Parquet_floor");
+    s.ceilMat = verb::presetIndexByName("Plaster");
+    const int wall = verb::presetIndexByName(h.wall), back = verb::presetIndexByName(h.backWall);
+    const double x0 = -h.width / 2, x1 = h.width / 2, y0 = -h.audienceDepth, y1 = h.stageDepth;
+    s.walls = {verb::Wall{x0, y0, x1, y0, back}, verb::Wall{x1, y0, x1, y1, wall}, verb::Wall{x1, y1, x0, y1, wall}, verb::Wall{x0, y1, x0, y0, wall}};
+    auto plate = [&](double ax, double ay, double bx, double by, double z, const char* mat, bool ceiling) {
+        verb::Zone zn;
+        zn.mat = verb::presetIndexByName(mat);
+        zn.z = z;
+        zn.poly = {{ax, ay}, {bx, ay}, {bx, by}, {ax, by}};
+        (ceiling ? s.ceilZones : s.floorZones).push_back(zn);
+    };
+    detail::clutter(s, 0);
+    {   // the seated audience on the main floor
+        verb::Zone a;
+        a.mat = verb::presetIndexByName("Audience_seated");
+        a.poly = {{h.zoneX0, h.zoneY0}, {h.zoneX1, h.zoneY0}, {h.zoneX1, h.zoneY1}, {h.zoneX0, h.zoneY1}};
+        s.floorZones.push_back(a);
+    }
+    plate(x0, 0.0, x1, y1, h.stageH, "Parquet_floor", false);  // the stage
+    for (int r = 0; r < 3; ++r)                                // the risers, each one on top of the one before
+        if (h.riserY[r] > 0) plate(x0 + 1.0, h.riserY[r], x1 - 1.0, y1 - 0.2, h.stageH + h.riserStep * (r + 1), "Parquet_floor", false);
+    if (h.canopyZ > 0) plate(x0 + 1.5, 0.5, x1 - 1.5, y1 - 0.3, h.canopyZ, "Wood_panel", true);  // reflector over the orchestra
+    std::vector<SourceCfg> setup;
+    for (size_t i = 0; i < players.size(); ++i) {
+        const Player& pl = players[i];
+        const double floorZ = h.stageH + (pl.riser > 0 ? h.riserStep * pl.riser : 0.0);
+        verb::Transducer t;
+        t.name = pl.name;
+        t.pos = {pl.x, pl.y, floorZ + pl.up};
+        t.azimuthDeg = -90;  // towards the audience
+        t.pattern = 0.3;
+        s.sources.push_back(t);
+        SourceCfg c;
+        c.name = pl.name;
+        c.format = 0;
+        c.channels = 1;
+        c.firstIn = (int)i;
+        c.spread = 0.0;
+        c.pattern = 0.3;
+        setup.push_back(c);
+    }
+    for (int side = 0; side < 2; ++side) {
+        verb::Transducer r;
+        r.name = side ? "R" : "L";
+        r.pos = {h.lisX, h.lisY, h.lisZ};
+        r.azimuthDeg = side ? -55 : 55;
+        r.pattern = 0.5;
+        s.receivers.push_back(r);
+    }
+    s.hasListener = true;
+    s.listenerPos = {h.lisX, h.lisY, h.lisZ};
+    s.listenerYaw = 90;  // facing the orchestra
+    detail::listenerUp(s, 0.0, true);  // already facing up the plan; moves the room so that its corner is at 0, 0
+    verb::sanitizeScene(s);
+    verb::compactMaterials(s);
+    BuiltinRoom r;
+    r.name = h.name;
+    r.text = verb::serializeScene(s);
+    r.setup = setup;
+    r.micPattern = (int)verb::MicPattern::LayoutDefault;
+    return r;
+}
+
+// Seating of a symphony orchestra, as the audience sees it (left to right): first violins, second violins, violas, cellos with the
+// double basses behind them on the right; the woodwinds in the middle on the first riser, the brass behind them on the second,
+// the timpani and percussion at the back on the third.
+inline std::vector<Player> symphonyPlayers() {
+    return {
+        {"Violins I (strings)", -5.5, 2.4, 0, 1.35},
+        {"Violins II (strings)", -1.8, 2.9, 0, 1.35},
+        {"Violas (strings)", 2.0, 2.9, 0, 1.30},
+        {"Cellos (strings)", 5.6, 2.8, 0, 0.90},
+        {"Basses (strings)", 8.0, 5.3, 0, 1.20},
+        {"Harp", -8.2, 4.9, 0, 1.00},
+        {"Flutes (wood)", -2.4, 6.2, 1, 1.45},
+        {"Oboes (wood)", -0.8, 6.3, 1, 1.35},
+        {"Clarinets (wood)", 0.9, 6.3, 1, 1.25},
+        {"Bassoons (wood)", 2.6, 6.2, 1, 1.30},
+        {"Horns (brass)", -4.2, 8.6, 2, 1.20},
+        {"Trumpets (brass)", -0.9, 8.7, 2, 1.45},
+        {"Trombones (brass)", 2.6, 8.8, 2, 1.35},
+        {"Tuba (brass)", 5.3, 8.9, 2, 1.10},
+        {"Timpani (drums)", -3.6, 10.7, 3, 0.95},
+        {"Percussion", 3.0, 10.8, 3, 1.20},
+        {"Soloist", 0.9, 1.0, 0, 1.40},
+    };
+}
+
+// A chamber orchestra (about 25 players): smaller stage, one riser for the winds and brass, a keyboard in front for the continuo.
+inline std::vector<Player> chamberPlayers() {
+    return {
+        {"Violins I (strings)", -3.0, 1.9, 0, 1.35},
+        {"Violins II (strings)", -0.9, 2.3, 0, 1.35},
+        {"Violas (strings)", 1.2, 2.3, 0, 1.30},
+        {"Cellos (strings)", 3.0, 2.0, 0, 0.90},
+        {"Basses (strings)", 4.3, 3.7, 0, 1.20},
+        {"Flute (wood)", -1.8, 4.2, 1, 1.45},
+        {"Oboe (wood)", -0.6, 4.3, 1, 1.35},
+        {"Clarinet (wood)", 0.6, 4.3, 1, 1.25},
+        {"Bassoon (wood)", 1.8, 4.2, 1, 1.30},
+        {"Horns (brass)", -2.8, 5.4, 1, 1.20},
+        {"Trumpets (brass)", 1.4, 5.4, 1, 1.45},
+        {"Timpani (drums)", 3.5, 5.4, 1, 0.95},
+        {"Harpsichord / piano", -4.6, 1.0, 0, 1.15},
+        {"Soloist", 0.0, 0.9, 0, 1.40},
+    };
+}
+
+inline BuiltinRoom symphonyHall(bool conductor) {
+    HallSpec h;
+    h.name = conductor ? "Symphony hall - conductor's podium (orchestra on risers)" : "Symphony hall - audience, row 12 (orchestra on risers)";
+    h.width = 22.0; h.audienceDepth = 34.0; h.stageDepth = 12.0; h.height = 17.0;
+    h.wall = "Plywood_thin"; h.backWall = "Velvet_drapes";
+    h.stageH = 1.1; h.riserStep = 0.4;
+    h.riserY[0] = 5.2; h.riserY[1] = 7.6; h.riserY[2] = 9.9;
+    h.zoneX0 = -10.0; h.zoneX1 = 10.0; h.zoneY0 = -33.0; h.zoneY1 = -2.0;
+    h.canopyZ = 12.0;
+    h.length = 2.5;
+    if (conductor) { h.lisX = 0.0; h.lisY = 0.8; h.lisZ = h.stageH + 0.3 + 1.6; }  // the podium is 0.3 m high
+    else { h.lisX = 0.0; h.lisY = -14.0; h.lisZ = 1.15; }
+    return orchestraRoom(h, symphonyPlayers());
+}
+
+inline BuiltinRoom chamberHall() {
+    HallSpec h;
+    h.name = "Chamber hall - audience, row 6 (chamber orchestra)";
+    h.width = 13.0; h.audienceDepth = 15.0; h.stageDepth = 6.5; h.height = 9.0;
+    h.wall = "Wood_panel"; h.backWall = "Velvet_drapes";
+    h.stageH = 0.8; h.riserStep = 0.35;
+    h.riserY[0] = 3.6; h.riserY[1] = 0.0; h.riserY[2] = 0.0;
+    h.zoneX0 = -5.5; h.zoneX1 = 5.5; h.zoneY0 = -13.5; h.zoneY1 = -1.5;
+    h.canopyZ = 6.0;
+    h.length = 1.8;
+    h.lisX = 0.0; h.lisY = -6.5; h.lisZ = 1.15;
+    return orchestraRoom(h, chamberPlayers());
+}
+
 inline std::vector<BuiltinRoom> builtinRooms() {
     using namespace detail;
     std::vector<std::pair<std::string, verb::Scene>> v;
@@ -292,8 +463,10 @@ inline std::vector<BuiltinRoom> builtinRooms() {
         v.push_back({"Concert hall (audience zone)", s});
     }
     {
-        auto s = box(40.0, 16.0, 22.0, "Stone_marble", "Stone_marble", "Stone_marble", 5.0, 8.0, 1.6, 20.0, 8.0, 1.5);
-        s.length = 4.0;
+        // stone walls and a plaster vault, a marble floor with the nave full of pews: a decay of about 7-8 s (all polished marble gives 25 s+)
+        auto s = box(40.0, 16.0, 22.0, "Brick", "Stone_marble", "Plaster", 5.0, 8.0, 1.6, 20.0, 8.0, 1.5);
+        s.length = 6.0;
+        s.floorZones.push_back(rect(12.0, 4.5, 34.0, 13.0, "Audience_seated", s));
         v.push_back({"Cathedral (long tail)", s});
     }
     {
@@ -313,6 +486,9 @@ inline std::vector<BuiltinRoom> builtinRooms() {
     }
     out.push_back(carRoom(false));
     out.push_back(carRoom(true));
+    out.push_back(chamberHall());
+    out.push_back(symphonyHall(false));
+    out.push_back(symphonyHall(true));
     return out;
 }
 

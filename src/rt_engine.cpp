@@ -278,6 +278,7 @@ struct Engine::Impl {
         : sc(scene), cfg(c_), S((int)scene.sources.size()), R((int)scene.receivers.size()), sr(scene.sr),
           c(speedOfSound(scene.tempC)), fft(c_.tailBlock * 2) {
         if (cfg.erOrder < 1 || cfg.erOrder > 4) throw std::runtime_error("erOrder must be 1..4");
+        sc.length = effectiveTailSeconds(sc, cfg.erOrder);  // never shorter than the scene says, long enough that the tail is not cut
         if (cfg.tailBlock % cfg.ctrlInterval) throw std::runtime_error("tailBlock must be a multiple of ctrlInterval");
         maxWalls = cfg.erOrder <= 1 ? 128 : cfg.erOrder == 2 ? 64 : cfg.erOrder == 3 ? 24 : 12;
         if ((int)scene.walls.size() > maxWalls) throw std::runtime_error("too many walls for this reflection order (max " + std::to_string(maxWalls) + ")");
@@ -425,6 +426,7 @@ struct Engine::Impl {
             for (auto& b : r) b.assign(N, 0.0);
         addTailNoise(scn, h, scn.seed, buf);
         auto ir = combineBands(buf, sr);
+        fadeTailEnd(ir, N, sr);
         FFTf wf(2 * B);
         std::vector<cf> tmp(2 * B);
         Slot& sl = t.slot[slotIdx];
@@ -510,6 +512,7 @@ struct Engine::Impl {
             for (auto& b : r) b.assign(N, 0.0);
         addTailNoise(scn, avg, scn.seed, buf);
         auto ir = combineBands(buf, sr);
+        fadeTailEnd(ir, N, sr);
         FFTf wf(2 * B);
         std::vector<cf> tmp(2 * B);
         std::vector<int> wslot((size_t)R);
@@ -1133,6 +1136,7 @@ Engine::~Engine() = default;
 int Engine::numSources() const { return p_->S; }
 int Engine::numReceivers() const { return p_->R; }
 double Engine::sampleRate() const { return p_->sr; }
+double Engine::tailSeconds() const { return p_->sc.length; }
 void Engine::setSourcePosition(int s, double x, double y, double z) {
     p_->params[s * 4 + 0].store(x); p_->params[s * 4 + 1].store(y); p_->params[s * 4 + 2].store(z);
 }

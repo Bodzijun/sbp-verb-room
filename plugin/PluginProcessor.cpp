@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "InputOrder.h"
+#include "tail.hpp"
 #include "PluginEditor.h"
 
 namespace {
@@ -822,7 +823,7 @@ void VerbProcessor::run() {
             {
                 juce::SpinLock::ScopedLockType l(engineLock);
                 bundle.swap(nb);
-                tailSeconds = sc.length;
+                tailSeconds = bundle->engine->tailSeconds() + 0.25;  // the host keeps calling us until the tail has died away
                 updateBounds(sc);
                 ++loadSerial;
             }
@@ -942,7 +943,8 @@ void VerbProcessor::runExport(juce::File dir) {
         if (!dir.createDirectory()) throw std::runtime_error("cannot create " + dir.getFullPathName().toStdString());
         juce::String base = juce::File::createLegalFileName(juce::File(name).getFileNameWithoutExtension());
         if (base.isEmpty()) base = "room";
-        const size_t total = (size_t)std::ceil(sc.length * sr);
+        const double tailLen = verb::effectiveTailSeconds(sc, 1);
+        const size_t total = (size_t)std::ceil(tailLen * sr);
         juce::StringArray used;
         int written = 0;
         for (size_t p = 0; p < points.size(); ++p) {
@@ -959,6 +961,7 @@ void VerbProcessor::runExport(juce::File dir) {
             t.azimuthDeg = az;
             t.pattern = c.pattern;
             verb::Scene es = sc;
+            es.length = tailLen;
             es.sources = {t};
             es.receivers = recv;
             es.hasListener = true;

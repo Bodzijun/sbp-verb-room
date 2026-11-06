@@ -19,6 +19,14 @@ struct TailHist {
 // (lower orders are covered by the deterministic image-source part).
 TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed);
 
+// How long the late tail has to be so that nothing audible is cut off: the time (a quick trace of the room, mid bands) at
+// which the remaining energy has fallen 60 dB, plus a margin. The scene's own `length` is the minimum; at most 10 s.
+double effectiveTailSeconds(const Scene& sc, int erOrder);
+
+// Fades the last part of every channel of a tail IR to silence (a raised cosine), so that a tail that is still audible at the
+// end of its length ends smoothly instead of being cut.
+void fadeTailEnd(std::vector<std::vector<float>>& ir, size_t n, double sr);
+
 // Adds independent Gaussian noise shaped by the histogram to every receiver/band buffer.
 void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf);
 

@@ -42,6 +42,7 @@ public:
     int numSources() const;
     int numReceivers() const;
     double sampleRate() const;
+    double tailSeconds() const;  // length of the late tail the engine renders (at least the scene length, longer for a long decay)
 
     // Replaces walls, surface materials, floor/ceiling and height while the engine runs (sources, receivers and the
     // IR length are kept). Early paths follow within one control period; the late field is re-traced in the

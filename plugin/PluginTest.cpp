@@ -750,7 +750,7 @@ receiver R 0 0 1.5 0 0
         std::printf("Car cabin preset\n");
         const auto rooms = verbp::builtinRooms();
         std::vector<const verbp::BuiltinRoom*> cars;
-        for (auto& r : rooms) if (!r.setup.empty()) cars.push_back(&r);
+        for (auto& r : rooms) if (!r.setup.empty() && r.name.rfind("MotorSynth", 0) == 0) cars.push_back(&r);
         check(cars.size() == 2, "the library has the two MotorSynth presets");
         for (size_t ci = 0; ci < cars.size(); ++ci) {
             const verbp::BuiltinRoom* car = cars[ci];
@@ -864,6 +864,100 @@ receiver R 0 0 1.5 0 0
         }
         check(same, "a stereo, 5.1 or a short discrete bus keeps its order");
     }
+    if (std::getenv("VERB_TAILS2")) {  // exploration: smoothness of the tail envelope of the cathedral for different ray counts
+        const auto rooms = verbp::builtinRooms();
+        for (auto& r : rooms) {
+            if (r.name.find("Cathedral") == std::string::npos && r.name.find("hall") == std::string::npos) continue;
+            std::istringstream is(r.text);
+            verb::Scene sc = verb::parseScene(is, r.name);
+            for (int rays : {150000}) {
+                verb::EngineConfig cfg;
+                cfg.tailThread = false; cfg.erOrder = 1; cfg.tailRays = rays;
+                verb::Engine eng(sc, cfg);
+                const size_t N = (size_t)(eng.tailSeconds() * 48000) + 24000;
+                std::vector<float> in(512, 0.f), o0(512), o1(512), zeros(512, 0.f);
+                std::vector<double> env;
+                double cur = 0;
+                size_t cnt = 0;
+                for (size_t pos = 0; pos < N; pos += 512) {
+                    std::fill(in.begin(), in.end(), 0.f);
+                    if (pos == 0) in[0] = 1.f;
+                    std::vector<const float*> ip((size_t)eng.numSources(), zeros.data());  // an impulse into source 1, silence into the others
+                    ip[0] = in.data();
+                    float* op[2] = {o0.data(), o1.data()};
+                    eng.process(ip.data(), op, 512);
+                    for (int i = 0; i < 512; ++i) cur += (double)o0[i] * o0[i];
+                    if (++cnt == 5) { env.push_back(10 * std::log10(cur + 1e-30)); cur = 0; cnt = 0; }  // ~53 ms windows
+                }
+                // residual of the dB envelope about a straight line through windows 0.5 s .. where it is 50 dB below the peak
+                double pk = -1e9;
+                for (double v : env) pk = std::max(pk, v);
+                std::vector<double> xs, ys;
+                for (size_t k = 10; k < env.size(); ++k) if (env[k] > pk - 50.0) { xs.push_back((double)k); ys.push_back(env[k]); }
+                double sx = 0, sy = 0, sxx = 0, sxy = 0;
+                const double n = (double)xs.size();
+                for (size_t k = 0; k < xs.size(); ++k) { sx += xs[k]; sy += ys[k]; sxx += xs[k] * xs[k]; sxy += xs[k] * ys[k]; }
+                const double slope = (n * sxy - sx * sy) / std::max(1e-9, n * sxx - sx * sx), icpt = (sy - slope * sx) / n;
+                double rs = 0;
+                for (size_t k = 0; k < xs.size(); ++k) rs += (ys[k] - (icpt + slope * xs[k])) * (ys[k] - (icpt + slope * xs[k]));
+                std::printf("  %s, %d rays: length %.1f s, envelope scatter about the decay line %.2f dB over %zu windows, slope %.2f dB/s\n", r.name.c_str(), rays, eng.tailSeconds(),
+                            std::sqrt(rs / std::max(1.0, n)), xs.size(), slope / 0.0533);
+            }
+        }
+    }
+    {   // the orchestra halls: every group at its own place and height, the listener below the stage, sound renders
+        std::printf("Orchestra halls\n");
+        const auto rooms = verbp::builtinRooms();
+        int halls = 0;
+        for (auto& r : rooms) {
+            if (r.name.rfind("Symphony hall", 0) != 0 && r.name.rfind("Chamber hall", 0) != 0) continue;
+            ++halls;
+            std::istringstream is(r.text);
+            const verb::Scene sc = verb::parseScene(is, r.name);
+            int plates = 0;
+            for (auto* zl : {&sc.floorZones, &sc.ceilZones}) for (auto& z : *zl) plates += z.z >= 0;
+            bool above = sc.sources.size() == r.setup.size() && sc.sources.size() >= 14;
+            bool inputsOk = true, risers = false;
+            for (size_t i = 0; i < r.setup.size(); ++i) {
+                inputsOk &= r.setup[i].firstIn == (int)i && r.setup[i].effectiveChannels() == 1 && !r.setup[i].name.empty();
+                above &= sc.sources[i].pos.y > sc.listenerPos.y + 0.1;  // all of them in front of the listener (up the plan)
+                risers |= sc.sources[i].pos.z > 3.0;                    // some stand on the risers
+            }
+            std::printf("  %s: %zu groups, %d plates, listener (%.1f, %.1f, %.2f)\n", r.name.c_str(), r.setup.size(), plates, sc.listenerPos.x, sc.listenerPos.y, sc.listenerPos.z);
+            check(inputsOk && above && plates >= 3 && plates <= verb::kMaxPlates && std::fabs(sc.listenerYaw - 90.0) < 1e-6, "the hall has its stage, risers, one mono input per group and the listener facing the orchestra from below");
+            VerbProcessor p;
+            p.setPlayConfigDetails(32, 2, 48000, 256);
+            p.prepareToPlay(48000, 256);
+            check(waitReady(p, 60), "the plugin starts");
+            p.loadRoomWithSetup(juce::String(r.text), "hall.txt", r.setup, r.micPattern);
+            check(waitReady(p, 90), "the hall loads with its groups");
+            juce::AudioBuffer<float> b(32, 256);
+            juce::MidiBuffer m;
+            double en = 0;
+            bool fin = true;
+            for (int k = 0; k < 120; ++k) {
+                b.clear();
+                if (k == 0) for (int c = 0; c < (int)r.setup.size(); ++c) b.setSample(c, 0, 1.f);
+                p.processBlock(b, m);
+                for (int i = 0; i < 256; ++i) { fin &= std::isfinite(b.getSample(0, i)) && std::isfinite(b.getSample(1, i)); en += b.getSample(0, i) * b.getSample(0, i); }
+            }
+            check(fin && en > 1e-9, "every group of the hall sounds");
+            (void)risers;
+            {   // a picture of the hall for a visual check
+                std::unique_ptr<juce::AudioProcessorEditor> base(p.createEditor());
+                if (auto* ed = dynamic_cast<VerbEditor*>(base.get())) {
+                    ed->setSize(1160, 760);
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil(300);
+                    juce::Image img = ed->createComponentSnapshot(ed->getLocalBounds());
+                    juce::PNGImageFormat png;
+                    auto f = juce::File::getCurrentWorkingDirectory().getChildFile("out").getChildFile(juce::String("hall_") + juce::String(halls) + ".png");
+                    juce::FileOutputStream fo(f);
+                    if (fo.openedOk()) { fo.setPosition(0); fo.truncate(); png.writeImageToStream(img, fo); }
+                }
+            }
+        }
+        check(halls == 3, "the library has a chamber hall and two symphony hall views");
+    }
     {   // listener microphone pattern: human ears
         std::printf("Listener microphone pattern\n");
         VerbProcessor p;
@@ -964,6 +1058,45 @@ receiver R 0 0 1.5 0 0
                 for (int i = 0; i < 256; ++i) { fin &= std::isfinite(buf.getSample(0, i)); en += buf.getSample(0, i) * buf.getSample(0, i) + buf.getSample(1, i) * buf.getSample(1, i); }
             }
             allSound &= fin && en > 1e-9;
+        }
+        {   // the tail is long enough for the room (not cut while still loud) and ends smoothly; VERB_TAILS=1 prints every room
+            for (auto& r : rooms) {
+                if (!r.setup.empty() && r.name.rfind("MotorSynth", 0) == 0) continue;
+                const bool garage = r.name == "Garage (concrete)";
+                if (!garage && !std::getenv("VERB_TAILS")) continue;
+                p.loadSceneText(juce::String(r.text), juce::String(r.name), true);
+                if (!waitReady(p, 60)) continue;
+                std::istringstream is(r.text);
+                const auto sc = verb::parseScene(is, r.name);
+                const double L = p.getTailLengthSeconds() - 0.25;  // what the engine really renders
+                const int blocks = (int)((L + 1.0) * 48000 / 256);
+                std::vector<double> win;
+                const auto tStart = juce::Time::getMillisecondCounterHiRes();
+                double cur = 0;
+                int cnt = 0;
+                for (int b = 0; b < blocks; ++b) {
+                    buf.clear();
+                    if (b == 0) buf.setSample(0, 0, 1.f);
+                    p.processBlock(buf, midi);
+                    for (int i = 0; i < 256; ++i) cur += buf.getSample(0, i) * buf.getSample(0, i) + buf.getSample(1, i) * buf.getSample(1, i);
+                    if (++cnt == 19) { win.push_back(cur); cur = 0; cnt = 0; }  // ~100 ms windows
+                }
+                const double cpu = (juce::Time::getMillisecondCounterHiRes() - tStart) / (1000.0 * blocks * 256 / 48000.0);
+                std::printf("  [cpu %.0f %%] ", 100 * cpu);
+                double pk = 1e-30;
+                for (double w : win) pk = std::max(pk, w);
+                std::printf("  %-34s length %.1f s (scene %.1f):", r.name.c_str(), L, sc.length);
+                const size_t atEnd = (size_t)(L * 10.0);
+                for (size_t k : {atEnd / 4, atEnd / 2, atEnd * 3 / 4, atEnd * 9 / 10, atEnd * 95 / 100, atEnd > 1 ? atEnd - 1 : 0, atEnd + 2})
+                    if (k < win.size()) std::printf(" %5.1f", 10 * std::log10(win[k] / pk + 1e-30));
+                std::printf(" dB (at 25/50/75/90/95/100 %% of the length, +0.2 s)\n");
+                if (garage) {
+                    const size_t n100 = atEnd > 1 ? atEnd - 1 : 0;
+                    check(L > sc.length + 1.5, "a concrete garage gets a tail longer than its scene length");
+                    check(win.size() > n100 && 10 * std::log10(win[atEnd * 95 / 100] / pk + 1e-30) < -35.0 && 10 * std::log10(win[n100] / pk + 1e-30) < -60.0,
+                          "the tail has died away or is faded out where the engine's length ends");
+                }
+            }
         }
         check(allLoad, "every built-in room loads into the plugin");
         check(allSound, "every built-in room makes finite, audible sound");

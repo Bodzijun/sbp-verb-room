@@ -244,6 +244,7 @@ private:
     juce::TextButton randomizeBtn{"Randomize"};
     juce::ToggleButton showClutter{"Show clutter on the map"};
     juce::ToggleButton showMeters{"Show input channel meters (map, bottom)"};
+    juce::Label versionLabel;  // the running version and build time (Space tab)
     juce::ToggleButton diffToggle{"Edge diffraction (sound bends round wall ends)"};
     void refreshSpace();
     void editClutter(std::function<void(verb::ClutterCfg&)> fn);

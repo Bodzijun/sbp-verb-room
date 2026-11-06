@@ -31,6 +31,8 @@ listener move. Position and orientation of every source and of the listener are 
 - **Editor**: plan, front, side and 3D views; wall/zone/box-select tools; undo; a room library with 10 starter rooms and
   two MotorSynth car cabins; layers (show / lock / hide walls, floors, ceilings, plates); repeated click steps through
   surfaces that overlap; optional input channel meters (numbered as in the host).
+- **Tail length that fits the room**: the late tail is made as long as the room needs (up to 10 s) and fades out smoothly, so long decays are not cut off.
+- **Orchestra halls**: a chamber hall and a symphony hall (listener in the audience or on the conductor's podium) with the instrument groups at their real places and heights on stage risers; see `docs/Orchestra_presets.md`.
 - **IR export**: renders one 32-bit float WAV per engine point plus a text description of the room.
 
 ## Install (binary)

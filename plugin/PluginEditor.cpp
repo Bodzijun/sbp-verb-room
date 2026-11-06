@@ -430,7 +430,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     };
 
     // ---- space tab: air and clutter ----
-    for (auto* c : std::initializer_list<juce::Component*>{&seedSlider, &seedLabel, &airInfo, &clutterInfo, &randomizeBtn, &showClutter, &showMeters}) addAndMakeVisible(*c);
+    for (auto* c : std::initializer_list<juce::Component*>{&seedSlider, &seedLabel, &airInfo, &clutterInfo, &randomizeBtn, &showClutter, &showMeters, &versionLabel}) addAndMakeVisible(*c);
     setupRow(tempRow, "Temperature", -20, 45, 0.5, " C");
     setupRow(humRow, "Humidity", 5, 100, 1, " %");
     setupRow(cntRow, "Clutter objects", 0, 80, 1, "");
@@ -495,6 +495,16 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
             addAndMakeVisible(layerBtn[i]);
         }
         updateLayerButtons();
+    }
+    {
+      #ifdef JucePlugin_VersionString
+        const juce::String ver = JucePlugin_VersionString;
+      #else
+        const juce::String ver = "dev";
+      #endif
+        versionLabel.setText("Verb Room " + ver + ", built " + juce::String(__DATE__) + " " + juce::String(__TIME__), juce::dontSendNotification);
+        versionLabel.setColour(juce::Label::textColourId, skin::textDim);
+        versionLabel.setFont(juce::Font(juce::FontOptions(11.f)));
     }
     showMeters.setToggleState(proc.inputMetersEnabled(), juce::dontSendNotification);
     showMeters.onClick = [this] { proc.setInputMetersEnabled(showMeters.getToggleState()); repaint(); };
@@ -610,7 +620,7 @@ void VerbEditor::showTab(int t) {
         c->setVisible(s);
     for (auto* c : std::initializer_list<juce::Component*>{&tempRow.label, &tempRow.slider, &humRow.label, &humRow.slider, &cntRow.label, &cntRow.slider,
                                                            &minLenRow.label, &minLenRow.slider, &maxLenRow.label, &maxLenRow.slider, &tlMinRow.label, &tlMinRow.slider,
-                                                           &tlMaxRow.label, &tlMaxRow.slider, &hMinRow.label, &hMinRow.slider, &hMaxRow.label, &hMaxRow.slider, &seedSlider, &seedLabel, &airInfo, &clutterInfo, &randomizeBtn, &showClutter, &showMeters})
+                                                           &tlMaxRow.label, &tlMaxRow.slider, &hMinRow.label, &hMinRow.slider, &hMaxRow.label, &hMaxRow.slider, &seedSlider, &seedLabel, &airInfo, &clutterInfo, &randomizeBtn, &showClutter, &showMeters, &versionLabel})
         c->setVisible(sp);
 }
 
@@ -1650,6 +1660,7 @@ void VerbEditor::resized() {
         showMeters.setBounds(a.removeFromTop(24));
         a.removeFromTop(4);
         clutterInfo.setBounds(a.removeFromTop(70));
+        versionLabel.setBounds(a.removeFromTop(18));
     }
     // mix
     {

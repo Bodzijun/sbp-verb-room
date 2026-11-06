@@ -191,6 +191,48 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
     return out;
 }
 
+double effectiveTailSeconds(const Scene& sc, int erOrder) {
+    double len = sc.length;
+    if (!sc.sources.empty() && !sc.receivers.empty() && !sc.walls.empty()) {
+        Scene t = sc;
+        t.length = 10.0;  // the longest tail the engine will make
+        const std::vector<Transducer> rc{t.receivers[0]};
+        const TailHist h = traceTail(t, t.sources[0], rc, erOrder, 6000, t.seed);
+        double need = 0;
+        for (int b = 2; b <= 4; ++b) {  // 500 Hz .. 2 kHz
+            const auto& e = h.h[0][(size_t)b];
+            double total = 0;
+            for (double v : e) total += v;
+            if (total <= 0) continue;
+            double rem = total;
+            size_t k = 0, k5 = 0, k35 = 0;
+            for (; k < e.size(); ++k) {
+                rem -= e[k];
+                if (k5 == 0 && rem < 0.316 * total) k5 = k;     // -5 dB
+                if (k35 == 0 && rem < 3.16e-4 * total) k35 = k;  // -35 dB
+                if (rem < 1e-6 * total) break;  // 60 dB of the energy has passed
+            }
+            need = std::max(need, (double)k * h.binDur);
+            // a sparse trace can fall below the threshold too early: the slope between -5 and -35 dB gives the 60 dB time as well
+            if (k5 > 0 && k35 > k5) need = std::max(need, 1.05 * 2.0 * (double)(k35 - k5) * h.binDur);
+        }
+        len = std::max(len, need + 0.2);
+    }
+    return std::min(std::max(len, 0.2), 10.0);
+}
+
+void fadeTailEnd(std::vector<std::vector<float>>& ir, size_t n, double sr) {
+    const size_t fade = std::min(n / 2, (size_t)std::min(std::max(0.08 * (double)n, 0.04 * sr), 0.5 * sr));
+    if (fade < 2) return;
+    for (auto& ch : ir) {
+        const size_t m = std::min(n, ch.size());
+        for (size_t i = 0; i < fade && i < m; ++i) {
+            const double x = (double)i / (double)fade;  // 0 at the start of the fade, 1 at the end
+            ch[m - fade + i] *= (float)(0.5 * (1.0 + std::cos(kPi * x)));
+        }
+    }
+}
+
 void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf) {
     const int smoothK = 3;
     const double binSamples = hist.binDur * sc.sr;
