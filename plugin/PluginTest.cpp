@@ -1,6 +1,7 @@
 // Headless test of the plugin processor (no host): state, layout, automation, rendering, state round-trip.
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -8,6 +9,7 @@
 #include "InputOrder.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
+#include "../src/tail.hpp"
 
 static int fails = 0;
 static void check(bool ok, const char* what) {
@@ -864,6 +866,143 @@ receiver R 0 0 1.5 0 0
         }
         check(same, "a stereo, 5.1 or a short discrete bus keeps its order");
     }
+    if (std::getenv("VERB_RTTEST")) {  // exploration: a 0.35 s C5 burst in the concert hall, with and without the tail, 25 ms envelope
+        const auto rooms = verbp::builtinRooms();
+        for (auto& r : rooms) {
+            if (r.name.find("Concert hall") == std::string::npos) continue;
+            std::istringstream is(r.text);
+            verb::Scene sc = verb::parseScene(is, r.name);
+            std::printf("  room: listener (%.2f %.2f %.2f) yaw %.0f, source (%.2f %.2f %.2f)\n", sc.listenerPos.x, sc.listenerPos.y, sc.listenerPos.z, sc.listenerYaw,
+                        sc.sources[0].pos.x, sc.sources[0].pos.y, sc.sources[0].pos.z);
+            for (double tailDb : {-48.0, 0.0}) {
+                verb::EngineConfig cfg;
+                cfg.tailThread = false; cfg.erOrder = 1; cfg.tailRays = 150000;
+                verb::Engine eng(sc, cfg);
+                eng.setSourcePosition(0, 0.98, 19.93, 1.6);
+                eng.setEarlyLevel(-9.0);
+                eng.setTailLevel(tailDb);
+                const size_t N = 48000 * 3;
+                std::vector<float> in(512), o0(512), o1(512);
+                std::vector<double> env;
+                double cur = 0;
+                int cnt = 0;
+                for (size_t pos = 0; pos < N; pos += 512) {
+                    for (int i = 0; i < 512; ++i) {
+                        const double t = (double)(pos + (size_t)i) / 48000.0;
+                        in[(size_t)i] = (t >= 0.3 && t < 0.65) ? (float)(0.3 * std::sin(2 * verb::kPi * 1046.5 * t)) : 0.f;
+                    }
+                    const float* ip[1] = {in.data()};
+                    float* op[2] = {o0.data(), o1.data()};
+                    eng.process(ip, op, 512);
+                    for (int i = 0; i < 512; ++i) cur += 0.5 * ((double)o0[(size_t)i] * o0[(size_t)i] + (double)o1[(size_t)i] * o1[(size_t)i]);
+                    if (++cnt == 2) { env.push_back(10 * std::log10(cur / 1024 + 1e-18)); cur = 0; cnt = 0; }  // ~21 ms
+                }
+                {   // impulse response energy in 10 ms bins, 0 .. 1.2 s
+                    verb::Engine e2(sc, cfg);
+                    e2.setSourcePosition(0, 0.98, 19.93, 1.6);
+                    e2.setEarlyLevel(-9.0);
+                    e2.setTailLevel(tailDb);
+                    std::printf("  IR 10 ms bins, tail %+.0f dB:", tailDb);
+                    double acc = 0;
+                    std::vector<float> raw;
+                    for (size_t pos = 0; pos < 48000 * 3; pos += 512) {
+                        std::fill(in.begin(), in.end(), 0.f);
+                        if (pos == 0) in[0] = 1.f;
+                        const float* ip[1] = {in.data()};
+                        float* op[2] = {o0.data(), o1.data()};
+                        e2.process(ip, op, 512);
+                        for (int i = 0; i < 512; ++i) {
+                            raw.push_back(o0[(size_t)i]); raw.push_back(o1[(size_t)i]);
+                            acc += (double)o0[(size_t)i] * o0[(size_t)i] + (double)o1[(size_t)i] * o1[(size_t)i];
+                            if (((pos + (size_t)i + 1) % 480) == 0 && pos < 48000 * 6 / 5) { std::printf(" %.0f", 10 * std::log10(acc / 480 + 1e-18)); acc = 0; }
+                        }
+                    }
+                    if (const char* dp = std::getenv("VERB_RTDUMP"); dp && tailDb == 0.0) { juce::File(juce::String(dp)).replaceWithData(raw.data(), raw.size() * sizeof(float)); }
+                    std::printf("\n");
+                }
+                std::printf("  tail %+.0f dB, ER -9 dB; 0.1 s steps (dB):", tailDb);
+                for (size_t k = 0; k < env.size(); k += 5) std::printf(" %.0f", env[k]);
+                std::printf("\n");
+            }
+        }
+    }
+    if (std::getenv("VERB_RTHIST")) {  // exploration: the ray histogram of the concert hall, 100 ms steps
+        const auto rooms = verbp::builtinRooms();
+        for (auto& r : rooms) {
+            if (r.name.find("Concert hall") == std::string::npos) continue;
+            std::istringstream is(r.text);
+            verb::Scene sc = verb::parseScene(is, r.name);
+            sc.length = 6.0;
+            std::vector<verb::Transducer> rc{sc.receivers[0]};
+            for (int rays : {20000, 40000, 150000}) {
+                const auto t0 = std::chrono::steady_clock::now();
+                const auto h = verb::traceTail(sc, sc.sources[0], rc, 1, rays, sc.seed);
+                const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                std::printf("  rays %d: %.2f s; reliable end per band (ms):", rays, sec);
+                for (int bb = 0; bb < verb::NB; ++bb) std::printf(" %zu", h.reliableEnd[0][(size_t)bb]);
+                std::printf("\n    band4 dB per 100ms:");
+                for (size_t k = 0; k + 100 <= h.nBins; k += 100) { double a2 = 0; for (size_t j = 0; j < 100; ++j) a2 += h.h[0][4][k + j]; std::printf(" %.0f", 10 * std::log10(a2 / 100 + 1e-30)); }
+                std::printf("\n");
+            }
+        }
+    }
+    if (std::getenv("VERB_RTPLUG")) {  // exploration: the same note through the whole plugin in host-sized blocks, 20 ms envelope of the end of the tail
+        const auto rooms = verbp::builtinRooms();
+        for (auto& r : rooms) {
+            if (r.name.find("Concert hall") == std::string::npos) continue;
+            VerbProcessor p;
+            p.setPlayConfigDetails(1, 2, 48000, 512);
+            p.prepareToPlay(48000, 512);
+            waitReady(p, 60);
+            p.loadRoomWithSetup(juce::String(r.text), "hall.txt", r.setup, r.micPattern);
+            waitReady(p, 90);
+            std::printf("  plugin tail length reported %.2f s\n", p.getTailLengthSeconds());
+            juce::AudioBuffer<float> b(2, 512);
+            juce::MidiBuffer m;
+            const int total = 48000 * 7;
+            std::vector<double> L, R;
+            for (int pos = 0; pos < total; pos += 512) {
+                b.clear();
+                for (int i = 0; i < 512; ++i) {
+                    const double t = (double)(pos + i) / 48000.0;
+                    b.setSample(0, i, (t >= 0.02 && t < 0.62) ? (float)(0.3 * std::sin(2 * verb::kPi * 1046.5 * t)) : 0.f);
+                }
+                p.processBlock(b, m);
+                for (int i = 0; i < 512; ++i) { L.push_back(b.getSample(0, i)); R.push_back(b.getSample(1, i)); }
+            }
+            {   // the impulse response of the same plugin instance, 100 ms energy steps
+                juce::AudioBuffer<float> bi(2, 512);
+                std::vector<double> E;
+                std::vector<float> rawIr;
+                double acc = 0;
+                int cntn = 0;
+                for (int pos = 0; pos < 48000 * 7; pos += 512) {
+                    bi.clear();
+                    if (pos == 0) bi.setSample(0, 0, 1.f);
+                    p.processBlock(bi, m);
+                    for (int i = 0; i < 512; ++i) {
+                        rawIr.push_back(bi.getSample(0, i)); rawIr.push_back(bi.getSample(1, i));
+                        acc += (double)bi.getSample(0, i) * bi.getSample(0, i);
+                        if (++cntn == 4800) { E.push_back(10 * std::log10(acc / 4800 + 1e-20)); acc = 0; cntn = 0; }
+                    }
+                }
+                if (const char* dp = std::getenv("VERB_RTDUMP")) juce::File(juce::String(dp)).replaceWithData(rawIr.data(), rawIr.size() * sizeof(float));
+                std::printf("  IR ch0, 100 ms steps (dB):");
+                for (double v : E) std::printf(" %.0f", v);
+                std::printf("\n");
+            }
+            for (int c = 0; c < 2; ++c) {
+                std::printf("  ch %d, 40 ms steps from 1.0 s:", c);
+                const auto& v = c ? R : L;
+                for (size_t t0 = 48000; t0 + 960 < v.size(); t0 += 1920) {
+                    double a = 0;
+                    for (size_t i = 0; i < 960; ++i) a += v[t0 + i] * v[t0 + i];
+                    std::printf(" %.0f", 10 * std::log10(a / 960 + 1e-20));
+                }
+                std::printf("\n");
+            }
+        }
+    }
     if (std::getenv("VERB_TAILS2")) {  // exploration: smoothness of the tail envelope of the cathedral for different ray counts
         const auto rooms = verbp::builtinRooms();
         for (auto& r : rooms) {
@@ -900,6 +1039,14 @@ receiver R 0 0 1.5 0 0
                 const double slope = (n * sxy - sx * sy) / std::max(1e-9, n * sxx - sx * sx), icpt = (sy - slope * sx) / n;
                 double rs = 0;
                 for (size_t k = 0; k < xs.size(); ++k) rs += (ys[k] - (icpt + slope * xs[k])) * (ys[k] - (icpt + slope * xs[k]));
+                {   // where the envelope bulges above the decay line (late "echoes")
+                    std::printf("   bulges above the line:");
+                    for (size_t k = 0; k < xs.size(); ++k) {
+                        const double res = ys[k] - (icpt + slope * xs[k]);
+                        if (res > 3.0) std::printf(" t=%.2fs(+%.1f)", xs[k] * 0.0533, res);
+                    }
+                    std::printf("\n");
+                }
                 std::printf("  %s, %d rays: length %.1f s, envelope scatter about the decay line %.2f dB over %zu windows, slope %.2f dB/s\n", r.name.c_str(), rays, eng.tailSeconds(),
                             std::sqrt(rs / std::max(1.0, n)), xs.size(), slope / 0.0533);
             }
@@ -940,6 +1087,23 @@ receiver R 0 0 1.5 0 0
                 if (k == 0) for (int c = 0; c < (int)r.setup.size(); ++c) b.setSample(c, 0, 1.f);
                 p.processBlock(b, m);
                 for (int i = 0; i < 256; ++i) { fin &= std::isfinite(b.getSample(0, i)) && std::isfinite(b.getSample(1, i)); en += b.getSample(0, i) * b.getSample(0, i); }
+            }
+            if (std::getenv("VERB_DUMPHALL") && r.name.rfind("Symphony hall - audience", 0) == 0) {  // exploration: the impulse response of the first group, as raw float32 stereo
+                p.loadRoomWithSetup(juce::String(r.text), "hall.txt", r.setup, r.micPattern);
+                waitReady(p, 90);
+                juce::AudioBuffer<float> bb(32, 256);
+                std::vector<float> raw;
+                const int nb = (int)(6.0 * 48000 / 256);
+                for (int k = 0; k < 40; ++k) { bb.clear(); p.processBlock(bb, m); }
+                for (int k = 0; k < nb; ++k) {
+                    bb.clear();
+                    if (k == 0) bb.setSample(0, 0, 1.f);
+                    p.processBlock(bb, m);
+                    for (int i = 0; i < 256; ++i) { raw.push_back(bb.getSample(0, i)); raw.push_back(bb.getSample(1, i)); }
+                }
+                juce::File f(juce::String(std::getenv("VERB_DUMPHALL")));
+                f.replaceWithData(raw.data(), raw.size() * sizeof(float));
+                std::printf("  hall impulse response written: %zu frames, tail length %.2f s\n", raw.size() / 2, p.getTailLengthSeconds());
             }
             check(fin && en > 1e-9, "every group of the hall sounds");
             (void)risers;

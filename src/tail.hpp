@@ -13,6 +13,8 @@ struct TailHist {
     size_t nBins = 0;
     double binDur = 0.001;
     std::vector<std::array<std::vector<double>, NB>> h;  // [receiver][band][bin]: IR energy per bin
+    std::vector<std::array<std::vector<double>, NB>> h2;  // [receiver][band][bin]: sum of the squared contributions (to tell a few strong rays from many)
+    std::vector<std::array<size_t, NB>> reliableEnd;      // [receiver][band]: first bin from which the histogram rests on too few rays and is replaced by the extrapolated decay
 };
 
 // Traces `rays` rays from `src`; only energy that has reflected more than `order` times is recorded
@@ -20,7 +22,7 @@ struct TailHist {
 TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed);
 
 // How long the late tail has to be so that nothing audible is cut off: the time (a quick trace of the room, mid bands) at
-// which the remaining energy has fallen 60 dB, plus a margin. The scene's own `length` is the minimum; at most 10 s.
+// which the remaining energy has fallen 70 dB (a held tone is still audible at 60), plus a margin. The scene's own `length` is the minimum; at most 10 s.
 double effectiveTailSeconds(const Scene& sc, int erOrder);
 
 // Fades the last part of every channel of a tail IR to silence (a raised cosine), so that a tail that is still audible at the

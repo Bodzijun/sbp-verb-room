@@ -50,6 +50,11 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
     out.h.resize(R);
     for (auto& r : out.h)
         for (auto& b : r) b.assign(out.nBins, 0.0);
+    out.h2.resize(R);
+    for (auto& r : out.h2)
+        for (auto& b : r) b.assign(out.nBins, 0.0);
+    out.reliableEnd.resize(R);
+    for (auto& r : out.reliableEnd) r.fill(out.nBins);
 
     std::mt19937_64 rng((uint64_t)seed * 7919ull + 13);
     std::uniform_real_distribution<double> U(0, 1);
@@ -121,7 +126,9 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
                     dirGainBands(rcv[r], d * -1.0, grb);
                     for (int b = 0; b < NB; ++b) {
                         const double gr = grb[b];
-                        out.h[r][b][bin] += 4 * kPi * e[b] * std::pow(10.0, -airDb[b] * mid / 10.0) * (s2 - s1) / Vs * gr * gr;
+                        const double contrib = 4 * kPi * e[b] * std::pow(10.0, -airDb[b] * mid / 10.0) * (s2 - s1) / Vs * gr * gr;
+                        out.h[r][b][bin] += contrib;
+                        out.h2[r][b][bin] += contrib * contrib;
                     }
                 }
             }
@@ -174,6 +181,29 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
             p = p + n * 1e-6;
         }
     }
+    // Where a band runs out of rays: the energy of the late field of a band can rest on a handful of rays (the ones that kept clear of
+    // the absorbing audience, say), and then the histogram has steps and holes (heard as a decay in stages, and as a tail that stops
+    // while it is still audible). The number of rays that really carry it is (sum w)^2 / sum w^2 over a 100 ms window; where it falls
+    // below 30 the decay measured just before is continued as a straight line in dB.
+    const double essMin = 40.0;
+    for (int r = 0; r < R; ++r)
+        for (int b = 0; b < NB; ++b) {
+            const auto& e = out.h[(size_t)r][(size_t)b];
+            const auto& e2 = out.h2[(size_t)r][(size_t)b];
+            const size_t n = out.nBins, win = 100;
+            std::vector<double> p1(n + 1, 0.0), p2(n + 1, 0.0);
+            for (size_t k = 0; k < n; ++k) { p1[k + 1] = p1[k] + e[k]; p2[k + 1] = p2[k] + e2[k]; }
+            size_t peak = 0;
+            double pv = -1;
+            for (size_t k = 0; k + win < n; ++k) if (p1[k + win] - p1[k] > pv) { pv = p1[k + win] - p1[k]; peak = k; }
+            size_t kEnd = n;
+            for (size_t k = peak + win; k + win < n; ++k) {
+                const double s1 = p1[k + win] - p1[k], s2 = p2[k + win] - p2[k];
+                const double ess = s2 > 0 ? s1 * s1 / s2 : 0.0;
+                if (ess < essMin) { kEnd = k + win / 2; break; }
+            }
+            out.reliableEnd[(size_t)r][(size_t)b] = kEnd;
+        }
     // Smooth the histogram in time, the more the later it is (moving average, mean-preserving): the late tail is a
     // slowly decaying diffuse field, only its envelope matters, and ray statistics get sparser with time and with
     // absorbing surfaces (a few strong survivors dominate). Early bins stay nearly untouched.
@@ -188,6 +218,42 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
                 band[k] = (prefix[hi] - prefix[lo]) / (double)(hi - lo);
             }
         }
+    for (int r = 0; r < R; ++r) {
+        const size_t blk = 50;  // fit over up to 600 ms before the end of the reliable part (at least 300 ms)
+        for (int bi = 0; bi < NB; ++bi) {
+            const size_t kEnd = out.reliableEnd[(size_t)r][(size_t)bi];
+            if (kEnd >= out.nBins || kEnd < 100 + 6 * blk) continue;
+            const size_t nBlk = std::min<size_t>(12, (kEnd - 100) / blk);
+            auto& band = out.h[(size_t)r][(size_t)bi];
+            std::vector<double> xs, ys;
+            double peakE = 0;
+            for (double v : band) peakE = std::max(peakE, v);
+            for (size_t j = 0; j < nBlk; ++j) {
+                const size_t a = kEnd - blk * (nBlk - j);
+                double m = 0;
+                for (size_t k = a; k < a + blk; ++k) m += band[k];
+                m /= (double)blk;
+                if (m <= 1e-14 * peakE || m <= 0) continue;
+                xs.push_back((double)(a + blk / 2));
+                ys.push_back(10.0 * std::log10(m));
+            }
+            if (xs.size() < 4) continue;  // this band has already died away
+            double sx = 0, sy = 0, sxx = 0, sxy = 0;
+            const double n = (double)xs.size();
+            for (size_t i = 0; i < xs.size(); ++i) { sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i]; }
+            double slope = (n * sxy - sx * sy) / std::max(1e-9, n * sxx - sx * sx);  // dB per bin
+            const double icpt = (sy - slope * sx) / n;
+            slope = std::min(slope, -0.003);  // at least 3 dB per second: the field never grows
+            const double kref = (double)kEnd;
+            const double lvl = icpt + (n * sxy - sx * sy) / std::max(1e-9, n * sxx - sx * sx) * kref;  // the fitted line at the end
+            const double l0 = std::min(lvl, ys.back() + 3.0);  // do not start above what was measured
+            for (size_t k = kEnd - 100; k < out.nBins; ++k) {  // a 200 ms cross-fade from the measured histogram to the fitted line
+                const double fit = std::pow(10.0, (l0 + slope * ((double)k - kref)) / 10.0);
+                const double w = std::min(1.0, ((double)k - (kref - 100.0)) / 200.0);
+                band[k] = (1.0 - w) * band[k] + w * fit;
+            }
+        }
+    }
     return out;
 }
 
@@ -210,11 +276,12 @@ double effectiveTailSeconds(const Scene& sc, int erOrder) {
                 rem -= e[k];
                 if (k5 == 0 && rem < 0.316 * total) k5 = k;     // -5 dB
                 if (k35 == 0 && rem < 3.16e-4 * total) k35 = k;  // -35 dB
-                if (rem < 1e-6 * total) break;  // 60 dB of the energy has passed
+                if (rem < 1e-7 * total) break;  // 70 dB of the energy has passed
             }
             need = std::max(need, (double)k * h.binDur);
-            // a sparse trace can fall below the threshold too early: the slope between -5 and -35 dB gives the 60 dB time as well
-            if (k5 > 0 && k35 > k5) need = std::max(need, 1.05 * 2.0 * (double)(k35 - k5) * h.binDur);
+            // a sparse trace can fall below the threshold too early: the slope between -5 and -35 dB gives the 70 dB time as well.
+            // (At 60 dB a held pure tone was still audible when the tail ended: it stopped at about -55 dB under the peak.)
+            if (k5 > 0 && k35 > k5) need = std::max(need, 1.05 * (70.0 / 30.0) * (double)(k35 - k5) * h.binDur);
         }
         len = std::max(len, need + 0.2);
     }
@@ -222,7 +289,7 @@ double effectiveTailSeconds(const Scene& sc, int erOrder) {
 }
 
 void fadeTailEnd(std::vector<std::vector<float>>& ir, size_t n, double sr) {
-    const size_t fade = std::min(n / 2, (size_t)std::min(std::max(0.08 * (double)n, 0.04 * sr), 0.5 * sr));
+    const size_t fade = std::min(n / 2, (size_t)std::min(std::max(0.12 * (double)n, 0.04 * sr), 0.6 * sr));
     if (fade < 2) return;
     for (auto& ch : ir) {
         const size_t m = std::min(n, ch.size());

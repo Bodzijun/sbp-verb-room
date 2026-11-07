@@ -12,6 +12,7 @@
 #include "layouts.hpp"
 #include "render.hpp"
 #include "rt_engine.hpp"
+#include "tail.hpp"
 
 using namespace verb;
 
@@ -40,6 +41,7 @@ static void testCompare(const std::string& dir) {
     std::printf("Test 1: static scene, engine vs offline renderer\n");
     Scene sc = loadScene(dir + "/l_room_5_1.txt");
     sc.order = 2; sc.rays = 20000; sc.length = 2.0;
+    sc.length = effectiveTailSeconds(sc, 2);  // the engine lengthens a tail that would be cut while still audible: the reference has to be as long
     Wav off = renderIR(sc, 0, false);
     EngineConfig cfg;
     cfg.erOrder = 2; cfg.tailRays = 20000; cfg.tailThread = false;
@@ -64,7 +66,7 @@ static void testCompare(const std::string& dir) {
         pos += n;
         taps = eng.activeTaps();
     }
-    std::printf("  active taps: %d\n", taps);
+    std::printf("  active taps: %d, scene length %.2f s, engine tail %.2f s, reference %zu samples\n", taps, sc.length, eng.tailSeconds(), N);
     bool allOk = true, allFinite = true;
     const size_t a = (size_t)(0.25 * sc.sr), b = (size_t)(1.9 * sc.sr);
     for (int r = 0; r < R; ++r) {
@@ -1090,8 +1092,8 @@ static void testTailSmoothness() {
     room.sources[0].pos = {1.5, 2.2, 1.4};
     room.receivers[0].pos = room.receivers[1].pos = {4.2, 2.2, 1.2};
     room.listenerPos = room.receivers[0].pos;
-    const double roomScatter = tailRoughnessDb(room, 20000), hallScatter = tailRoughnessDb(hall, 20000), hallMany = tailRoughnessDb(hall, 400000);
-    std::printf("  scatter of the 10 ms tail energies: small room %.2f dB, hall %.2f dB (20000 rays), hall %.2f dB (400000 rays)\n", roomScatter, hallScatter, hallMany);
+    const double roomScatter = tailRoughnessDb(room, 20000), hallScatter = tailRoughnessDb(hall, 40000), hallMany = tailRoughnessDb(hall, 400000);
+    std::printf("  scatter of the 10 ms tail energies: small room %.2f dB, hall %.2f dB (40000 rays), hall %.2f dB (400000 rays)\n", roomScatter, hallScatter, hallMany);
     // ~0.8 dB is what any Gaussian noise tail shows in 10 ms windows (a 125 Hz band has about one independent sample in
     // them): the hall must be at that floor, not above it (it was 7 dB above before the receiver sphere / smoothing fix)
     check(hallScatter < 1.25 * roomScatter + 0.1, "the hall's tail envelope is as smooth as the small room's with the plugin's ray budget");
@@ -1522,6 +1524,14 @@ int main(int argc, char** argv) {
     }
     if (std::getenv("VERB_EXPLORE")) {
         try { exploreComb(dir); } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 1; }
+        return 0;
+    }
+    if (std::getenv("VERB_ONLY1")) {
+        try { testCompare(dir); } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 1; }
+        return 0;
+    }
+    if (std::getenv("VERB_ONLY21")) {  // exploration: just the tail smoothness test
+        try { testTailSmoothness(); } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 1; }
         return 0;
     }
     try {

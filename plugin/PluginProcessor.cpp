@@ -780,7 +780,7 @@ void VerbProcessor::run() {
             ec.tailBlock = 512;
             ec.tailThread = true;
             ec.sharedTail = points.size() > 4;  // many sources: one late-field convolver per output channel
-            ec.tailRays = ec.sharedTail ? 48000 : 20000;
+            ec.tailRays = ec.sharedTail ? 48000 : 40000;
             ec.maxEarlyDelaySec = ec.sharedTail ? 0.4 : 0.75;
 
             auto nb = std::make_unique<Bundle>();
