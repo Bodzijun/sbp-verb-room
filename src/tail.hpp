@@ -19,7 +19,27 @@ struct TailHist {
 
 // Traces `rays` rays from `src`; only energy that has reflected more than `order` times is recorded
 // (lower orders are covered by the deterministic image-source part).
-TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed);
+// finalize=false retains raw first/second moments so independent traces can be
+// pooled before estimating confidence and decay. Finalize a histogram only once.
+TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize = true);
+void finalizeTail(TailHist& hist);
+
+// Immutable UI snapshot, generated off the audio thread from the modeled tail.
+struct TailDiagnostics {
+    static constexpr size_t points = 256;
+    std::array<std::array<float, points>, NB> decayDb{};
+    std::array<double, NB> rt60{}, reliableSeconds{};
+    std::array<bool, NB> active{};
+    double duration = 0;
+    int raysUsed = 0, rayLimit = 0, baseRays = 0;
+    bool shared = false, adaptive = false, needsMoreRays = false;
+};
+
+// Is a significant part of the energy already relying on a sparse population?
+bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized);
+TailHist traceTailAdaptive(const Scene&, const Transducer&, const std::vector<Transducer>&,
+                           int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore = nullptr);
+TailDiagnostics analyzeTail(const TailHist& finalized);
 
 // How long the late tail has to be so that nothing audible is cut off: the time (a quick trace of the room, mid bands) at
 // which the remaining energy has fallen 70 dB (a held tone is still audible at 60), plus a margin. The scene's own `length` is the minimum; at most 10 s.

@@ -30,6 +30,11 @@ struct OutputCfg {
     double radius = 0.1;  // distance of the virtual microphones from the listener centre, metres
     int micPattern = 0;   // verb::MicPattern: 0 = the layout's own (cardioid per channel), omni ... figure-8, human ears
 };
+
+struct TailSettings {
+    int rays = 48000;
+    bool adaptive = true;
+};
 }  // namespace verbp
 
 class VerbProcessor : public juce::AudioProcessor, private juce::Thread {
@@ -99,6 +104,9 @@ public:
     std::vector<verbp::PointMap> getLivePoints() const;  // engine points of the running setup (grouped by source)
     verbp::OutputCfg getOutputCfg() const;
     void setOutputCfg(const verbp::OutputCfg&);
+    verbp::TailSettings getTailSettings() const;
+    void setTailSettings(verbp::TailSettings);
+    std::shared_ptr<const verb::TailDiagnostics> getTailDiagnostics() const;
     int hostOutputChannels() const { return hostOutCh.load(); }
     int hostInputChannels() const { return hostInCh.load(); }
     // Peak of every input channel over the last host block (0-based channel, 0..1+): the editor shows them so the
@@ -151,7 +159,7 @@ private:
     void rebuild();
 
     std::unique_ptr<Bundle> bundle;
-    juce::SpinLock engineLock;
+    mutable juce::SpinLock engineLock;
     juce::CriticalSection reqLock;
     Request req;
     bool hasReq = false;
@@ -164,6 +172,7 @@ private:
     juce::String sceneText, sceneName;
     std::vector<verbp::SourceCfg> srcCfg;
     verbp::OutputCfg outCfg;
+    verbp::TailSettings tailSettings;
     std::atomic<int> state{0};
     std::atomic<bool> inputMetersOn{true};
     std::array<std::atomic<float>, verbp::kMaxInputChannels> inPeaks{};
@@ -173,6 +182,7 @@ private:
     std::atomic<double> bounds[4] = {};
     std::atomic<bool> hasBounds{false}, ceilOpen{false};
     std::atomic<bool> geomDirty{false};
+    std::atomic<bool> qualityDirty{false};
     std::atomic<uint64_t> sceneSerial{0}, loadSerial{0}, reqSerial{0};
     std::atomic<bool> defaultsOwed{false};
     uint64_t serialSeen = ~0ull;
@@ -184,6 +194,8 @@ private:
     std::atomic<float>* dopplerParam = nullptr;
     std::atomic<float>* mixParam = nullptr;
     std::atomic<float>* tailParam = nullptr;
+    std::atomic<float>* soloParam[3] = {};
+    juce::SmoothedValue<float> lfeSoloGain{1.f};
     float prevWet = 1.f, prevDry = 0.f;  // audio thread: the dry/wet gains at the end of the last block
     std::atomic<float> srcPattern[verbp::kMaxSources] = {};  // live directivity of every source (audio thread reads)
     void syncPatterns();

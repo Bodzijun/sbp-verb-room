@@ -59,6 +59,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
     add("doppler", "Doppler Strength", 0.f, 2.f, 1.f, "");  // 1 = physical, 0 = no pitch shift
     add("tail", "Tail Level", -48.f, 12.f, 0.f, "dB");      // the late reverberant field alone (direct and early reflections unchanged)
     add("mix", "Dry/Wet Mix", 0.f, 100.f, 100.f, "%");      // 100 = only the room (the usual setup: dry stays on the source tracks)
+    p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloDirect", 1}, "Solo Direct", false));
+    p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloEarly", 1}, "Solo Early", false));
+    p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloTail", 1}, "Solo Tail", false));
     return {p.begin(), p.end()};
 }
 
@@ -78,6 +81,9 @@ VerbProcessor::VerbProcessor()
     dopplerParam = apvts.getRawParameterValue("doppler");
     mixParam = apvts.getRawParameterValue("mix");
     tailParam = apvts.getRawParameterValue("tail");
+    soloParam[0] = apvts.getRawParameterValue("soloDirect");
+    soloParam[1] = apvts.getRawParameterValue("soloEarly");
+    soloParam[2] = apvts.getRawParameterValue("soloTail");
     sceneText = kDefaultScene;
     sceneName = "Built-in demo room";
     startThread();
@@ -110,6 +116,7 @@ void VerbProcessor::prepareToPlay(double sr, int block) {
         }
     }
     serialSeen = ~0ull;
+    lfeSoloGain.reset(sr, 0.01);
     bool needRebuild;
     {
         juce::SpinLock::ScopedLockType l(engineLock);
@@ -158,8 +165,12 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     e.setEarlyDiffusion(diffusionParam->load(std::memory_order_relaxed));
     e.setDopplerStrength(dopplerParam->load(std::memory_order_relaxed));
     e.setTailLevel(tailParam->load(std::memory_order_relaxed));
+    int solo = 0;
+    for (int k = 0; k < 3; ++k) if (soloParam[k]->load(std::memory_order_relaxed) >= 0.5f) solo |= 1 << k;
+    e.setSoloMask(solo);
+    lfeSoloGain.setTargetValue(solo == 0 || (solo & 1) ? 1.f : 0.f);
     // dry/wet: equal-power crossfade between the input channels passed straight through (channel k -> output k) and the room
-    const float mixP = std::min(std::max(mixParam->load(std::memory_order_relaxed) * 0.01f, 0.f), 1.f);
+    const float mixP = solo ? 1.f : std::min(std::max(mixParam->load(std::memory_order_relaxed) * 0.01f, 0.f), 1.f);
     float wetG1 = std::sin(mixP * 1.5707963f), dryG1 = std::cos(mixP * 1.5707963f);
     if (mixP >= 0.9999f) { wetG1 = 1.f; dryG1 = 0.f; }
     if (mixP <= 0.0001f) { wetG1 = 0.f; dryG1 = 1.f; }
@@ -296,7 +307,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 if (ch == b.lfeOut) {
                     for (int i = 0; i < m; ++i) {
                         const float dry = hasDry ? (std::fabs(d[i]) < 1e6f ? d[i] : 0.f) * dryAt(i) : 0.f;
-                        d[i] = (s[i] + b.lfe[(size_t)i]) * outGain * wetAt(i) + dry;
+                        d[i] = (s[i] + lfeSoloGain.getNextValue() * b.lfe[(size_t)i]) * outGain * wetAt(i) + dry;
                     }
                 } else {
                     for (int i = 0; i < m; ++i) {
@@ -330,6 +341,8 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
         st.setProperty("sceneText", sceneText, nullptr);
         st.setProperty("sceneName", sceneName, nullptr);
         st.setProperty("inputMeters", inputMetersOn.load(), nullptr);
+        st.setProperty("tailRays", tailSettings.rays, nullptr);
+        st.setProperty("adaptiveTail", tailSettings.adaptive, nullptr);
         st.removeChild(st.getChildWithName("Sources"), nullptr);
         st.removeChild(st.getChildWithName("Output"), nullptr);
         juce::ValueTree srcs("Sources");
@@ -400,9 +413,17 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
         outCfg.layout = std::min(std::max(outCfg.layout, -1), (int)verb::Layout::Ring);  // an unknown layout id must not reach the engine
         outCfg.radius = verb::clampTo(out.isValid() ? (double)out.getProperty("radius", 0.1) : 0.1, 0.0, 1.0, 0.1);
         outCfg.micPattern = std::min(std::max(out.isValid() ? (int)out.getProperty("micPattern", 0) : 0, 0), (int)verb::MicPattern::HumanEars);
+        tailSettings.rays = std::min(std::max((int)st.getProperty("tailRays", 48000), 8000), 384000);
+        tailSettings.adaptive = (bool)st.getProperty("adaptiveTail", false);
         syncPatterns();
     }
     inputMetersOn = (bool)st.getProperty("inputMeters", true);
+    for (const char* id : {"soloDirect", "soloEarly", "soloTail"}) {
+        if (!st.getChildWithProperty("id", id).isValid()) {
+            juce::ValueTree p("PARAM"); p.setProperty("id", id, nullptr); p.setProperty("value", 0.f, nullptr);
+            st.appendChild(p, nullptr);
+        }
+    }
     apvts.replaceState(st);
     const juce::String text = st.getProperty("sceneText").toString(), name = st.getProperty("sceneName").toString();
     if (text.isNotEmpty()) loadSceneText(text, name, false);
@@ -677,11 +698,38 @@ void VerbProcessor::setOutputCfg(const verbp::OutputCfg& o) {
     rebuild();
 }
 
+verbp::TailSettings VerbProcessor::getTailSettings() const {
+    juce::ScopedLock l(dispLock);
+    return tailSettings;
+}
+
+void VerbProcessor::setTailSettings(verbp::TailSettings settings) {
+    settings.rays = std::min(std::max(settings.rays, 8000), 384000);
+    {
+        juce::ScopedLock l(dispLock);
+        if (settings.rays == tailSettings.rays && settings.adaptive == tailSettings.adaptive) return;
+        tailSettings = settings;
+        ++sceneSerial;
+    }
+    qualityDirty = true;
+    wake.signal();
+    updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
+}
+
+std::shared_ptr<const verb::TailDiagnostics> VerbProcessor::getTailDiagnostics() const {
+    juce::SpinLock::ScopedLockType lock(engineLock);
+    return bundle ? bundle->engine->tailDiagnostics() : nullptr;
+}
+
 // ---------- loader thread ----------
 void VerbProcessor::run() {
     while (!threadShouldExit()) {
         wake.wait(250);
         if (threadShouldExit()) break;
+        if (qualityDirty.exchange(false) && bundle) {
+            const auto settings = getTailSettings();
+            bundle->engine->setTailQuality(settings.rays, settings.adaptive);
+        }
         if (geomDirty.exchange(false)) {  // only this thread replaces the bundle, so reading it here is safe
             verb::Scene s;
             {
@@ -780,7 +828,9 @@ void VerbProcessor::run() {
             ec.tailBlock = 512;
             ec.tailThread = true;
             ec.sharedTail = points.size() > 4;  // many sources: one late-field convolver per output channel
-            ec.tailRays = ec.sharedTail ? 48000 : 40000;
+            const auto quality = getTailSettings();
+            ec.tailRays = quality.rays;
+            ec.adaptiveTail = quality.adaptive;
             ec.maxEarlyDelaySec = ec.sharedTail ? 0.4 : 0.75;
 
             auto nb = std::make_unique<Bundle>();
@@ -919,12 +969,14 @@ void VerbProcessor::runExport(juce::File dir) {
         verb::Scene sc;
         std::vector<verbp::SourceCfg> cfg;
         verbp::OutputCfg ocfg;
+        verbp::TailSettings exportQuality;
         juce::String name;
         {
             juce::ScopedLock l(dispLock);
             sc = display;
             cfg = srcCfg;
             ocfg = outCfg;
+            exportQuality = tailSettings;
             name = sceneName;
         }
         const auto points = verbp::buildPoints(cfg);
@@ -971,9 +1023,10 @@ void VerbProcessor::runExport(juce::File dir) {
             ec.erOrder = 1;  // the same early field the plugin plays
             ec.ctrlInterval = 128;
             ec.tailBlock = 512;
-            ec.tailThread = false;  // the tail is computed once, synchronously: a much denser trace than the live refresh
+            ec.tailThread = false;  // one static tail at the selected quality for each exported point
             ec.sharedTail = false;
-            ec.tailRays = 150000;
+            ec.tailRays = exportQuality.rays;
+            ec.adaptiveTail = exportQuality.adaptive;
             verb::Engine eng(es, ec);
             eng.setListener(center.x, center.y, center.z, lyaw);
             const int R = eng.numReceivers();

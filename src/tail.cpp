@@ -1,6 +1,7 @@
 #include "tail.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <random>
 
@@ -37,7 +38,7 @@ std::vector<std::vector<double>> makeBandFilters(double sr, int taps) {
 
 }  // namespace
 
-TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed) {
+TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize) {
     const Geo g(sc);
     const int R = (int)rcv.size();
     const double c = speedOfSound(sc.tempC);
@@ -181,11 +182,22 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
             p = p + n * 1e-6;
         }
     }
+    if (finalize) finalizeTail(out);
+    return out;
+}
+
+void finalizeTail(TailHist& out) {
+    const int R = (int)out.h.size();
+    const auto measured = out.h;
+    out.reliableEnd.resize(R);
+    for (auto& r : out.reliableEnd) r.fill(out.nBins);
     // Where a band runs out of rays: the energy of the late field of a band can rest on a handful of rays (the ones that kept clear of
     // the absorbing audience, say), and then the histogram has steps and holes (heard as a decay in stages, and as a tail that stops
     // while it is still audible). The number of rays that really carry it is (sum w)^2 / sum w^2 over a 100 ms window; where it falls
-    // below 30 the decay measured just before is continued as a straight line in dB.
-    const double essMin = 40.0;
+    // below 10 the decay measured just before is continued as a straight line in dB.
+    // A cutoff of 40 often selected the room's initial build-up instead of its
+    // decay, producing position-dependent, nearly flat extrapolated tails.
+    const double essMin = 10.0;
     for (int r = 0; r < R; ++r)
         for (int b = 0; b < NB; ++b) {
             const auto& e = out.h[(size_t)r][(size_t)b];
@@ -219,19 +231,28 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
             }
         }
     for (int r = 0; r < R; ++r) {
-        const size_t blk = 50;  // fit over up to 600 ms before the end of the reliable part (at least 300 ms)
         for (int bi = 0; bi < NB; ++bi) {
             const size_t kEnd = out.reliableEnd[(size_t)r][(size_t)bi];
-            if (kEnd >= out.nBins || kEnd < 100 + 6 * blk) continue;
-            const size_t nBlk = std::min<size_t>(12, (kEnd - 100) / blk);
+            if (kEnd >= out.nBins || kEnd <= 150) continue;
+            // kEnd is the CENTRE of the first unreliable 100 ms window.
+            // Fit only before that window, using the unsmoothed measurements:
+            // including its holes (or smoothing them backwards) biases the slope.
+            const size_t fitEnd = kEnd - 50;
+            // A short, absorbing room can run out of effective rays at 150-300 ms.
+            // Requiring 300 ms of fit data used to leave its entire sparse tail
+            // untouched. Adapt the averaging interval to the available decay,
+            // retaining the longer 50 ms windows for well-sampled, long tails.
+            const size_t blk = std::min<size_t>(50, (fitEnd - 100) / 6);
+            if (blk == 0) continue;
+            const size_t nBlk = std::min<size_t>(12, (fitEnd - 100) / blk);
             auto& band = out.h[(size_t)r][(size_t)bi];
             std::vector<double> xs, ys;
             double peakE = 0;
             for (double v : band) peakE = std::max(peakE, v);
             for (size_t j = 0; j < nBlk; ++j) {
-                const size_t a = kEnd - blk * (nBlk - j);
+                const size_t a = fitEnd - blk * (nBlk - j);
                 double m = 0;
-                for (size_t k = a; k < a + blk; ++k) m += band[k];
+                for (size_t k = a; k < a + blk; ++k) m += measured[(size_t)r][(size_t)bi][k];
                 m /= (double)blk;
                 if (m <= 1e-14 * peakE || m <= 0) continue;
                 xs.push_back((double)(a + blk / 2));
@@ -247,11 +268,94 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
             const double kref = (double)kEnd;
             const double lvl = icpt + (n * sxy - sx * sy) / std::max(1e-9, n * sxx - sx * sx) * kref;  // the fitted line at the end
             const double l0 = std::min(lvl, ys.back() + 3.0);  // do not start above what was measured
+            // Extrapolation redistributes uncertain late energy; it must not
+            // manufacture more of it. In an open/absorbing room a short, noisy
+            // fit can be nearly flat, otherwise adding seconds of audible sound
+            // where the trace contains almost none. Budget only the replaced
+            // portion, leaving the measured onset and crossfade continuous.
+            double measuredEnergy = 0, fittedEnergy = 0;
+            for (size_t k = kEnd - 100; k < out.nBins; ++k) {
+                const double w = std::min(1.0, ((double)k - (kref - 100.0)) / 200.0);
+                measuredEnergy += w * band[k];
+                fittedEnergy += w * std::pow(10.0, (l0 + slope * ((double)k - kref)) / 10.0);
+            }
+            const double fitScale = fittedEnergy > 0 ? std::min(1.0, measuredEnergy / fittedEnergy) : 0;
             for (size_t k = kEnd - 100; k < out.nBins; ++k) {  // a 200 ms cross-fade from the measured histogram to the fitted line
-                const double fit = std::pow(10.0, (l0 + slope * ((double)k - kref)) / 10.0);
+                const double fit = fitScale * std::pow(10.0, (l0 + slope * ((double)k - kref)) / 10.0);
                 const double w = std::min(1.0, ((double)k - (kref - 100.0)) / 200.0);
                 band[k] = (1.0 - w) * band[k] + w * fit;
             }
+        }
+    }
+}
+
+bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized) {
+    double largest = 0;
+    for (const auto& r : raw.h) for (const auto& band : r) {
+        double e = 0; for (double v : band) e += v;
+        largest = std::max(largest, e);
+    }
+    if (largest <= 0) return false;
+    for (size_t r = 0; r < raw.h.size(); ++r)
+        for (int b = 0; b < NB; ++b) {
+            const size_t end = finalized.reliableEnd[r][b];
+            if (end >= raw.nBins) continue;
+            double total = 0, remaining = 0;
+            for (size_t k = 0; k < raw.nBins; ++k) {
+                total += raw.h[r][b][k];
+                if (k >= end) remaining += raw.h[r][b][k];
+            }
+            if (total > largest * 1e-5 && remaining > total * 0.005) return true;
+        }
+    return false;
+}
+
+TailHist traceTailAdaptive(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rc,
+                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore) {
+    raysUsed = std::max(0, baseRays);
+    maxRays = std::max(raysUsed, maxRays);
+    for (;;) {
+        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false);
+        auto h = raw;
+        finalizeTail(h);
+        const bool sparse = tailNeedsMoreRays(raw, h);
+        if (needsMore) *needsMore = sparse;
+        if (raysUsed == 0 || raysUsed >= maxRays || !sparse) return h;
+        raysUsed = (int)std::min<int64_t>(maxRays, 2ll * raysUsed);
+    }
+}
+
+TailDiagnostics analyzeTail(const TailHist& h) {
+    TailDiagnostics out;
+    out.duration = h.nBins * h.binDur;
+    out.rt60.fill(-1);
+    for (int b = 0; b < NB; ++b) {
+        std::vector<double> energy(h.nBins + 1, 0.0);
+        double reliable = out.duration;
+        for (size_t r = 0; r < h.h.size(); ++r) {
+            double sum = 0;
+            for (size_t k = 0; k < h.nBins; ++k) { energy[k] += h.h[r][b][k]; sum += h.h[r][b][k]; }
+            if (sum > 0 && r < h.reliableEnd.size() && h.reliableEnd[r][b] < h.nBins)
+                reliable = std::min(reliable, std::max(0.0, h.reliableEnd[r][b] * h.binDur - 0.1));
+        }
+        for (size_t k = h.nBins; k-- > 0;) energy[k] += energy[k + 1];
+        out.active[b] = energy[0] > 0;
+        out.reliableSeconds[b] = reliable;
+        auto dbAt = [&](size_t k) { return energy[0] > 0 ? std::max(-100.0, 10 * std::log10(std::max(energy[k] / energy[0], 1e-10))) : -100.0; };
+        for (size_t i = 0; i < TailDiagnostics::points; ++i)
+            out.decayDb[b][i] = (float)dbAt(i * h.nBins / (TailDiagnostics::points - 1));
+        // T20: fit -5..-25 dB of the backward-integrated energy, then extrapolate to -60 dB.
+        double sx = 0, sy = 0, sxx = 0, sxy = 0; size_t count = 0;
+        for (size_t k = 0; k < h.nBins && out.active[b]; ++k) {
+            const double db = dbAt(k), t = k * h.binDur;
+            if (db < -25) break;
+            if (db > -5) continue;
+            sx += t; sy += db; sxx += t * t; sxy += t * db; ++count;
+        }
+        const double denom = count * sxx - sx * sx;
+        if (count >= 4 && denom > 1e-12) {
+            const double slope = (count * sxy - sx * sy) / denom;
+            if (slope < -1e-6) out.rt60[b] = -60.0 / slope;
         }
     }
     return out;
@@ -263,7 +367,10 @@ double effectiveTailSeconds(const Scene& sc, int erOrder) {
         Scene t = sc;
         t.length = 10.0;  // the longest tail the engine will make
         const std::vector<Transducer> rc{t.receivers[0]};
-        const TailHist h = traceTail(t, t.sources[0], rc, erOrder, 6000, t.seed);
+        // A 6000-ray probe often loses confidence during the initial build-up in
+        // absorbing halls, making a tiny slope error inflate the allocation to
+        // several seconds. Use the same order of ray budget as the live tail.
+        const TailHist h = traceTail(t, t.sources[0], rc, erOrder, 48000, t.seed);
         double need = 0;
         for (int b = 2; b <= 4; ++b) {  // 500 Hz .. 2 kHz
             const auto& e = h.h[0][(size_t)b];

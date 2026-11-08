@@ -1,5 +1,7 @@
 # Verb Room
 
+Version 0.1.5: selectable/adaptive ray budgets, seven-band decay diagnostics with estimated RT60, and combinable Direct/Early/Tail Solo. Quality updates crossfade the tail without resetting audio history. See [the guide (Ukrainian)](docs/Quality_decay_solo_0.1.5_uk.md). Includes the [0.1.4 tail fixes](docs/Tail_fix_0.1.4_uk.md).
+
 A physically based room reverb for **REAPER and other VST3 hosts** (Windows x64), built for scenes where
 sources and the listener *move*: cars, fly-bys, games-style sound design, virtual rooms with many sources.
 
@@ -27,7 +29,9 @@ listener move. Position and orientation of every source and of the listener are 
 - **Listener**: output layouts Mono, Stereo (ORTF / XY), LCR, Quad, 5.1, 7.1, 7.1.4 and a ring of N channels;
   microphone patterns (omni … figure-8) and a **human-ears** pattern with head shadow (mic radius = ear spacing).
 - **Mix controls**: Dry/Wet (equal power), output gain, early-reflection level, diffusion, Doppler strength,
-  **tail level**.
+  **tail level**, and automatable, combinable **Direct / Early / Tail Solo** with smooth switching.
+- **Tail quality**: Preview / Mix / Render profiles, manual ray budgets and bounded adaptive refinement, updated in the background without restarting the engine.
+- **Decay tab**: seven octave-band energy-decay curves, estimated RT60 from T20, and an indication of extrapolated regions. Individual curves can be hidden for comparison.
 - **Editor**: plan, front, side and 3D views; wall/zone/box-select tools; undo; a room library with 10 starter rooms and
   two MotorSynth car cabins; layers (show / lock / hide walls, floors, ceilings, plates); repeated click steps through
   surfaces that overlap; optional input channel meters (numbered as in the host).
@@ -64,6 +68,8 @@ Tests (each prints `all ... passed`; the paths depend on the CMake generator):
 
 ```
 build\Release\rt_test.exe scenes                                  # engine: reflections, tail, diffraction, zones, plates...
+build\Release\tail_regression.exe                                # sparse tails, orchestra presets, rates, block boundaries
+build\Release\quality_test.exe                                   # RT60, adaptive budgets, Solo summation and ramps
 build\plugin\VerbPluginTest_artefacts\Release\VerbPluginTest.exe  # plug-in, editor, state, car presets, channel order
 build\plugin\VerbPluginStress_artefacts\Release\VerbPluginStress.exe
 ```

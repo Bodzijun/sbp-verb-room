@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "scene.hpp"
+#include "tail.hpp"
 
 namespace verb {
 
@@ -17,6 +18,7 @@ struct EngineConfig {
     int ctrlInterval = 128;   // path solve / glide period, samples
     int tailBlock = 512;      // convolver block (multiple of ctrlInterval)
     int tailRays = 20000;     // rays per tail refresh
+    bool adaptiveTail = false; // refine sparse traces off-thread, up to 4x tailRays
     int tailRefreshMs = 300;  // minimum time between tail refreshes of one source
     bool tailThread = true;   // false: tail is computed once at construction only
     // Many sources: instead of one late-field convolver per source (memory and CPU grow with sources x outputs),
@@ -60,6 +62,11 @@ public:
     void setEarlyLevel(double dB);
     void setSourcePattern(int s, double p);  // directivity 0 omni .. 0.5 cardioid .. 1 figure-8, live
     void setTailLevel(double dB);  // level of the late field (the reverberant tail) alone, -60..+12 dB, live
+    // 0 = all components; bits 1 direct, 2 early, 4 tail. Changes ramp over 10 ms.
+    void setSoloMask(int mask);
+    // Retraces and crossfades the tail on its worker without resetting audio history.
+    // With tailThread=false, later quality requests are not applied.
+    void setTailQuality(int baseRays, bool adaptive);
     void setDopplerStrength(double k);  // 0 = none, 1 = physical, up to 2 = exaggerated; live
     // 0..1: smears every early reflection (not the direct sound) in time with energy-preserving all-pass
     // diffusers, like rough real surfaces do. Turns the regular comb ("flanger/phaser") of mirror-like
@@ -75,6 +82,8 @@ public:
     // Diagnostics (audio thread safe).
     int activeTaps() const;
     int tailRefreshCount() const;
+    // Message/control threads only. Immutable snapshot; never called by process().
+    std::shared_ptr<const TailDiagnostics> tailDiagnostics() const;
 
 private:
     struct Impl;

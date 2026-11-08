@@ -369,7 +369,7 @@ static void testThreadedFuzz() {
     while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 25.0) {
         ++ops;
         const int ns = (int)p.getSources().size();
-        switch (rnd(13)) {
+        switch (rnd(15)) {
             case 0: {  // a random parameter
                 const int o = rnd(ns + 1);
                 const int obj = o == ns ? verbp::kListener : o;
@@ -429,6 +429,15 @@ static void testThreadedFuzz() {
             case 12:
                 if (rnd(12) == 0 && !demo.empty()) p.loadSceneText(juce::String(demo), "fuzz", rnd(2) == 0);
                 break;
+            case 13:
+                if (rnd(8) == 0) p.setTailSettings({rnd(2) ? 12000 : 48000, rnd(2) == 0});
+                (void)p.getTailDiagnostics();
+                break;
+            case 14: {
+                const char* ids[] = {"soloDirect", "soloEarly", "soloTail"};
+                p.apvts.getParameter(ids[rnd(3)])->setValueNotifyingHost(rnd(2) ? 1.f : 0.f);
+                break;
+            }
         }
         juce::MessageManager::getInstance()->runDispatchLoopUntil(rnd(30));
     }

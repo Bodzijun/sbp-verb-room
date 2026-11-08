@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(verb VERSION 0.1.3 LANGUAGES C CXX)
+project(verb VERSION 0.1.5 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -28,6 +28,15 @@ target_link_libraries(verb PRIVATE verbcore)
 
 add_executable(rt_test src/rt_test.cpp)
 target_link_libraries(rt_test PRIVATE verbcore)
+
+add_executable(tail_regression src/tail_regression.cpp)
+target_link_libraries(tail_regression PRIVATE verbcore)
+enable_testing()
+add_test(NAME tail_regression COMMAND tail_regression)
+add_executable(quality_test src/quality_test.cpp)
+target_link_libraries(quality_test PRIVATE verbcore)
+add_test(NAME quality_test COMMAND quality_test)
+set_tests_properties(quality_test PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 # JUCE plugin (needs MSVC on Windows): cmake -DVERB_BUILD_PLUGIN=ON
 option(VERB_BUILD_PLUGIN "Build the JUCE VST3 plugin" OFF)

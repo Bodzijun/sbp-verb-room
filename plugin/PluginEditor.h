@@ -9,6 +9,7 @@
 #include "PluginLookAndFeel.h"
 #include "PluginProcessor.h"
 #include "RoomLibrary.h"
+#include "TailDecayView.h"
 
 // Room editor. Canvas: drag sources/listener; Move tool: drag wall endpoints (shared corners move together) or
 // whole segments; Add-wall tool: drag out a new segment (snaps to corners and a 10 cm grid, Alt = free);
@@ -68,7 +69,7 @@ public:
     double testViewPsi() const { return viewPsi; }
     int testPickCount(double wx, double wy) { const auto sc = proc.getDisplayScene(); return (int)pickCandidates(sc, view.toScreen(wx, wy)).size(); }  // surfaces under a world point
     void testSetLayer(int layer, int mode) { layerMode[layer] = mode; updateLayerButtons(); }
-    void showPage(int tabIndex, int object) {                            // tab 0 Objects, 1 Surfaces, 2 Mix; object < 0 keeps the selection
+    void showPage(int tabIndex, int object) {                            // 0 Objects, 1 Surfaces, 2 Mix, 3 Space, 4 Decay
         if (object >= 0) selectObject(object);
         showTab(tabIndex);
         resized();
@@ -144,7 +145,7 @@ private:
     void setParam(const juce::String& id, double v);
 
     VerbLookAndFeel laf;  // first member: destroyed after every component that uses it
-    std::vector<std::pair<juce::Rectangle<int>, juce::String>> headers[4];  // section headers per tab, drawn in paint()
+    std::vector<std::pair<juce::Rectangle<int>, juce::String>> headers[5];  // section headers per tab, drawn in paint()
     VerbProcessor& proc;
     // header
     juce::TextButton loadButton{"Load scene..."};  // (not shown: the room box has "Load from file...")
@@ -161,6 +162,16 @@ private:
     void loadRoomText(const juce::String& text, const juce::String& name);
     juce::Label statusLabel;
     juce::TextButton tabObjects{"Objects"}, tabSurfaces{"Surfaces"}, tabMix{"Mix"}, tabSpace{"Space"};
+    juce::TextButton tabDecay{"Decay"};
+    TailDecayView decayView;
+    juce::ComboBox qualityBox;
+    juce::Label qualityLabel, qualityInfo;
+    Row rayRow;
+    juce::ToggleButton adaptiveTail{"Adaptive rays (up to 4x base)"};
+    void refreshTailSettings();
+    juce::ToggleButton soloDirect{"Direct"}, soloEarly{"Early"}, soloTail{"Tail"};
+    juce::Label soloLabel;
+    std::unique_ptr<juce::ButtonParameterAttachment> soloAttachments[3];
     // canvas toolbar
     IconButton toolMove{IconButton::Icon::Move}, toolBox{IconButton::Icon::Box}, toolAdd{IconButton::Icon::Wall}, toolFloorZone{IconButton::Icon::FloorZone},
         toolCeilZone{IconButton::Icon::CeilZone}, toolDelete{IconButton::Icon::Delete}, toolUndo{IconButton::Icon::Undo}, toolClear{IconButton::Icon::Clear};

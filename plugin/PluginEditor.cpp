@@ -79,13 +79,13 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     saveRoomBtn.onClick = [this] { saveRoomDialog(); };
     exportBtn.onClick = [this] { exportDialog(); };
     refreshRoomBox();
-    for (auto* b : {&tabObjects, &tabSurfaces, &tabMix, &tabSpace}) b->getProperties().set("style", "tab");
+    for (auto* b : {&tabObjects, &tabSurfaces, &tabMix, &tabSpace, &tabDecay}) b->getProperties().set("style", "tab");
     saveRoomBtn.getProperties().set("style", "ghost");
     exportBtn.getProperties().set("style", "primary");
     addAndMakeVisible(statusLabel);
     statusLabel.setJustificationType(juce::Justification::topLeft);
     statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-    for (auto* b : {&tabObjects, &tabSurfaces, &tabMix, &tabSpace}) {
+    for (auto* b : {&tabObjects, &tabSurfaces, &tabMix, &tabSpace, &tabDecay}) {
         addAndMakeVisible(*b);
         b->setClickingTogglesState(true);
         b->setRadioGroupId(201);
@@ -93,6 +93,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     tabObjects.onClick = [this] { showTab(0); };
     tabSurfaces.onClick = [this] { showTab(1); };
     tabMix.onClick = [this] { showTab(2); };
+    tabDecay.onClick = [this] { showTab(4); };
     tabSpace.onClick = [this] { showTab(3); };
 
     // ---- canvas toolbar ----
@@ -511,6 +512,37 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     showMic.onClick = [this] { repaint(); };
     addAndMakeVisible(showMic);
 
+    // ---- tail quality and diagnostics ----
+    addAndMakeVisible(decayView);
+    for (auto* c : std::initializer_list<juce::Component*>{&qualityBox, &qualityLabel, &qualityInfo, &adaptiveTail}) addAndMakeVisible(*c);
+    setupRow(rayRow, "Base rays", 8000, 384000, 1000, "");
+    qualityLabel.setText("Tail quality", juce::dontSendNotification);
+    qualityBox.addItem("Preview (12k)", 1); qualityBox.addItem("Mix (48k)", 2);
+    qualityBox.addItem("Render (192k)", 3); qualityBox.addItem("Custom", 4);
+    qualityBox.onChange = [this] {
+        if (updatingUI || qualityBox.getSelectedId() == 4) return;
+        auto settings = proc.getTailSettings();
+        const int budgets[] = {12000, 48000, 192000};
+        settings.rays = budgets[qualityBox.getSelectedId() - 1];
+        proc.setTailSettings(settings); refreshTailSettings();
+    };
+    auto commitRays = [this] {
+        if (updatingUI) return;
+        auto settings = proc.getTailSettings(); settings.rays = (int)rayRow.slider.getValue();
+        proc.setTailSettings(settings); refreshTailSettings();
+    };
+    rayRow.slider.onDragEnd = commitRays;
+    rayRow.slider.onValueChange = [this, commitRays] { if (!rayRow.slider.isMouseButtonDown()) commitRays(); };
+    rayRow.slider.setTooltip("Base ray budget: shared across sources for a shared tail; per source otherwise and during IR export. Minimum 1500 rays per source in shared mode. Higher values take longer to load.");
+    adaptiveTail.setTooltip("Increase the budget only when significant tail energy has too few effective ray contributions, up to four times the base. All tracing runs in the background.");
+    adaptiveTail.onClick = [this] {
+        auto settings = proc.getTailSettings(); settings.adaptive = adaptiveTail.getToggleState(); proc.setTailSettings(settings);
+    };
+    qualityInfo.setJustificationType(juce::Justification::topLeft);
+    qualityInfo.setColour(juce::Label::textColourId, skin::textDim);
+    qualityInfo.setFont(juce::Font(juce::FontOptions(12.f)));
+    refreshTailSettings();
+
     // ---- mix tab ----
     for (auto* c : std::initializer_list<juce::Component*>{&gainSlider, &earlySlider, &diffSlider, &dopplerSlider, &mixSlider, &tailSlider, &gainLabel, &earlyLabel, &diffLabel,
                                                            &dopplerLabel, &mixLabel, &tailLabel, &layoutBox, &layoutLabel, &micBox, &micLabel, &outInfoLabel})
@@ -537,6 +569,15 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     gainAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("gain"), gainSlider);
     earlyAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("early"), earlySlider);
     diffAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("diffusion"), diffSlider);
+    soloLabel.setText("Solo components (dry signal excluded)", juce::dontSendNotification);
+    addAndMakeVisible(soloLabel);
+    juce::ToggleButton* soloButtons[] = {&soloDirect, &soloEarly, &soloTail};
+    const char* soloIds[] = {"soloDirect", "soloEarly", "soloTail"};
+    for (int k = 0; k < 3; ++k) {
+        addAndMakeVisible(*soloButtons[k]);
+        soloButtons[k]->setTooltip("Audition this component at its current level. Combine solos to hear their sum. With no solos the normal dry/wet mix returns.");
+        soloAttachments[k] = std::make_unique<juce::ButtonParameterAttachment>(*proc.apvts.getParameter(soloIds[k]), *soloButtons[k]);
+    }
     setupRow(radiusRow, "Mic radius", 0, 1, 0.0025, " m");
     layoutLabel.setText("Output layout (virtual microphone array)", juce::dontSendNotification);
     outInfoLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
@@ -601,6 +642,11 @@ void VerbEditor::showTab(int t) {
     tabSurfaces.setToggleState(t == 1, juce::dontSendNotification);
     tabMix.setToggleState(t == 2, juce::dontSendNotification);
     tabSpace.setToggleState(t == 3, juce::dontSendNotification);
+    tabDecay.setToggleState(t == 4, juce::dontSendNotification);
+    decayView.setVisible(t == 4);
+    for (auto* c : std::initializer_list<juce::Component*>{&qualityBox, &qualityLabel, &qualityInfo, &rayRow.label, &rayRow.slider, &adaptiveTail}) c->setVisible(t == 4);
+    for (auto* c : std::initializer_list<juce::Component*>{&toolMove, &toolBox, &toolAdd, &toolFloorZone, &toolCeilZone, &toolDelete, &toolUndo, &toolClear, &viewTop, &viewFront, &viewSide, &viewIso, &autoViewBtn}) c->setVisible(t != 4);
+    for (auto* c : std::initializer_list<juce::Component*>{&soloLabel, &soloDirect, &soloEarly, &soloTail}) c->setVisible(t == 2);
     const bool s = t == 1, m = t == 2, sp = t == 3;
     updateObjectsVisibility();
     for (auto* c : std::initializer_list<juce::Component*>{&surfTitle, &selFloor, &selCeiling, &presetBox, &presetLabel, &heightRow.label, &heightRow.slider})
@@ -1096,6 +1142,10 @@ void VerbEditor::timerCallback() {
         refreshOutputs();
         refreshSpace();
     }
+    if (tab == 4) {
+        decayView.setData(proc.getTailDiagnostics());
+        refreshTailSettings();
+    }
     syncSliders();  // follow host automation
     repaint();
 }
@@ -1164,7 +1214,7 @@ void VerbEditor::paint(juce::Graphics& g) {
     g.fillRect(toolStrip.withTop(0).withBottom(getHeight()).toFloat());
     {   // section headers: a small spaced caption and a hairline after it
         const juce::Font hf = juce::Font(juce::FontOptions(10.5f, juce::Font::bold)).withExtraKerningFactor(0.14f);
-        for (auto& h : headers[std::min(std::max(tab, 0), 3)]) {
+        for (auto& h : headers[std::min(std::max(tab, 0), 4)]) {
             const juce::String t = h.second == "@SEL" ? selLabel.getText().toUpperCase() : h.second;
             juce::GlyphArrangement ga;
             ga.addLineOfText(hf, t, 0.f, 0.f);
@@ -1179,6 +1229,7 @@ void VerbEditor::paint(juce::Graphics& g) {
     }
     g.setColour(kGrid);
     g.fillRect(canvas.toFloat());
+    if (tab == 4) return;
     double home[4];
     verb::Scene sc = proc.getDisplayScene(home);
     double lis[4];
@@ -1494,14 +1545,16 @@ void VerbEditor::resized() {
     panel.removeFromTop(2);
     {
         auto row = panel.removeFromTop(28);
-        const int w = row.getWidth() / 4;
+        const int w = row.getWidth() / 5;
         tabObjects.setBounds(row.removeFromLeft(w));
         tabSurfaces.setBounds(row.removeFromLeft(w));
         tabMix.setBounds(row.removeFromLeft(w));
-        tabSpace.setBounds(row);
+        tabSpace.setBounds(row.removeFromLeft(w));
+        tabDecay.setBounds(row);
     }
     panel.removeFromTop(8);
 
+    decayView.setBounds(canvas);
     // objects: source list + setup, then the position sliders
     {
         auto a = panel;
@@ -1670,9 +1723,45 @@ void VerbEditor::resized() {
             pr->setBounds(a.removeFromTop(16));
             juce::Slider* s = pr == &mixLabel ? &mixSlider : pr == &gainLabel ? &gainSlider : pr == &tailLabel ? &tailSlider : pr == &earlyLabel ? &earlySlider : pr == &diffLabel ? &diffSlider : &dopplerSlider;
             s->setBounds(a.removeFromTop(24));
-            a.removeFromTop(10);
+            a.removeFromTop(6);
         }
+        soloLabel.setBounds(a.removeFromTop(20));
+        auto soloRow = a.removeFromTop(28);
+        soloDirect.setBounds(soloRow.removeFromLeft(100));
+        soloEarly.setBounds(soloRow.removeFromLeft(100));
+        soloTail.setBounds(soloRow);
     }
+    {
+        auto a = panel;
+        header(4, a, "TAIL QUALITY", 2);
+        qualityLabel.setBounds(a.removeFromTop(18));
+        qualityBox.setBounds(a.removeFromTop(28)); a.removeFromTop(12);
+        rayRow.label.setBounds(a.removeFromTop(18));
+        rayRow.slider.setBounds(a.removeFromTop(28)); a.removeFromTop(8);
+        adaptiveTail.setBounds(a.removeFromTop(26)); a.removeFromTop(12);
+        qualityInfo.setBounds(a.removeFromTop(190));
+    }
+}
+
+void VerbEditor::refreshTailSettings() {
+    const auto settings = proc.getTailSettings();
+    const bool old = updatingUI; updatingUI = true;
+    if (!rayRow.slider.isMouseButtonDown()) rayRow.slider.setValue(settings.rays, juce::dontSendNotification);
+    adaptiveTail.setToggleState(settings.adaptive, juce::dontSendNotification);
+    const int id = settings.rays == 12000 ? 1 : settings.rays == 48000 ? 2 : settings.rays == 192000 ? 3 : 4;
+    qualityBox.setSelectedId(id, juce::dontSendNotification);
+    updatingUI = old;
+    auto d = proc.getTailDiagnostics();
+    juce::String info = "Higher quality takes longer to load. The current room keeps playing while a new tail is built.";
+    if (d) {
+        if (d->baseRays != settings.rays || d->adaptive != settings.adaptive) info += "\n\nUpdating quality...";
+        info += "\n\nRays in current model: " + juce::String(d->raysUsed);
+        info += "\nLimit: " + juce::String(d->rayLimit);
+        info += d->shared ? " (shared budget)" : " (all sources)";
+        if (d->needsMoreRays) info += d->adaptive ? "\nBudget reached; part of the decay is estimated." : "\nSparse statistics; adaptive rays can refine this tail.";
+        info += "\n\nGraph: modeled tail energy, averaged over sources and receivers. RT60 is an estimate, not a room measurement.";
+    }
+    qualityInfo.setText(info, juce::dontSendNotification);
 }
 
 // ---------- mouse ----------

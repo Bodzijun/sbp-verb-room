@@ -219,6 +219,7 @@ struct Engine::Impl {
         double lastPattern = -1, solvedPattern = -1;  // directivity the tail IR / the early paths were built for
         double lastLst[4] = {1e30, 0, 0, 0};     // listener pose it was built for
         uint64_t lastGeom = 0;                   // geometry serial it was built for
+        uint64_t lastQuality = 0;
         double solvedPose[4] = {1e30, 0, 0, 0};  // pose the early paths were solved for (audio thread)
         std::vector<Vec3> hist;                  // source position at each control period (retarded-time delays)
         uint64_t period = 0;                     // index of the current control period
@@ -244,8 +245,21 @@ struct Engine::Impl {
     std::vector<float> lateGuse;                   // gains actually applied (eased towards the target)
     std::vector<float> lateY;                      // [R][ctrl] scratch
     std::vector<TailHist> srcHist;                 // worker: cached late-field histogram per source
+    std::vector<int> histRays;
+    std::vector<bool> histSparse;
+    mutable std::mutex diagnosticsMx;
+    std::shared_ptr<const TailDiagnostics> diagnostics;
+    std::atomic<int> soloMask{0};
+    float componentGain[3] = {1.f, 1.f, 1.f};
+    float componentTarget[3] = {1.f, 1.f, 1.f};
+    float componentStep[3] = {};
+    int componentRamp[3] = {};
     double sLastLst[4] = {1e30, 0, 0, 0};
     uint64_t sLastGeom = 0;
+    uint64_t sLastQuality = 0, workerQuality = 0;
+    std::atomic<int> requestedRays{20000};
+    std::atomic<bool> requestedAdaptive{false};
+    std::atomic<uint64_t> qualitySerial{0};
     int M = 1, RM = 0;
     double lastSpread = -1;
     double earlyG = 1.0, lastEarlyDb = 1e30;
@@ -256,6 +270,7 @@ struct Engine::Impl {
     std::vector<float> vSgn, vHist;         // pulse signs; per-receiver history of the early-reflection sum
     size_t vMask = 0;
     std::vector<float> tmpEarly, sbA, sbB;  // sbA/sbB: folded frame streams of one tap
+    std::vector<float> componentMix;
     float diffG = 0.f;                    // smoothed diffusion amount 0..1 (0 = bypass)
     double lastListener[4] = {1e30, 0, 0, 0};
     bool firstSolve = true;
@@ -278,6 +293,7 @@ struct Engine::Impl {
         : sc(scene), cfg(c_), S((int)scene.sources.size()), R((int)scene.receivers.size()), sr(scene.sr),
           c(speedOfSound(scene.tempC)), fft(c_.tailBlock * 2) {
         if (cfg.erOrder < 1 || cfg.erOrder > 4) throw std::runtime_error("erOrder must be 1..4");
+        requestedRays = cfg.tailRays; requestedAdaptive = cfg.adaptiveTail;
         sc.length = effectiveTailSeconds(sc, cfg.erOrder);  // never shorter than the scene says, long enough that the tail is not cut
         if (cfg.tailBlock % cfg.ctrlInterval) throw std::runtime_error("tailBlock must be a multiple of ctrlInterval");
         maxWalls = cfg.erOrder <= 1 ? 128 : cfg.erOrder == 2 ? 64 : cfg.erOrder == 3 ? 24 : 12;
@@ -336,6 +352,7 @@ struct Engine::Impl {
             }
         }
         tmpEarly.assign((size_t)R * cfg.ctrlInterval, 0.f);
+        componentMix.assign((size_t)3 * cfg.ctrlInterval, 1.f);
         sbA.assign((size_t)cfg.ctrlInterval * 2 + 64, 0.f);
         sbB.assign((size_t)cfg.ctrlInterval * 2 + 64, 0.f);
         for (int s = 0; s < S; ++s) {
@@ -372,8 +389,10 @@ struct Engine::Impl {
             lateGbuf[1].assign((size_t)R * S * 8, 0.f);
             lateGuse.assign((size_t)R * S * 8, 0.f);
             lateY.assign((size_t)R * cfg.ctrlInterval, 0.f);
-            srcHist.resize((size_t)S);
         }
+        srcHist.resize((size_t)S);
+        histRays.assign((size_t)S, 0);
+        histSparse.assign((size_t)S, false);
         size_t tr = nextPow2((size_t)B * 4);
         tailMask = tr - 1;
         tailRing.assign((size_t)R * tr, 0.f);
@@ -417,10 +436,53 @@ struct Engine::Impl {
     }
 
     // ---- tail IR generation (worker or constructor) ----
+    int rayLimit(int base) const { return cfg.adaptiveTail ? (int)std::min<int64_t>(2000000, 4ll * base) : base; }
+
+    void syncQuality() {
+        const auto serial = qualitySerial.load(std::memory_order_acquire);
+        if (serial == workerQuality) return;
+        cfg.tailRays = requestedRays.load(); cfg.adaptiveTail = requestedAdaptive.load();
+        workerQuality = serial;
+    }
+
+    void publishDiagnostics(const TailHist& h, int used, int limit, bool sparse) {
+        auto d = std::make_shared<TailDiagnostics>(analyzeTail(h));
+        d->raysUsed = used; d->rayLimit = limit; d->shared = shared;
+        d->baseRays = cfg.tailRays;
+        d->adaptive = cfg.adaptiveTail; d->needsMoreRays = sparse;
+        std::lock_guard<std::mutex> lock(diagnosticsMx);
+        diagnostics = std::move(d);
+    }
+
+    void publishSourceDiagnostics() {
+        for (int s = 0; s < S; ++s) if (srcHist[s].h.empty() || srcs[s]->lastQuality != workerQuality) return;
+        TailHist avg;
+        avg.nBins = srcHist[0].nBins; avg.binDur = srcHist[0].binDur;
+        avg.h.resize(R); avg.reliableEnd.resize(R);
+        for (int r = 0; r < R; ++r) {
+            avg.reliableEnd[r].fill(avg.nBins);
+            for (int b = 0; b < NB; ++b) {
+                avg.h[r][b].assign(avg.nBins, 0.0);
+                for (const auto& h : srcHist) {
+                    double sum = 0;
+                    for (size_t k = 0; k < avg.nBins; ++k) { avg.h[r][b][k] += h.h[r][b][k] / S; sum += h.h[r][b][k]; }
+                    if (sum > 0) avg.reliableEnd[r][b] = std::min(avg.reliableEnd[r][b], h.reliableEnd[r][b]);
+                }
+            }
+        }
+        int used = 0; bool sparse = false;
+        for (int s = 0; s < S; ++s) { used += histRays[s]; sparse |= histSparse[s]; }
+        publishDiagnostics(avg, used, S * rayLimit(cfg.tailRays), sparse);
+    }
+
     void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx) {
         TailConv& t = srcs[s]->tail;
         size_t N = (size_t)std::ceil(scn.length * sr);
-        TailHist h = traceTail(scn, st, rc, cfg.erOrder, cfg.tailRays, scn.seed);
+        bool sparse = false;
+        TailHist h = traceTailAdaptive(scn, st, rc, cfg.erOrder, cfg.tailRays, rayLimit(cfg.tailRays), scn.seed, histRays[s], &sparse);
+        histSparse[s] = sparse;
+        srcHist[s] = h;
+        srcs[s]->lastQuality = workerQuality;
         BandBuf buf(R);
         for (auto& r : buf)
             for (auto& b : r) b.assign(N, 0.0);
@@ -441,6 +503,7 @@ struct Engine::Impl {
                 size_t o = ((size_t)r * t.P + k) * t.bins;
                 for (int b = 0; b < t.bins; ++b) { sl.re[o + b] = tmp[b].re; sl.im[o + b] = tmp[b].im; }
             }
+        publishSourceDiagnostics();
         ++refreshCount;
     }
 
@@ -459,7 +522,7 @@ struct Engine::Impl {
         std::vector<Transducer> rc;
         listenerReceivers(lst, rc);
         const double dl = std::hypot(std::hypot(lst[0] - sLastLst[0], lst[1] - sLastLst[1]), lst[2] - sLastLst[2]);
-        const bool all = initial || wsnap->serial != sLastGeom || dl > 0.05 || std::fabs(lst[3] - sLastLst[3]) > 2;
+        const bool all = initial || wsnap->serial != sLastGeom || workerQuality != sLastQuality || dl > 0.05 || std::fabs(lst[3] - sLastLst[3]) > 2;
         const int rays = std::max(1500, cfg.tailRays / std::max(1, S));
         std::vector<int> dirty;
         std::vector<std::array<double, 4>> poses((size_t)S);
@@ -468,34 +531,60 @@ struct Engine::Impl {
             for (int i = 0; i < 4; ++i) poses[(size_t)s][(size_t)i] = params[s * 4 + i].load();
             const auto& p = poses[(size_t)s];
             const double dp = std::hypot(std::hypot(p[0] - sp.lastPose[0], p[1] - sp.lastPose[1]), p[2] - sp.lastPose[2]);
-            if (all || dp > 0.05 || std::fabs(p[3] - sp.lastPose[3]) > 2) dirty.push_back(s);
+            if (all || dp > 0.05 || std::fabs(p[3] - sp.lastPose[3]) > 2 || params[S * 4 + 8 + s].load() != sp.lastPattern) dirty.push_back(s);
         }
         if (dirty.empty()) return false;
-        for (int s : dirty) {
+        // Retain raw moments in the cache; assess confidence only after pooling.
+        auto traceSource = [&](int s, int count) {
             Transducer st = srcs[(size_t)s]->t;
             st.pos = {poses[(size_t)s][0], poses[(size_t)s][1], poses[(size_t)s][2]};
             st.azimuthDeg = poses[(size_t)s][3];
-            srcHist[(size_t)s] = traceTail(scn, st, rc, cfg.erOrder, rays, scn.seed + 131 * s);
+            st.pattern = std::min(std::max(params[S * 4 + 8 + s].load(), 0.0), 1.0);
+            srcHist[(size_t)s] = traceTail(scn, st, rc, cfg.erOrder, count, scn.seed + 131 * s, false);
+            histRays[s] = count;
+            srcs[(size_t)s]->lastPattern = st.pattern;
             for (int i = 0; i < 4; ++i) srcs[(size_t)s]->lastPose[i] = poses[(size_t)s][(size_t)i];
-        }
-        // average envelope + per-source band energies
+        };
+        for (int s : dirty) traceSource(s, rays);
         const size_t nBins = srcHist[0].nBins;
         TailHist avg;
-        avg.nBins = nBins;
-        avg.binDur = srcHist[0].binDur;
-        avg.h.resize((size_t)R);
         std::vector<double> E((size_t)S * R * NB, 0.0), Eavg((size_t)R * NB, 0.0);
+        bool sparse = false;
+        int targetRays = rays;
+        for (;;) {
+            avg = TailHist{};
+            avg.nBins = nBins; avg.binDur = srcHist[0].binDur;
+            avg.h.resize(R); avg.h2.resize(R);
+            for (int r = 0; r < R; ++r)
+                for (int b = 0; b < NB; ++b) {
+                    auto& dst = avg.h[r][b]; auto& dst2 = avg.h2[r][b];
+                    dst.assign(nBins, 0.0); dst2.assign(nBins, 0.0);
+                    for (int s = 0; s < S; ++s) {
+                        const auto& h = srcHist[s].h[r][b]; const auto& h2 = srcHist[s].h2[r][b];
+                        double e = 0;
+                        for (size_t k = 0; k < nBins; ++k) {
+                            dst[k] += h[k] / S; dst2[k] += h2[k] / ((double)S * S); e += h[k];
+                        }
+                        E[((size_t)s * R + r) * NB + b] = e;
+                    }
+                }
+            TailHist raw = avg;
+            finalizeTail(avg);
+            sparse = tailNeedsMoreRays(raw, avg);
+            if (!sparse || targetRays >= rayLimit(rays)) break;
+            targetRays = std::min(rayLimit(rays), targetRays * 2);
+            for (int s = 0; s < S; ++s) if (histRays[s] < targetRays) traceSource(s, targetRays);
+        }
+        int usedRays = 0;
+        for (int count : histRays) usedRays += count;
+        publishDiagnostics(avg, usedRays, S * rayLimit(rays), sparse);
+        // Normalize against the finalized IR, preserving each source's measured
+        // band energy even when extrapolation changes the common envelope area.
         for (int r = 0; r < R; ++r)
             for (int b = 0; b < NB; ++b) {
-                auto& dst = avg.h[(size_t)r][(size_t)b];
-                dst.assign(nBins, 0.0);
-                for (int s = 0; s < S; ++s) {
-                    const auto& h = srcHist[(size_t)s].h[(size_t)r][(size_t)b];
-                    double e = 0;
-                    for (size_t k = 0; k < nBins; ++k) { dst[k] += h[k] / S; e += h[k]; }
-                    E[((size_t)s * R + r) * NB + b] = e;
-                    Eavg[(size_t)r * NB + b] += e / S;
-                }
+                double e = 0;
+                for (double v : avg.h[(size_t)r][(size_t)b]) e += v;
+                Eavg[(size_t)r * NB + b] = e;
             }
         const int inactive = 1 - lateGcur.load();
         std::vector<float>& G = lateGbuf[(size_t)inactive];
@@ -543,6 +632,7 @@ struct Engine::Impl {
         }
         for (int i = 0; i < 4; ++i) sLastLst[i] = lst[i];
         sLastGeom = wsnap->serial;
+        sLastQuality = workerQuality;
         ++refreshCount;
         return true;
     }
@@ -551,6 +641,7 @@ struct Engine::Impl {
         auto last = std::chrono::steady_clock::now();
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            syncQuality();
             {
                 std::lock_guard<std::mutex> lk(worldMx);
                 const uint64_t ack = ackSerial.load();
@@ -570,6 +661,7 @@ struct Engine::Impl {
         int rr = 0;
         while (running) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            syncQuality();
             {   // free geometry snapshots the audio thread has moved past
                 std::lock_guard<std::mutex> lk(worldMx);
                 const uint64_t ack = ackSerial.load();
@@ -588,7 +680,7 @@ struct Engine::Impl {
                 const uint64_t gser = geomSerial.load();
                 bool moved = dp > 0.05 || dl > 0.05 || std::fabs(pose[3] - sp.lastPose[3]) > 2 || std::fabs(lst[3] - sp.lastLst[3]) > 2 || gser != sp.lastGeom;
                 const double pat = std::min(std::max(params[S * 4 + 8 + s].load(), 0.0), 1.0);
-                moved |= pat != sp.lastPattern;
+                moved |= pat != sp.lastPattern || sp.lastQuality != workerQuality;
                 if (!moved) continue;
                 sp.lastPattern = pat;
                 Transducer st = sp.t;
@@ -826,6 +918,15 @@ struct Engine::Impl {
     }
 
     void startPeriod() {
+        const int mask = soloMask.load(std::memory_order_relaxed);
+        for (int k = 0; k < 3; ++k) {
+            const float target = mask == 0 || (mask & (1 << k)) ? 1.f : 0.f;
+            if (target != componentTarget[k]) {
+                componentTarget[k] = target;
+                componentRamp[k] = std::max(1, (int)std::lround(0.01 * sr));
+                componentStep[k] = (target - componentGain[k]) / componentRamp[k];
+            }
+        }
         bool worldChanged = false;
         if (World* pw = pendingWorld.exchange(nullptr, std::memory_order_acq_rel)) {
             wd = pw;
@@ -951,7 +1052,7 @@ struct Engine::Impl {
             float gmax = 0;
             for (int k = 0; k < NB; ++k) gmax = std::max(gmax, std::max(t.g0[k], t.g1[k]));
             if (gmax < 3e-5f) continue;  // below -90 dB: inaudible, not worth rendering
-            float* const dst = t.key == 0 ? out : early;
+            float* const dst = (t.key == 0 || t.key == kDiffKey) ? out : early;
             bool stat = t.d0 == t.d1;
             for (int k = 0; k < NB && stat; ++k) stat = t.g0[k] == t.g1[k];
             // The band gains do not depend on the interpolation phase, so each frame is first folded into ONE value
@@ -1105,6 +1206,14 @@ struct Engine::Impl {
                     for (int j = 0; j < m; ++j) t.inAcc[(gcount + j) % B] = y[j];
                 }
             }
+            for (int j = 0; j < m; ++j)
+                for (int k = 0; k < 3; ++k) {
+                    if (componentRamp[k] > 0) {
+                        componentGain[k] += componentStep[k];
+                        if (--componentRamp[k] == 0) componentGain[k] = componentTarget[k];
+                    }
+                    componentMix[(size_t)k * ctrl + j] = componentGain[k];
+                }
             for (int r = 0; r < R; ++r) {
                 float* acc = &tmpOut[(size_t)r * ctrl];
                 float* ear = &tmpEarly[(size_t)r * ctrl];
@@ -1120,7 +1229,8 @@ struct Engine::Impl {
                 const size_t tr = tailMask + 1;
                 for (int j = 0; j < m; ++j) {
                     const float tg = tailGa + (tailGb - tailGa) * (float)(ph + j + 1) / (float)ctrl;
-                    out[r][done + j] = acc[j] + ear[j] + tg * tailRing[(size_t)r * tr + ((gcount + j) & tailMask)];
+                    out[r][done + j] = componentMix[j] * acc[j] + componentMix[ctrl + j] * ear[j]
+                        + componentMix[2 * ctrl + j] * tg * tailRing[(size_t)r * tr + ((gcount + j) & tailMask)];
                 }
             }
             gcount += m;
@@ -1145,6 +1255,12 @@ void Engine::setReceiverSpread(double m) { p_->params[p_->S * 4 + 4].store(m); }
 void Engine::setEarlyLevel(double dB) { p_->params[p_->S * 4 + 5].store(dB); }
 void Engine::setEarlyDiffusion(double a) { p_->params[p_->S * 4 + 6].store(a); }
 void Engine::setTailLevel(double dB) { p_->params[p_->S * 5 + 8].store(dB); }
+void Engine::setSoloMask(int mask) { p_->soloMask.store(mask & 7, std::memory_order_relaxed); }
+void Engine::setTailQuality(int rays, bool adaptive) {
+    p_->requestedRays.store(std::min(std::max(rays, 8000), 384000));
+    p_->requestedAdaptive.store(adaptive);
+    p_->qualitySerial.fetch_add(1, std::memory_order_release);
+}
 void Engine::setDopplerStrength(double k) { p_->params[p_->S * 4 + 7].store(k); }
 void Engine::setSourcePattern(int s, double p) { if (s >= 0 && s < p_->S) p_->params[p_->S * 4 + 8 + s].store(p); }
 void Engine::setSourceAzimuth(int s, double deg) { p_->params[s * 4 + 3].store(deg); }
@@ -1155,5 +1271,9 @@ void Engine::setListener(double x, double y, double z, double yaw) {
 void Engine::process(const float* const* in, float* const* out, int n) { p_->process(in, out, n); }
 int Engine::activeTaps() const { return p_->tapsActive; }
 int Engine::tailRefreshCount() const { return p_->refreshCount.load(); }
+std::shared_ptr<const TailDiagnostics> Engine::tailDiagnostics() const {
+    std::lock_guard<std::mutex> lock(p_->diagnosticsMx);
+    return p_->diagnostics;
+}
 
 }  // namespace verb

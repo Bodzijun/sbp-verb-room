@@ -32,9 +32,152 @@ static void setP(VerbProcessor& p, const char* id, double v) {
     prm->setValueNotifyingHost(prm->convertTo0to1((float)v));
 }
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <psapi.h>
+#undef min
+#undef max
+static double privateMB() {
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc));
+    return (double)pmc.PrivateUsage / 1048576.0;
+}
+#else
+static double privateMB() { return 0; }
+#endif
+
+static void testTailControls() {
+    std::printf("Tail quality, Solo and decay diagnostics\n");
+    VerbProcessor p; p.setPlayConfigDetails(4, 2, 48000, 256); p.prepareToPlay(48000, 256);
+    check(p.getTailSettings().adaptive && p.getTailSettings().rays == 48000, "new instances use adaptive Mix quality");
+    auto waitQuality = [&](int rays, bool adaptive) {
+        juce::AudioBuffer<float> silence(4, 256); juce::MidiBuffer midi;
+        const auto until = juce::Time::getMillisecondCounterHiRes() + 90000;
+        while (juce::Time::getMillisecondCounterHiRes() < until) {
+            silence.clear(); p.processBlock(silence, midi);
+            auto diag = p.getTailDiagnostics();
+            if (diag && diag->baseRays == rays && diag->adaptive == adaptive) return true;
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+        }
+        return false;
+    };
+    p.setTailSettings({12000, false});
+    check(waitReady(p, 90) && waitQuality(12000, false), "manual ray budget is applied to the room");
+    const auto d = p.getTailDiagnostics();
+    check(d && d->raysUsed == 12000 && !d->adaptive && d->active[3] && d->rt60[3] > 0, "the graph describes the current model and actual ray count");
+    const auto serial = p.getLoadSerial();
+    p.setTailSettings({24000, true});
+    check(waitQuality(24000, true) && p.getLoadSerial() == serial, "live quality update retraces without rebuilding or resetting the engine");
+    p.setTailSettings({12000, false});
+    check(waitQuality(12000, false), "manual quality can be restored while audio keeps running");
+    setP(p, "soloEarly", 1); setP(p, "mix", 0);
+    juce::AudioBuffer<float> b(4, 256); juce::MidiBuffer m;
+    for (int i = 0; i < 20; ++i) { b.clear(); p.processBlock(b, m); }
+    b.clear(); b.setSample(0, 0, 1.f); p.processBlock(b, m);
+    check(std::abs(b.getSample(0, 0)) < 1e-8, "Solo excludes the dry bypass even when Dry/Wet is zero");
+    setP(p, "soloTail", 1);
+    juce::MemoryBlock state; p.getStateInformation(state);
+    VerbProcessor q; q.setPlayConfigDetails(4, 2, 48000, 256); q.prepareToPlay(48000, 256);
+    q.setStateInformation(state.getData(), (int)state.getSize());
+    check(waitReady(q, 90), "quality and Solo state load");
+    check(q.getTailSettings().rays == 12000 && !q.getTailSettings().adaptive
+          && q.apvts.getRawParameterValue("soloEarly")->load() == 1 && q.apvts.getRawParameterValue("soloTail")->load() == 1,
+          "manual ray budget, adaptive switch and combined solos survive state round-trip");
+    auto xml = juce::AudioProcessor::getXmlFromBinary(state.getData(), (int)state.getSize());
+    auto old = juce::ValueTree::fromXml(*xml);
+    old.removeProperty("tailRays", nullptr); old.removeProperty("adaptiveTail", nullptr);
+    for (const char* id : {"soloDirect", "soloEarly", "soloTail"}) old.removeChild(old.getChildWithProperty("id", id), nullptr);
+    juce::MemoryBlock legacy;
+    if (auto legacyXml = old.createXml()) juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacy);
+    q.setStateInformation(legacy.getData(), (int)legacy.getSize());
+    check(waitReady(q, 90), "a pre-quality project still loads");
+    check(q.getTailSettings().rays == 48000 && !q.getTailSettings().adaptive
+          && q.apvts.getRawParameterValue("soloEarly")->load() == 0 && q.apvts.getRawParameterValue("soloTail")->load() == 0,
+          "old projects use safe defaults and do not inherit a previous Solo");
+    std::unique_ptr<juce::AudioProcessorEditor> base(p.createEditor());
+    if (auto* ed = dynamic_cast<VerbEditor*>(base.get())) {
+        auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("out/quality"); dir.createDirectory();
+        for (int width : {900, 1160}) {
+            ed->setSize(width, width == 900 ? 600 : 760); ed->showPage(4, -1);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil(150);
+            auto img = ed->createComponentSnapshot(ed->getLocalBounds());
+            juce::FileOutputStream f(dir.getChildFile("decay_" + juce::String(width) + ".png"));
+            juce::PNGImageFormat png;
+            if (f.openedOk()) { f.setPosition(0); f.truncate(); png.writeImageToStream(img, f); }
+            check(img.getWidth() == width, "Decay tab paints at minimum and default window sizes");
+        }
+        ed->showPage(2, -1);
+        auto img = ed->createComponentSnapshot(ed->getLocalBounds());
+        juce::FileOutputStream f(dir.getChildFile("mix_solo.png")); juce::PNGImageFormat png;
+        if (f.openedOk()) { f.setPosition(0); f.truncate(); png.writeImageToStream(img, f); }
+    }
+    VerbProcessor lfe;
+    lfe.setPlayConfigDetails(6, 6, 48000, 256); lfe.prepareToPlay(48000, 256);
+    check(waitReady(lfe, 90), "5.1 Solo processor starts before configuring its sources");
+    verbp::SourceCfg bed; bed.format = 5;
+    lfe.setSources({bed});
+    verbp::OutputCfg output; output.layout = (int)verb::Layout::Surround51; lfe.setOutputCfg(output);
+    check(waitReady(lfe, 90) && lfe.numPoints() == 5, "5.1 Solo test loads its five spatial points and LFE input");
+    juce::AudioBuffer<float> surround(6, 256);
+    setP(lfe, "soloTail", 1);
+    for (int k = 0; k < 20; ++k) { surround.clear(); lfe.processBlock(surround, m); }
+    surround.clear(); surround.setSample(3, 0, 1.f); lfe.processBlock(surround, m);
+    const float tailLfe = surround.getSample(3, 0);
+    setP(lfe, "soloTail", 0); setP(lfe, "soloDirect", 1);
+    for (int k = 0; k < 20; ++k) { surround.clear(); lfe.processBlock(surround, m); }
+    surround.clear(); surround.setSample(3, 0, 1.f); lfe.processBlock(surround, m);
+    std::printf("  LFE Solo levels: Tail %.6f, Direct %.6f\n", tailLfe, surround.getSample(3, 0));
+    check(std::abs(tailLfe) < 1e-8 && std::abs(surround.getSample(3, 0) - 1.f) < 0.01f,
+          "LFE is excluded from Tail Solo and included at unity in Direct Solo");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
+    testTailControls();
+    if (std::getenv("VERB_QUALITY_ONLY")) return fails ? 1 : 0;
+    if (std::getenv("VERB_MEMPROBE")) {  // exploration: does the plugin grow while a room is reloaded and a source is moved?
+        const auto rooms = verbp::builtinRooms();
+        for (auto& r : rooms) {
+            if (r.name.find(std::getenv("VERB_MEMPROBE")) == std::string::npos) continue;
+            VerbProcessor p;
+            p.setPlayConfigDetails(32, 2, 48000, 512);
+            p.prepareToPlay(48000, 512);
+            waitReady(p, 60);
+            juce::AudioBuffer<float> b(32, 512);
+            juce::MidiBuffer m;
+            std::printf("  %s: start %.0f MB\n", r.name.c_str(), privateMB());
+            for (int it = 0; it < 12; ++it) {
+                const auto tl0 = std::chrono::steady_clock::now();
+                p.loadRoomWithSetup(juce::String(r.text), "hall.txt", r.setup, r.micPattern);
+                waitReady(p, 90);
+                const double tl = std::chrono::duration<double>(std::chrono::steady_clock::now() - tl0).count();
+                double worst = 0;
+                for (int k = 0; k < 20; ++k) {
+                    b.clear();
+                    const auto tb0 = std::chrono::steady_clock::now();
+                    p.processBlock(b, m);
+                    worst = std::max(worst, std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count() * 1000.0);
+                }
+                std::printf("   reload %2d: %.0f MB, load %.2f s, worst block %.2f ms (tail %.2f s)\n", it + 1, privateMB(), tl, worst, p.getTailLengthSeconds());
+            }
+            for (int it = 0; it < 6; ++it) {  // a source swept back and forth: the tail is rebuilt again and again
+                double worst = 0;
+                for (int k = 0; k < 400; ++k) {
+                    if (auto* prm = p.apvts.getParameter(verbp::paramId(0, 0))) prm->setValueNotifyingHost((float)(0.5 + 0.4 * std::sin(k * 0.05)));
+                    b.clear();
+                    const auto tb0 = std::chrono::steady_clock::now();
+                    p.processBlock(b, m);
+                    worst = std::max(worst, std::chrono::duration<double>(std::chrono::steady_clock::now() - tb0).count() * 1000.0);
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil(2);
+                }
+                std::printf("   sweep %d: %.0f MB, worst block %.2f ms (budget 10.7 ms)\n", it + 1, privateMB(), worst);
+            }
+            break;
+        }
+        return 0;
+    }
     std::printf("Plugin processor test\n");
     {
         VerbProcessor p;
