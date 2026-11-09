@@ -62,6 +62,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloDirect", 1}, "Solo Direct", false));
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloEarly", 1}, "Solo Early", false));
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloTail", 1}, "Solo Tail", false));
+    for (int s = 0; s < kMaxSources; ++s) {
+        p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{sourceSwitchId(s, false), 1}, "Source " + juce::String(s + 1) + " Mute", false));
+        p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{sourceSwitchId(s, true), 1}, "Source " + juce::String(s + 1) + " Solo", false));
+    }
     return {p.begin(), p.end()};
 }
 
@@ -84,6 +88,10 @@ VerbProcessor::VerbProcessor()
     soloParam[0] = apvts.getRawParameterValue("soloDirect");
     soloParam[1] = apvts.getRawParameterValue("soloEarly");
     soloParam[2] = apvts.getRawParameterValue("soloTail");
+    for (int s = 0; s < verbp::kMaxSources; ++s) {
+        sourceMute[s] = apvts.getRawParameterValue(verbp::sourceSwitchId(s, false));
+        sourceSolo[s] = apvts.getRawParameterValue(verbp::sourceSwitchId(s, true));
+    }
     sceneText = kDefaultScene;
     sceneName = "Built-in demo room";
     startThread();
@@ -147,16 +155,23 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
 
     double cur[verbp::kMaxSources + 1][4];
     float curGain[verbp::kMaxSources];
+    float sourceGate[verbp::kMaxSources];
+    bool anySourceSolo = false;
+    for (int i = 0; i < NS; ++i) anySourceSolo |= sourceSolo[i]->load(std::memory_order_relaxed) >= 0.5f;
     for (int i = 0; i < NS; ++i) {
         for (int k = 0; k < 4; ++k) cur[i][k] = pv[i][k]->load(std::memory_order_relaxed);
         cur[i][2] = std::min(std::max(cur[i][2], 0.0), zTop);
         curGain[i] = juce::Decibels::decibelsToGain(pv[i][4]->load(std::memory_order_relaxed), -60.f);
+        sourceGate[i] = sourceMute[i]->load(std::memory_order_relaxed) < 0.5f
+                        && (!anySourceSolo || sourceSolo[i]->load(std::memory_order_relaxed) >= 0.5f) ? 1.f : 0.f;
+        curGain[i] *= sourceGate[i];
     }
     for (int k = 0; k < 4; ++k) cur[verbp::kListener][k] = pv[verbp::kListener][k]->load(std::memory_order_relaxed);
     cur[verbp::kListener][2] = std::min(std::max(cur[verbp::kListener][2], 0.0), zTop);
     const uint64_t ser = loadSerial.load();
     if (ser != serialSeen) {  // new engine: start from the current values, no glide
-        for (int i = 0; i < NS; ++i) { std::memcpy(prev[i], cur[i], sizeof prev[i]); prevGain[i] = curGain[i]; }
+        prevAnySourceSolo = anySourceSolo;
+        for (int i = 0; i < NS; ++i) { std::memcpy(prev[i], cur[i], sizeof prev[i]); prevGain[i] = curGain[i]; prevSourceGate[i] = sourceGate[i]; }
         std::memcpy(prev[verbp::kListener], cur[verbp::kListener], sizeof prev[verbp::kListener]);
         serialSeen = ser;
     }
@@ -299,9 +314,18 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
         }
         for (int ch = 0; ch < nOut; ++ch) {
             float* d = buf.getWritePointer(ch) + done;
+            bool mapped = false;
+            float gate0 = 0.f, gate1 = 0.f;
+            for (int s = 0; s < NS; ++s) if (ch >= b.cfg[s].firstIn && ch < b.cfg[s].firstIn + b.cfg[s].effectiveChannels()) {
+                mapped = true; gate0 = std::max(gate0, prevSourceGate[s]); gate1 = std::max(gate1, sourceGate[s]);
+            }
+            if (!mapped) { gate0 = prevAnySourceSolo ? 0.f : 1.f; gate1 = anySourceSolo ? 0.f : 1.f; }
             const bool hasDry = ch < nIn && (dryG1 > 0.f || dryG0 > 0.f);  // d still holds this channel's input here
             auto wetAt = [&](int i) { return wetG0 + (wetG1 - wetG0) * (float)(done + i + 1) / (float)n; };
-            auto dryAt = [&](int i) { return dryG0 + (dryG1 - dryG0) * (float)(done + i + 1) / (float)n; };
+            auto dryAt = [&](int i) {
+                const float t = (float)(done + i + 1) / (float)n;
+                return (dryG0 + (dryG1 - dryG0) * t) * (gate0 + (gate1 - gate0) * t);
+            };
             if (ch < R) {
                 const float* s = b.out[(size_t)ch].data();
                 if (ch == b.lfeOut) {
@@ -327,7 +351,8 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     }
     prevWet = wetG1;
     prevDry = dryG1;
-    for (int i = 0; i < NS; ++i) { std::memcpy(prev[i], cur[i], sizeof prev[i]); prevGain[i] = curGain[i]; }
+    for (int i = 0; i < NS; ++i) { std::memcpy(prev[i], cur[i], sizeof prev[i]); prevGain[i] = curGain[i]; prevSourceGate[i] = sourceGate[i]; }
+    prevAnySourceSolo = anySourceSolo;
     std::memcpy(prev[verbp::kListener], cur[verbp::kListener], sizeof prev[verbp::kListener]);
 }
 
@@ -342,6 +367,7 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
         st.setProperty("sceneName", sceneName, nullptr);
         st.setProperty("inputMeters", inputMetersOn.load(), nullptr);
         st.setProperty("keepRouting", keepRouting.load(), nullptr);
+        st.setProperty("mixerCompact", mixerCompact.load(), nullptr);
         st.setProperty("tailRays", tailSettings.rays, nullptr);
         st.setProperty("adaptiveTail", tailSettings.adaptive, nullptr);
         st.removeChild(st.getChildWithName("Sources"), nullptr);
@@ -420,6 +446,13 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
     }
     inputMetersOn = (bool)st.getProperty("inputMeters", true);
     keepRouting = (bool)st.getProperty("keepRouting", false);
+    mixerCompact = (bool)st.getProperty("mixerCompact", true);
+    for (int s = 0; s < verbp::kMaxSources; ++s) for (bool solo : {false, true}) {
+        const auto id = verbp::sourceSwitchId(s, solo);
+        if (!st.getChildWithProperty("id", id).isValid()) {
+            juce::ValueTree param("PARAM"); param.setProperty("id", id, nullptr); param.setProperty("value", 0.f, nullptr); st.appendChild(param, nullptr);
+        }
+    }
     for (const char* id : {"soloDirect", "soloEarly", "soloTail"}) {
         if (!st.getChildWithProperty("id", id).isValid()) {
             juce::ValueTree p("PARAM"); p.setProperty("id", id, nullptr); p.setProperty("value", 0.f, nullptr);
@@ -575,6 +608,8 @@ int VerbProcessor::addSource() {
     setParamValue(verbp::paramId(idx, 2), 1.5);
     setParamValue(verbp::paramId(idx, 3), 0.0);
     setParamValue(verbp::paramId(idx, 4), 0.0);
+    setParamValue(verbp::sourceSwitchId(idx, false), 0.0);
+    setParamValue(verbp::sourceSwitchId(idx, true), 0.0);
     setSources(v);
     return idx;
 }
@@ -582,8 +617,11 @@ int VerbProcessor::addSource() {
 void VerbProcessor::removeSource(int index) {
     std::vector<verbp::SourceCfg> v = getSources();
     if (v.size() <= 1 || index < 0 || index >= (int)v.size()) return;
-    for (int i = index; i + 1 < (int)v.size(); ++i)  // later sources move up with their positions and gains
+    for (int i = index; i + 1 < (int)v.size(); ++i) {  // later sources move up with their positions and gains
         for (int k = 0; k < 5; ++k) setParamValue(verbp::paramId(i, k), pv[i + 1][k]->load());
+        setParamValue(verbp::sourceSwitchId(i, false), sourceMute[i + 1]->load());
+        setParamValue(verbp::sourceSwitchId(i, true), sourceSolo[i + 1]->load());
+    }
     v.erase(v.begin() + index);
     setSources(v);
 }
@@ -872,7 +910,13 @@ void VerbProcessor::run() {
                 juce::ScopedLock l(dispLock);
                 livePoints = points;
             }
-            if (useDefaults && reqSerial.load() == myRequest && defaultsOwed.exchange(false)) applyDefaultsFrom(sc, home);
+            if (useDefaults && reqSerial.load() == myRequest && defaultsOwed.exchange(false)) {
+                if (!r.keepRouting) for (int s = 0; s < verbp::kMaxSources; ++s) {
+                    setParamValue(verbp::sourceSwitchId(s, false), 0.0);
+                    setParamValue(verbp::sourceSwitchId(s, true), 0.0);
+                }
+                applyDefaultsFrom(sc, home);
+            }
             {
                 juce::SpinLock::ScopedLockType l(engineLock);
                 bundle.swap(nb);
@@ -937,12 +981,102 @@ juce::String VerbProcessor::getRoomText() const {
         t.pos = {pv[i][0]->load(), pv[i][1]->load(), pv[i][2]->load()};
         t.azimuthDeg = pv[i][3]->load();
         t.pattern = cfg[i].pattern;
+        t.gainDb = pv[i][4]->load();
         sc.sources.push_back(t);
     }
     sc.hasListener = true;
     sc.listenerPos = {pv[verbp::kListener][0]->load(), pv[verbp::kListener][1]->load(), pv[verbp::kListener][2]->load()};
     sc.listenerYaw = pv[verbp::kListener][3]->load();
     return juce::String(verb::serializeScene(sc));
+}
+
+juce::String VerbProcessor::getRoomPresetText() {
+    if (getLoadState() != 2) return {};
+    juce::MemoryBlock data;
+    getStateInformation(data);
+    auto stateXml = getXmlFromBinary(data.getData(), (int)data.getSize());
+    if (!stateXml) return {};
+    stateXml->setAttribute("sceneText", getRoomText());
+    juce::XmlElement preset("VerbRoomPreset");
+    preset.setAttribute("formatVersion", 1);
+   #ifdef JucePlugin_VersionString
+    preset.setAttribute("pluginVersion", JucePlugin_VersionString);
+   #endif
+    preset.addChildElement(stateXml.release());
+    return preset.toString();
+}
+
+bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& error) {
+    error.clear();
+    auto xml = juce::parseXML(text);
+    if (!xml || !xml->hasTagName("VerbRoomPreset") || xml->getIntAttribute("formatVersion") != 1) {
+        error = "Unsupported or damaged Verb Room preset (expected format version 1).";
+        return false;
+    }
+    auto* payload = xml->getChildByName("VerbState");
+    auto st = payload ? juce::ValueTree::fromXml(*payload) : juce::ValueTree();
+    const auto sources = st.getChildWithName("Sources");
+    if (!st.isValid() || !st.getChildWithName("Output").isValid() || sources.getNumChildren() < 1
+        || sources.getNumChildren() > verbp::kMaxSources) {
+        error = "The preset is missing its source or output setup.";
+        return false;
+    }
+    std::vector<verbp::SourceCfg> setup;
+    for (auto source : sources) {
+        verbp::SourceCfg c;
+        c.format = (int)source.getProperty("format", -1);
+        c.channels = (int)source.getProperty("channels", 0);
+        c.firstIn = (int)source.getProperty("firstIn", -1);
+        c.sum = (bool)source.getProperty("sum", false);
+        if (!source.hasType("Src") || c.format < 0 || c.format >= (int)verbp::sourceFormats().size()
+            || c.channels < 1 || c.channels > 16 || c.firstIn < 0
+            || c.firstIn + c.effectiveChannels() > verbp::kMaxInputChannels) {
+            error = "The preset contains an invalid source format or input channel range.";
+            return false;
+        }
+        setup.push_back(c);
+    }
+    if (verbp::buildPoints(setup).size() > verbp::kMaxPoints) {
+        error = "The preset exceeds the limit of 64 spatial points.";
+        return false;
+    }
+    try {
+        std::istringstream input(st.getProperty("sceneText").toString().toStdString());
+        const auto sc = verb::parseScene(input, "preset");
+        if (sc.sources.size() != (size_t)sources.getNumChildren() || sc.walls.size() > 128)
+            throw std::runtime_error("Scene and source setup do not match, or there are more than 128 walls.");
+    } catch (const std::exception& e) {
+        error = juce::String(e.what());
+        return false;
+    }
+    // Reject incomplete parameter lists instead of inheriting arbitrary values from the previous room.
+    const auto current = apvts.copyState();
+    for (auto param : current) {
+        const auto id = param.getProperty("id");
+        if (id.isVoid()) continue;
+        auto saved = st.getChildWithProperty("id", id);
+        if (!saved.isValid() || !saved.hasProperty("value") || !std::isfinite((double)saved.getProperty("value"))) {
+            error = "The preset is missing a valid parameter: " + id.toString();
+            return false;
+        }
+    }
+    juce::MemoryBlock localData;
+    getStateInformation(localData);
+    auto localXml = getXmlFromBinary(localData.getData(), (int)localData.getSize());
+    const auto local = juce::ValueTree::fromXml(*localXml);
+    for (const char* key : {"keepRouting", "inputMeters", "mixerCompact"})
+        st.setProperty(key, local.getProperty(key), nullptr);
+    if (keepRoutingEnabled()) {
+        for (const char* child : {"Sources", "Output"}) {
+            st.removeChild(st.getChildWithName(child), nullptr);
+            st.appendChild(local.getChildWithName(child).createCopy(), nullptr);
+        }
+    }
+    juce::MemoryBlock data;
+    auto stateXml = st.createXml();
+    copyXmlToBinary(*stateXml, data);
+    setStateInformation(data.getData(), (int)data.getSize());
+    return true;
 }
 
 juce::String VerbProcessor::getExportMessage() const {

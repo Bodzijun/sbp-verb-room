@@ -151,6 +151,29 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     const std::string dir = argc > 1 ? argv[1] : "";
     if (!dir.empty()) std::filesystem::create_directories(dir);
+    if (std::getenv("VERB_VSL_TAIL_ONLY")) {
+        for (bool conductor : {false, true}) {
+            const auto room = verbp::vslGrandHall(conductor);
+            std::istringstream in(room.text); auto sc = parseScene(in, room.name);
+            sc.sr = 44100; sc.receivers = makeReceiverArray(Layout::StereoORTF, sc.listenerPos, 0.1, 2);
+            const double angle = sc.listenerYaw * kPi / 180.0;
+            for (auto& receiver : sc.receivers) {
+                const auto d = receiver.pos - sc.listenerPos;
+                receiver.pos = sc.listenerPos + Vec3{d.x * std::cos(angle) - d.y * std::sin(angle), d.x * std::sin(angle) + d.y * std::cos(angle), d.z};
+                receiver.azimuthDeg += sc.listenerYaw;
+            }
+            for (int source : {0, 31}) {
+                const auto run = impulse(sc, true, source);
+                const auto db = envelope(run.wav);
+                const double growth = regrowth(db, 0.4);
+                bool finite = true; for (const auto& channel : run.wav.ch) for (float sample : channel) finite &= std::isfinite(sample);
+                std::printf("VSL %s, source %d: %.2f s, late regrowth %.2f dB\n", conductor ? "conductor" : "audience", source + 1, run.length, growth);
+                check(finite && growth < 3.0, "VSL late tail stays finite without phantom regrowth");
+                if (!dir.empty() && source == 0) save(run, dir + (conductor ? "/vsl-conductor" : "/vsl-audience"));
+            }
+        }
+        return failures ? 1 : 0;
+    }
     if (std::getenv("VERB_CATHEDRAL_ONLY")) {
         const auto rooms = verbp::builtinRooms();
         const auto it = std::find_if(rooms.begin(), rooms.end(), [](const auto& r) { return r.name == "Cathedral (long tail)"; });

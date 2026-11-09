@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<VerbRoomPreset formatVersion="1">
+  <VerbState sceneText="sr 48000&#10;length 3.2&#10;height 18.5&#10;temp 20&#10;humidity 50&#10;order 2&#10;rays 50000&#10;seed 1&#10;detect_radius 0.5&#10;material Rear_absorbing_wall 0.14 0.35 0.55 0.72 0.7 0.65 0.6 0.2 0.6&#10;class Rear_absorbing_wall 4&#10;material Faceted_oak_wall 0.15 0.11 0.1 0.07 0.06 0.07 0.07 0.3 0.75&#10;class Faceted_oak_wall 2&#10;material Parquet_floor 0.15 0.11 0.1 0.07 0.06 0.07 0.07 0.05 0.3&#10;class Parquet_floor 2&#10;material Plaster 0.02 0.03 0.04 0.05 0.06 0.07 0.08 0.05 0.4&#10;class Plaster 0&#10;material Audience_seated 0.3 0.45 0.6 0.748811 0.800474 0.800474 0.8 0.5 0.8&#10;class Audience_seated 4&#10;transmit Audience_seated 3 4 5 6 7 7 7&#10;material Audience_seated_5 0.3 0.45 0.6 0.748811 0.800474 0.800474 0.8 0.5 0.8&#10;class Audience_seated_5 4&#10;transmit Audience_seated_5 3 4 5 6 7 7 7&#10;material Audience_seated_6 0.3 0.45 0.6 0.748811 0.800474 0.800474 0.8 0.5 0.8&#10;class Audience_seated_6 4&#10;transmit Audience_seated_6 3 4 5 6 7 7 7&#10;material Audience_seated_7 0.3 0.45 0.6 0.748811 0.800474 0.800474 0.8 0.5 0.8&#10;class Audience_seated_7 4&#10;transmit Audience_seated_7 3 4 5 6 7 7 7&#10;material Wood_panel 0.15 0.11 0.1 0.07 0.06 0.07 0.07 0.1 0.4&#10;class Wood_panel 2&#10;transmit Wood_panel 14 17 20 23 26 28 30&#10;material Wood_panel_9 0.15 0.11 0.1 0.07 0.06 0.07 0.07 0.1 0.4&#10;class Wood_panel_9 2&#10;transmit Wood_panel_9 14 17 20 23 26 28 30&#10;floor Parquet_floor&#10;ceiling Plaster&#10;zone floor Audience_seated 7 6.5 27 6.5 27 32 7 32&#10;zone floor Parquet_floor at 1 3 34 31 34 31 48 3 48&#10;zone floor Parquet_floor at 1.35 4 40.3 30 40.3 30 47.8 4 47.8&#10;zone floor Parquet_floor at 1.7 4 42.9 30 42.9 30 47.8 4 47.8&#10;zone floor Parquet_floor at 2.05 4 45.7 30 45.7 30 47.8 4 47.8&#10;zone floor Audience_seated_5 9 1.2 23.8 1.2 27 6 7 6&#10;zone floor Audience_seated_6 at 3.6 2.8 12 5.5 10 6.2 25 2.5 24&#10;zone floor Audience_seated_7 at 4.2 28.2 11 31.3 13 30.4 27 27.8 25&#10;zone ceiling Wood_panel at 11.5 4.5 34.5 29.5 34.5 29.5 47.7 4.5 47.7&#10;zone ceiling Wood_panel_9 at 10.6 9 25 25 26 24 32 10 32&#10;wall 9 0 24.2 0 Rear_absorbing_wall&#10;wall 24.2 0 30.4 5 Rear_absorbing_wall&#10;wall 30.4 5 33 13 Faceted_oak_wall&#10;wall 33 13 32.2 22 Faceted_oak_wall&#10;wall 32.2 22 30.8 30 Faceted_oak_wall&#10;wall 30.8 30 31 34 Faceted_oak_wall&#10;wall 31 34 31 48 Faceted_oak_wall&#10;wall 31 48 26 51 Faceted_oak_wall&#10;wall 26 51 7 51 Faceted_oak_wall&#10;wall 7 51 3 48 Faceted_oak_wall&#10;wall 3 48 3 34 Faceted_oak_wall&#10;wall 3 34 2 28 Faceted_oak_wall&#10;wall 2 28 0 19 Faceted_oak_wall&#10;wall 0 19 1 10 Faceted_oak_wall&#10;wall 1 10 4.5 4 Faceted_oak_wall&#10;wall 4.5 4 9 0 Rear_absorbing_wall&#10;listener 17 34.2 2.9 90&#10;source Violins_I 9.20001 36.3 2.35 -90 0.3 3.8147e-06 0&#10;source Violins_II 13.2 37 2.35 -90 0.3 3.8147e-06 0&#10;source Violas 17.8 37.2 2.3 -90 0.3 3.8147e-06 0&#10;source Cellos 22.2 36.6 1.9 -90 0.3 3.8147e-06 0&#10;source Double_basses 26.8 39.4 2.2 -90 0.3 3.8147e-06 0&#10;source Solo_violin 17 35.2 2.4 -90 0.3 3.8147e-06 0&#10;source Harp_I 6.20001 38.1 2 -90 0.3 3.8147e-06 0&#10;source Harp_II 5.50002 39.4 2 -90 0.3 3.8147e-06 0&#10;source Piccolo 11.6 42 2.8 -90 0.3 3.8147e-06 0&#10;source Flute_I 11.5 40.8 2.8 -90 0.3 3.8147e-06 0&#10;source Flute_II 13.2 40.8 2.8 -90 0.3 3.8147e-06 0&#10;source Oboe_I 15 40.8 2.7 -90 0.3 3.8147e-06 0&#10;source Oboe_II 16.7 40.8 2.7 -90 0.3 3.8147e-06 0&#10;source English_horn 18.4 41.6 2.65 -90 0.3 3.8147e-06 0&#10;source Clarinet_I 17 42.2 2.6 -90 0.3 3.8147e-06 0&#10;source Clarinet_II 18.7 42.2 2.6 -90 0.3 3.8147e-06 0&#10;source Bass_clarinet 20.4 42.2 2.6 -90 0.3 3.8147e-06 0&#10;source Bassoon_I 20.2 40.8 2.65 -90 0.3 3.8147e-06 0&#10;source Bassoon_II 21.8 40.8 2.65 -90 0.3 3.8147e-06 0&#10;source Contrabassoon 22.2 42.3 2.65 -90 0.3 3.8147e-06 0&#10;source Horns_I-II 9.70001 43.4 2.9 -90 0.3 3.8147e-06 0&#10;source Horns_III-IV 12.1 43.6 2.9 -90 0.3 3.8147e-06 0&#10;source Trumpets_I-II 15.1 43.7 3.15 -90 0.3 3.8147e-06 0&#10;source Trumpet_III 17.2 43.7 3.15 -90 0.3 3.8147e-06 0&#10;source Tenor_trombones 20 43.9 3.05 -90 0.3 3.8147e-06 0&#10;source Bass_trombone 22.5 44 3.05 -90 0.3 3.8147e-06 0&#10;source Tuba 24.8 44.1 2.8 -90 0.3 3.8147e-06 0&#10;source Timpani 13 46.4 3 -90 0.3 3.8147e-06 0&#10;source Percussion_-_drums 17.3 46.6 3.05 -90 0.3 3.8147e-06 0&#10;source Percussion_-_metals 21.5 46.5 3.35 -90 0.3 3.8147e-06 0&#10;source Mallets 25.2 46.3 3.05 -90 0.3 3.8147e-06 0&#10;source Piano_/_celesta 6.50002 36.3 2.1 -90 0.3 3.8147e-06 0&#10;receiver L 17 34.2 2.9 55 0.5 0 0&#10;receiver R 17 34.2 2.9 -55 0.5 0 0&#10;"
+             sceneName="VSL Grand hall - conductor (32 stereo groups)" inputMeters="1"
+             keepRouting="0" mixerCompact="1" tailRays="48000" adaptiveTail="1">
+    <PARAM id="diffusion" value="0.5"/>
+    <PARAM id="doppler" value="1.0"/>
+    <PARAM id="early" value="-8.999996185302734"/>
+    <PARAM id="gain" value="0.0"/>
+    <PARAM id="laz" value="90.0"/>
+    <PARAM id="lx" value="17.00001525878906"/>
+    <PARAM id="ly" value="34.20001220703125"/>
+    <PARAM id="lz" value="2.900000095367432"/>
+    <PARAM id="mix" value="100.0"/>
+    <PARAM id="s10az" value="-89.99999237060547"/>
+    <PARAM id="s10g" value="3.814697265625e-6"/>
+    <PARAM id="s10mute" value="0.0"/>
+    <PARAM id="s10solo" value="0.0"/>
+    <PARAM id="s10x" value="11.50001525878906"/>
+    <PARAM id="s10y" value="40.80001831054688"/>
+    <PARAM id="s10z" value="2.800000190734863"/>
+    <PARAM id="s11az" value="-89.99999237060547"/>
+    <PARAM id="s11g" value="3.814697265625e-6"/>
+    <PARAM id="s11mute" value="0.0"/>
+    <PARAM id="s11solo" value="0.0"/>
+    <PARAM id="s11x" value="13.20001220703125"/>
+    <PARAM id="s11y" value="40.80001831054688"/>
+    <PARAM id="s11z" value="2.800000190734863"/>
+    <PARAM id="s12az" value="-89.99999237060547"/>
+    <PARAM id="s12g" value="3.814697265625e-6"/>
+    <PARAM id="s12mute" value="0.0"/>
+    <PARAM id="s12solo" value="0.0"/>
+    <PARAM id="s12x" value="15.00001525878906"/>
+    <PARAM id="s12y" value="40.80001831054688"/>
+    <PARAM id="s12z" value="2.700000047683716"/>
+    <PARAM id="s13az" value="-89.99999237060547"/>
+    <PARAM id="s13g" value="3.814697265625e-6"/>
+    <PARAM id="s13mute" value="0.0"/>
+    <PARAM id="s13solo" value="0.0"/>
+    <PARAM id="s13x" value="16.70001220703125"/>
+    <PARAM id="s13y" value="40.80001831054688"/>
+    <PARAM id="s13z" value="2.700000047683716"/>
+    <PARAM id="s14az" value="-89.99999237060547"/>
+    <PARAM id="s14g" value="3.814697265625e-6"/>
+    <PARAM id="s14mute" value="0.0"/>
+    <PARAM id="s14solo" value="0.0"/>
+    <PARAM id="s14x" value="18.40000915527344"/>
+    <PARAM id="s14y" value="41.60000610351562"/>
+    <PARAM id="s14z" value="2.650000095367432"/>
+    <PARAM id="s15az" value="-89.99999237060547"/>
+    <PARAM id="s15g" value="3.814697265625e-6"/>
+    <PARAM id="s15mute" value="0.0"/>
+    <PARAM id="s15solo" value="0.0"/>
+    <PARAM id="s15x" value="17.00001525878906"/>
+    <PARAM id="s15y" value="42.20001220703125"/>
+    <PARAM id="s15z" value="2.600000143051147"/>
+    <PARAM id="s16az" value="-89.99999237060547"/>
+    <PARAM id="s16g" value="3.814697265625e-6"/>
+    <PARAM id="s16mute" value="0.0"/>
+    <PARAM id="s16solo" value="0.0"/>
+    <PARAM id="s16x" value="18.70001220703125"/>
+    <PARAM id="s16y" value="42.20001220703125"/>
+    <PARAM id="s16z" value="2.600000143051147"/>
+    <PARAM id="s17az" value="-89.99999237060547"/>
+    <PARAM id="s17g" value="3.814697265625e-6"/>
+    <PARAM id="s17mute" value="0.0"/>
+    <PARAM id="s17solo" value="0.0"/>
+    <PARAM id="s17x" value="20.40000915527344"/>
+    <PARAM id="s17y" value="42.20001220703125"/>
+    <PARAM id="s17z" value="2.600000143051147"/>
+    <PARAM id="s18az" value="-89.99999237060547"/>
+    <PARAM id="s18g" value="3.814697265625e-6"/>
+    <PARAM id="s18mute" value="0.0"/>
+    <PARAM id="s18solo" value="0.0"/>
+    <PARAM id="s18x" value="20.20001220703125"/>
+    <PARAM id="s18y" value="40.80001831054688"/>
+    <PARAM id="s18z" value="2.650000095367432"/>
+    <PARAM id="s19az" value="-89.99999237060547"/>
+    <PARAM id="s19g" value="3.814697265625e-6"/>
+    <PARAM id="s19mute" value="0.0"/>
+    <PARAM id="s19solo" value="0.0"/>
+    <PARAM id="s19x" value="21.80000305175781"/>
+    <PARAM id="s19y" value="40.80001831054688"/>
+    <PARAM id="s19z" value="2.650000095367432"/>
+    <PARAM id="s1az" value="-89.99999237060547"/>
+    <PARAM id="s1g" value="3.814697265625e-6"/>
+    <PARAM id="s1mute" value="0.0"/>
+    <PARAM id="s1solo" value="0.0"/>
+    <PARAM id="s1x" value="9.20001220703125"/>
+    <PARAM id="s1y" value="36.30001831054688"/>
+    <PARAM id="s1z" value="2.350000143051147"/>
+    <PARAM id="s20az" value="-89.99999237060547"/>
+    <PARAM id="s20g" value="3.814697265625e-6"/>
+    <PARAM id="s20mute" value="0.0"/>
+    <PARAM id="s20solo" value="0.0"/>
+    <PARAM id="s20x" value="22.20001220703125"/>
+    <PARAM id="s20y" value="42.30001831054688"/>
+    <PARAM id="s20z" value="2.650000095367432"/>
+    <PARAM id="s21az" value="-89.99999237060547"/>
+    <PARAM id="s21g" value="3.814697265625e-6"/>
+    <PARAM id="s21mute" value="0.0"/>
+    <PARAM id="s21solo" value="0.0"/>
+    <PARAM id="s21x" value="9.70001220703125"/>
+    <PARAM id="s21y" value="43.40000915527344"/>
+    <PARAM id="s21z" value="2.900000095367432"/>
+    <PARAM id="s22az" value="-89.99999237060547"/>
+    <PARAM id="s22g" value="3.814697265625e-6"/>
+    <PARAM id="s22mute" value="0.0"/>
+    <PARAM id="s22solo" value="0.0"/>
+    <PARAM id="s22x" value="12.10000610351562"/>
+    <PARAM id="s22y" value="43.60000610351562"/>
+    <PARAM id="s22z" value="2.900000095367432"/>
+    <PARAM id="s23az" value="-89.99999237060547"/>
+    <PARAM id="s23g" value="3.814697265625e-6"/>
+    <PARAM id="s23mute" value="0.0"/>
+    <PARAM id="s23solo" value="0.0"/>
+    <PARAM id="s23x" value="15.10000610351562"/>
+    <PARAM id="s23y" value="43.70001220703125"/>
+    <PARAM id="s23z" value="3.150000095367432"/>
+    <PARAM id="s24az" value="-89.99999237060547"/>
+    <PARAM id="s24g" value="3.814697265625e-6"/>
+    <PARAM id="s24mute" value="0.0"/>
+    <PARAM id="s24solo" value="0.0"/>
+    <PARAM id="s24x" value="17.20001220703125"/>
+    <PARAM id="s24y" value="43.70001220703125"/>
+    <PARAM id="s24z" value="3.150000095367432"/>
+    <PARAM id="s25az" value="-89.99999237060547"/>
+    <PARAM id="s25g" value="3.814697265625e-6"/>
+    <PARAM id="s25mute" value="0.0"/>
+    <PARAM id="s25solo" value="0.0"/>
+    <PARAM id="s25x" value="20.00001525878906"/>
+    <PARAM id="s25y" value="43.90000915527344"/>
+    <PARAM id="s25z" value="3.050000190734863"/>
+    <PARAM id="s26az" value="-89.99999237060547"/>
+    <PARAM id="s26g" value="3.814697265625e-6"/>
+    <PARAM id="s26mute" value="0.0"/>
+    <PARAM id="s26solo" value="0.0"/>
+    <PARAM id="s26x" value="22.50001525878906"/>
+    <PARAM id="s26y" value="44.00001525878906"/>
+    <PARAM id="s26z" value="3.050000190734863"/>
+    <PARAM id="s27az" value="-89.99999237060547"/>
+    <PARAM id="s27g" value="3.814697265625e-6"/>
+    <PARAM id="s27mute" value="0.0"/>
+    <PARAM id="s27solo" value="0.0"/>
+    <PARAM id="s27x" value="24.80000305175781"/>
+    <PARAM id="s27y" value="44.10000610351562"/>
+    <PARAM id="s27z" value="2.800000190734863"/>
+    <PARAM id="s28az" value="-89.99999237060547"/>
+    <PARAM id="s28g" value="3.814697265625e-6"/>
+    <PARAM id="s28mute" value="0.0"/>
+    <PARAM id="s28solo" value="0.0"/>
+    <PARAM id="s28x" value="13.00001525878906"/>
+    <PARAM id="s28y" value="46.40000915527344"/>
+    <PARAM id="s28z" value="3.000000238418579"/>
+    <PARAM id="s29az" value="-89.99999237060547"/>
+    <PARAM id="s29g" value="3.814697265625e-6"/>
+    <PARAM id="s29mute" value="0.0"/>
+    <PARAM id="s29solo" value="0.0"/>
+    <PARAM id="s29x" value="17.30000305175781"/>
+    <PARAM id="s29y" value="46.60000610351562"/>
+    <PARAM id="s29z" value="3.050000190734863"/>
+    <PARAM id="s2az" value="-89.99999237060547"/>
+    <PARAM id="s2g" value="3.814697265625e-6"/>
+    <PARAM id="s2mute" value="0.0"/>
+    <PARAM id="s2solo" value="0.0"/>
+    <PARAM id="s2x" value="13.20001220703125"/>
+    <PARAM id="s2y" value="37.00001525878906"/>
+    <PARAM id="s2z" value="2.350000143051147"/>
+    <PARAM id="s30az" value="-89.99999237060547"/>
+    <PARAM id="s30g" value="3.814697265625e-6"/>
+    <PARAM id="s30mute" value="0.0"/>
+    <PARAM id="s30solo" value="0.0"/>
+    <PARAM id="s30x" value="21.50001525878906"/>
+    <PARAM id="s30y" value="46.50001525878906"/>
+    <PARAM id="s30z" value="3.350000143051147"/>
+    <PARAM id="s31az" value="-89.99999237060547"/>
+    <PARAM id="s31g" value="3.814697265625e-6"/>
+    <PARAM id="s31mute" value="0.0"/>
+    <PARAM id="s31solo" value="0.0"/>
+    <PARAM id="s31x" value="25.20001220703125"/>
+    <PARAM id="s31y" value="46.30001831054688"/>
+    <PARAM id="s31z" value="3.050000190734863"/>
+    <PARAM id="s32az" value="-89.99999237060547"/>
+    <PARAM id="s32g" value="3.814697265625e-6"/>
+    <PARAM id="s32mute" value="0.0"/>
+    <PARAM id="s32solo" value="0.0"/>
+    <PARAM id="s32x" value="6.500015258789062"/>
+    <PARAM id="s32y" value="36.30001831054688"/>
+    <PARAM id="s32z" value="2.100000143051147"/>
+    <PARAM id="s3az" value="-89.99999237060547"/>
+    <PARAM id="s3g" value="3.814697265625e-6"/>
+    <PARAM id="s3mute" value="0.0"/>
+    <PARAM id="s3solo" value="0.0"/>
+    <PARAM id="s3x" value="17.80000305175781"/>
+    <PARAM id="s3y" value="37.20001220703125"/>
+    <PARAM id="s3z" value="2.300000190734863"/>
+    <PARAM id="s4az" value="-89.99999237060547"/>
+    <PARAM id="s4g" value="3.814697265625e-6"/>
+    <PARAM id="s4mute" value="0.0"/>
+    <PARAM id="s4solo" value="0.0"/>
+    <PARAM id="s4x" value="22.20001220703125"/>
+    <PARAM id="s4y" value="36.60000610351562"/>
+    <PARAM id="s4z" value="1.900000095367432"/>
+    <PARAM id="s5az" value="-89.99999237060547"/>
+    <PARAM id="s5g" value="3.814697265625e-6"/>
+    <PARAM id="s5mute" value="0.0"/>
+    <PARAM id="s5solo" value="0.0"/>
+    <PARAM id="s5x" value="26.80001831054688"/>
+    <PARAM id="s5y" value="39.40000915527344"/>
+    <PARAM id="s5z" value="2.200000047683716"/>
+    <PARAM id="s6az" value="-89.99999237060547"/>
+    <PARAM id="s6g" value="3.814697265625e-6"/>
+    <PARAM id="s6mute" value="0.0"/>
+    <PARAM id="s6solo" value="0.0"/>
+    <PARAM id="s6x" value="17.00001525878906"/>
+    <PARAM id="s6y" value="35.20001220703125"/>
+    <PARAM id="s6z" value="2.400000095367432"/>
+    <PARAM id="s7az" value="-89.99999237060547"/>
+    <PARAM id="s7g" value="3.814697265625e-6"/>
+    <PARAM id="s7mute" value="0.0"/>
+    <PARAM id="s7solo" value="0.0"/>
+    <PARAM id="s7x" value="6.20001220703125"/>
+    <PARAM id="s7y" value="38.10000610351562"/>
+    <PARAM id="s7z" value="2.0"/>
+    <PARAM id="s8az" value="-89.99999237060547"/>
+    <PARAM id="s8g" value="3.814697265625e-6"/>
+    <PARAM id="s8mute" value="0.0"/>
+    <PARAM id="s8solo" value="0.0"/>
+    <PARAM id="s8x" value="5.500015258789062"/>
+    <PARAM id="s8y" value="39.40000915527344"/>
+    <PARAM id="s8z" value="2.0"/>
+    <PARAM id="s9az" value="-89.99999237060547"/>
+    <PARAM id="s9g" value="3.814697265625e-6"/>
+    <PARAM id="s9mute" value="0.0"/>
+    <PARAM id="s9solo" value="0.0"/>
+    <PARAM id="s9x" value="11.60000610351562"/>
+    <PARAM id="s9y" value="42.00001525878906"/>
+    <PARAM id="s9z" value="2.800000190734863"/>
+    <PARAM id="soloDirect" value="0.0"/>
+    <PARAM id="soloEarly" value="0.0"/>
+    <PARAM id="soloTail" value="0.0"/>
+    <PARAM id="tail" value="3.814697265625e-6"/>
+    <Sources>
+      <Src name="Violins I" format="1" channels="2" firstIn="0" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Violins II" format="1" channels="2" firstIn="2" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Violas" format="1" channels="2" firstIn="4" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Cellos" format="1" channels="2" firstIn="6" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Double basses" format="1" channels="2" firstIn="8" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Solo violin" format="1" channels="2" firstIn="10" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Harp I" format="1" channels="2" firstIn="12" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Harp II" format="1" channels="2" firstIn="14" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Piccolo" format="1" channels="2" firstIn="16" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Flute I" format="1" channels="2" firstIn="18" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Flute II" format="1" channels="2" firstIn="20" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Oboe I" format="1" channels="2" firstIn="22" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Oboe II" format="1" channels="2" firstIn="24" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="English horn" format="1" channels="2" firstIn="26" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Clarinet I" format="1" channels="2" firstIn="28" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Clarinet II" format="1" channels="2" firstIn="30" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Bass clarinet" format="1" channels="2" firstIn="32" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Bassoon I" format="1" channels="2" firstIn="34" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Bassoon II" format="1" channels="2" firstIn="36" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Contrabassoon" format="1" channels="2" firstIn="38" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Horns I-II" format="1" channels="2" firstIn="40" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Horns III-IV" format="1" channels="2" firstIn="42" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Trumpets I-II" format="1" channels="2" firstIn="44" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Trumpet III" format="1" channels="2" firstIn="46" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Tenor trombones" format="1" channels="2" firstIn="48" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Bass trombone" format="1" channels="2" firstIn="50" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Tuba" format="1" channels="2" firstIn="52" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Timpani" format="1" channels="2" firstIn="54" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Percussion - drums" format="1" channels="2" firstIn="56"
+           sum="1" spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Percussion - metals" format="1" channels="2" firstIn="58"
+           sum="1" spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Mallets" format="1" channels="2" firstIn="60" sum="1" spread="0.0"
+           pattern="0.3" free="0" ox="" oy="" oz=""/>
+      <Src name="Piano / celesta" format="1" channels="2" firstIn="62" sum="1"
+           spread="0.0" pattern="0.3" free="0" ox="" oy="" oz=""/>
+    </Sources>
+    <Output layout="1" radius="0.1" micPattern="0"/>
+  </VerbState>
+</VerbRoomPreset>

@@ -27,7 +27,7 @@ static bool waitReady(VerbProcessor& p, double seconds) {
     return false;
 }
 
-static void setP(VerbProcessor& p, const char* id, double v) {
+static void setP(VerbProcessor& p, const juce::String& id, double v) {
     auto* prm = p.apvts.getParameter(id);
     prm->setValueNotifyingHost(prm->convertTo0to1((float)v));
 }
@@ -135,6 +135,193 @@ static void testTailControls() {
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
+    if (std::getenv("VERB_PRESETS_ONLY")) {
+        VerbProcessor p;
+        p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
+        check(waitReady(p, 60), "portable preset processor starts");
+        auto cfg = p.getSources(); cfg.resize(2);
+        cfg[0].name = juce::String::fromUTF8(u8"Скрипки I & II").toStdString();
+        cfg[0].format = 1; cfg[0].channels = 2; cfg[0].firstIn = 8; cfg[0].spread = 0.8; cfg[0].pattern = 0.5;
+        cfg[0].freePoints = true; cfg[0].ox = {-0.25f, 0.75f}; cfg[0].oy = {0.1f, -0.1f}; cfg[0].oz = {0.f, 0.2f};
+        cfg[1].name = "Harp"; cfg[1].format = 1; cfg[1].channels = 2; cfg[1].firstIn = 62; cfg[1].sum = true;
+        p.setSources(cfg); check(waitReady(p, 90), "custom stereo and free-point setup loads");
+        auto output = p.getOutputCfg(); output.radius = 0.25; output.micPattern = (int)verb::MicPattern::HumanEars;
+        p.setOutputCfg(output); check(waitReady(p, 90), "custom output loads");
+        p.setTailSettings({12000, false});
+        setP(p, verbp::paramId(0, 0), 2.345); setP(p, verbp::paramId(0, 4), -7.5);
+        setP(p, verbp::paramId(verbp::kListener, 3), 65); setP(p, "mix", 72); setP(p, "tail", -3);
+        setP(p, "soloTail", 1); setP(p, verbp::sourceSwitchId(0, true), 1); setP(p, verbp::sourceSwitchId(1, false), 1);
+        const auto preset = p.getRoomPresetText();
+        auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("out/presets"); dir.createDirectory();
+        const auto file = dir.getChildFile("roundtrip.verbroom");
+        check(preset.isNotEmpty() && file.replaceWithText(preset), "complete preset writes to a standalone XML file");
+        VerbProcessor q; q.setPlayConfigDetails(64, 2, 48000, 256); q.prepareToPlay(48000, 256);
+        check(waitReady(q, 60), "fresh receiving processor starts");
+        q.setMixerCompactEnabled(false); q.setInputMetersEnabled(false);
+        juce::String error;
+        check(q.loadRoomPresetText(file.loadFileAsString(), error) && waitReady(q, 90), "preset loads in another instance");
+        const auto restored = q.getSources();
+        check(restored.size() == 2 && restored[0].name == cfg[0].name && restored[0].format == 1 && restored[0].firstIn == 8
+            && restored[0].freePoints && restored[0].ox == cfg[0].ox && restored[0].oz == cfg[0].oz
+            && restored[0].spread == cfg[0].spread && restored[0].pattern == cfg[0].pattern
+            && restored[1].sum && restored[1].firstIn == 62 && q.numPoints() == 3,
+            "Unicode names, stereo routing, summing, spread, directivity and free points survive");
+        auto value = [&](const juce::String& id) { return q.apvts.getRawParameterValue(id)->load(); };
+        check(std::abs(value("s1x") - 2.345) < 0.002 && std::abs(value("s1g") + 7.5) < 0.002 && std::abs(value("laz") - 65) < 0.002
+            && value("mix") == 72 && std::abs(value("tail") + 3) < 0.002 && value("soloTail") == 1
+            && value("s1solo") == 1 && value("s2mute") == 1 && q.getTailSettings().rays == 12000
+            && !q.getTailSettings().adaptive && q.getOutputCfg().radius == 0.25
+            && q.getOutputCfg().micPattern == (int)verb::MicPattern::HumanEars,
+            "positions, gains, Solo/Mute, mix, tail quality and output survive");
+        check(!q.mixerCompactEnabled() && !q.inputMetersEnabled() && !q.keepRoutingEnabled(), "local display and Keep I/O preferences remain local");
+        const auto before = q.getSceneSerial();
+        auto broken = juce::parseXML(preset); broken->setAttribute("formatVersion", 999);
+        check(!q.loadRoomPresetText(broken->toString(), error) && error.isNotEmpty(), "future preset version is rejected");
+        broken = juce::parseXML(preset); broken->getChildByName("VerbState")->setAttribute("sceneText", "floor missing");
+        check(!q.loadRoomPresetText(broken->toString(), error), "invalid scene is rejected before state changes");
+        broken = juce::parseXML(preset);
+        broken->getChildByName("VerbState")->getChildByName("Sources")->getChildByName("Src")->setAttribute("firstIn", 63);
+        check(!q.loadRoomPresetText(broken->toString(), error), "stereo input beyond channel 64 is rejected before state changes");
+        broken = juce::parseXML(preset); auto* payload = broken->getChildByName("VerbState");
+        payload->removeChildElement(payload->getChildByName("PARAM"), true);
+        check(!q.loadRoomPresetText(broken->toString(), error) && q.getSceneSerial() == before && value("mix") == 72,
+              "incomplete preset leaves the current room and mix intact");
+        auto local = cfg; local.resize(1); local[0].firstIn = 20; local[0].name = "Local routing";
+        q.setSources(local); check(waitReady(q, 90), "different local routing loads");
+        auto localOutput = q.getOutputCfg(); localOutput.radius = 0.4; q.setOutputCfg(localOutput);
+        check(waitReady(q, 90), "local output loads");
+        q.setKeepRoutingEnabled(true);
+        check(q.loadRoomPresetText(preset, error) && waitReady(q, 90) && q.getSources().size() == 1
+            && q.getSources()[0].firstIn == 20 && q.getSources()[0].name == "Local routing"
+            && q.getOutputCfg().radius == 0.4 && q.keepRoutingEnabled(), "Keep I/O preserves local source setup and output when importing");
+        q.setKeepRoutingEnabled(false);
+        q.loadSceneText(p.getRoomText(), "legacy.txt", true);
+        check(waitReady(q, 90) && q.getSources().size() == 2, "legacy plain-text scenes still load");
+        return fails ? 1 : 0;
+    }
+    if (std::getenv("VERB_VSL_HALL_ONLY")) {
+        for (bool conductor : {false, true}) {
+            const auto room = verbp::vslGrandHall(conductor);
+            std::istringstream input(room.text);
+            auto scene = verb::parseScene(input, room.name);
+            check(scene.walls.size() == 16 && scene.sources.size() == 32 && room.setup.size() == 32, "VSL hall has a faceted outline and thirty-two groups");
+            const int rear = scene.walls[0].mat;
+            check(scene.walls[1].mat == rear && scene.walls[15].mat == rear
+                && scene.mats[(size_t)rear].name == "Rear_absorbing_wall" && scene.walls[2].mat != rear,
+                "both rear bevels share the absorbing back-wall material; side walls stay reflective");
+            verb::Zone footprint; for (const auto& w : scene.walls) footprint.poly.emplace_back(w.ax, w.ay);
+            bool inside = verb::pointInZone(footprint, scene.listenerPos.x, scene.listenerPos.y);
+            bool connected = true, routes = true, aboveFloor = true;
+            for (size_t i = 0; i < scene.walls.size(); ++i) {
+                const auto& a = scene.walls[i]; const auto& b = scene.walls[(i + 1) % scene.walls.size()];
+                connected &= std::hypot(a.bx - b.ax, a.by - b.ay) < 1e-5;
+            }
+            for (size_t i = 0; i < room.setup.size(); ++i) {
+                const auto& c = room.setup[i]; const auto& t = scene.sources[i];
+                routes &= c.format == 1 && c.sum && c.firstIn == (int)(2 * i);
+                inside &= verb::pointInZone(footprint, t.pos.x, t.pos.y);
+                double floor = 0;
+                for (const auto& z : scene.floorZones) if (z.z >= 0 && verb::pointInZone(z, t.pos.x, t.pos.y)) floor = std::max(floor, z.z);
+                aboveFloor &= t.pos.z > floor && t.pos.z < scene.height;
+            }
+            int plates = 0;
+            for (const auto* zones : {&scene.floorZones, &scene.ceilZones}) for (const auto& z : *zones) plates += z.z >= 0;
+            check(connected && inside && aboveFloor && plates == 8, "hall outline is closed; sources and listener are inside; instruments clear the risers");
+            check(routes && verbp::buildPoints(room.setup).size() == 32, "sixty-four inputs map to thirty-two summed stereo sources");
+            VerbProcessor p;
+            p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
+            check(waitReady(p, 60), "VSL test processor starts");
+            p.loadRoomWithSetup(juce::String(room.text), juce::String(room.name), room.setup, room.micPattern);
+            check(waitReady(p, 180) && p.getSources().size() == 32 && p.numPoints() == 32, "VSL hall loads all source routes");
+            auto presetDir = juce::File::getCurrentWorkingDirectory().getChildFile("out/vsl-hall/presets"); presetDir.createDirectory();
+            const auto presetFile = presetDir.getChildFile(conductor ? "VSL_Grand_Hall_Conductor.verbroom" : "VSL_Grand_Hall_Audience.verbroom");
+            check(presetFile.replaceWithText(p.getRoomPresetText()), "VSL portable preset exports");
+            juce::String presetError;
+            check(p.loadRoomPresetText(presetFile.loadFileAsString(), presetError) && waitReady(p, 180)
+                && p.getSources().size() == 32 && p.getSources().back().firstIn == 62,
+                "VSL portable preset restores all thirty-two stereo groups");
+            setP(p, "soloDirect", 1);
+            juce::AudioBuffer<float> b(64, 256); juce::MidiBuffer midi;
+            auto level = [&](int ch) {
+                for (int k = 0; k < 40; ++k) { b.clear(); p.processBlock(b, midi); }
+                double e = 0;
+                for (int k = 0; k < 100; ++k) {
+                    b.clear(); if (k == 0) b.setSample(ch, 0, 1.f); p.processBlock(b, midi);
+                    for (int c = 0; c < 2; ++c) for (int n = 0; n < 256; ++n) e += b.getSample(c, n) * b.getSample(c, n);
+                }
+                return e;
+            };
+            const double first = level(0), lastLeft = level(62), lastRight = level(63);
+            check(std::isfinite(first) && first > 1e-10 && lastLeft > 1e-10 && std::abs(lastLeft - lastRight) < lastLeft * 0.001,
+                  "first and last stereo inputs sound; channels 63 and 64 sum equally");
+            if (!conductor) {
+                juce::MemoryBlock state; p.getStateInformation(state);
+                p.setStateInformation(state.getData(), (int)state.getSize());
+                check(waitReady(p, 180) && p.getSources().back().firstIn == 62, "VSL routing survives project state restore");
+                auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("out/vsl-hall"); dir.createDirectory();
+                std::unique_ptr<juce::AudioProcessorEditor> base(p.createEditor());
+                if (auto* ed = dynamic_cast<VerbEditor*>(base.get())) {
+                    ed->setSize(1160, 760);
+                    for (int plane : {0, 1}) {
+                        ed->showPlane(plane); juce::MessageManager::getInstance()->runDispatchLoopUntil(120);
+                        auto image = ed->createComponentSnapshot(ed->getLocalBounds());
+                        juce::FileOutputStream out(dir.getChildFile(plane == 0 ? "vsl_plan.png" : "vsl_front.png"));
+                        juce::PNGImageFormat png; if (out.openedOk()) png.writeImageToStream(image, out);
+                    }
+                }
+            }
+        }
+        return fails ? 1 : 0;
+    }
+    if (std::getenv("VERB_SOURCE_SWITCHES_ONLY")) {
+        VerbProcessor p;
+        p.setPlayConfigDetails(2, 2, 48000, 256); p.prepareToPlay(48000, 256);
+        check(waitReady(p, 60), "source switch room loads");
+        auto cfg = p.getSources(); cfg.resize(2); cfg[0].firstIn = 0; cfg[1].firstIn = 1;
+        p.setSources(cfg); check(waitReady(p, 60), "two source routes load");
+        for (int k = 0; k < 4; ++k) setP(p, verbp::paramId(1, k), p.apvts.getRawParameterValue(verbp::paramId(0, k))->load());
+        setP(p, "soloDirect", 1);
+        juce::AudioBuffer<float> audio(2, 256); juce::MidiBuffer midi;
+        auto energy = [&](int input) {
+            for (int i = 0; i < 40; ++i) { audio.clear(); p.processBlock(audio, midi); }
+            double e = 0;
+            for (int i = 0; i < 100; ++i) {
+                audio.clear(); if (i == 0) audio.setSample(input, 0, 1.f);
+                p.processBlock(audio, midi);
+                for (int ch = 0; ch < 2; ++ch) for (int n = 0; n < 256; ++n) e += audio.getSample(ch, n) * audio.getSample(ch, n);
+            }
+            return e;
+        };
+        const double baseline = energy(0);
+        check(baseline > 1e-10, "source direct signal is audible");
+        setP(p, verbp::sourceSwitchId(0, false), 1);
+        check(energy(0) < baseline * 1e-8 && energy(1) > baseline * 0.5, "Mute gates only its own source");
+        setP(p, verbp::sourceSwitchId(0, false), 0);
+        setP(p, verbp::sourceSwitchId(0, true), 1);
+        check(energy(0) > baseline * 0.5 && energy(1) < baseline * 1e-8, "Solo excludes other sources");
+        setP(p, verbp::sourceSwitchId(1, true), 1);
+        check(energy(1) > baseline * 0.5, "multiple source solos combine");
+        setP(p, verbp::sourceSwitchId(1, false), 1);
+        check(energy(1) < baseline * 1e-8, "Mute takes priority over Solo");
+        setP(p, "soloDirect", 0); setP(p, "mix", 0);
+        check(energy(1) < 1e-8 && energy(0) > 0.9, "source switches also gate the mapped dry bypass");
+        p.setMixerCompactEnabled(false);
+        juce::MemoryBlock state; p.getStateInformation(state);
+        setP(p, verbp::sourceSwitchId(0, true), 0); p.setMixerCompactEnabled(true);
+        p.setStateInformation(state.getData(), (int)state.getSize());
+        check(waitReady(p, 90), "source switch state reloads");
+        check(!p.mixerCompactEnabled() && p.apvts.getRawParameterValue(verbp::sourceSwitchId(0, true))->load() == 1.f,
+              "source Solo and mixer width survive state restore");
+        auto xml = juce::AudioProcessor::getXmlFromBinary(state.getData(), (int)state.getSize());
+        auto legacy = juce::ValueTree::fromXml(*xml);
+        legacy.removeProperty("mixerCompact", nullptr);
+        for (int s = 0; s < verbp::kMaxSources; ++s) for (bool solo : {false, true}) legacy.removeChild(legacy.getChildWithProperty("id", verbp::sourceSwitchId(s, solo)), nullptr);
+        juce::MemoryBlock old; if (auto x = legacy.createXml()) juce::AudioProcessor::copyXmlToBinary(*x, old);
+        p.setStateInformation(old.getData(), (int)old.getSize()); check(waitReady(p, 90), "legacy state reloads");
+        check(p.mixerCompactEnabled() && p.apvts.getRawParameterValue(verbp::sourceSwitchId(0, true))->load() == 0.f
+              && p.apvts.getRawParameterValue(verbp::sourceSwitchId(1, false))->load() == 0.f, "legacy state defaults to Compact with all sources enabled");
+        return fails ? 1 : 0;
+    }
     if (std::getenv("VERB_MIXER_ONLY")) {
         VerbProcessor p;
         p.setPlayConfigDetails(32, 2, 48000, 256);
@@ -145,6 +332,8 @@ int main() {
         cfg[0].format = 1;  // exercise the stereo input-range caption
         p.setSources(cfg);
         check(waitReady(p, 90), "seventeen mixer sources load");
+        setP(p, verbp::sourceSwitchId(0, true), 1);
+        setP(p, verbp::sourceSwitchId(1, false), 1);
         juce::AudioBuffer<float> meterInput(32, 256); meterInput.clear();
         meterInput.setSample(0, 0, 0.5f); meterInput.setSample(1, 0, 0.2f);
         juce::MidiBuffer midi;
@@ -165,6 +354,13 @@ int main() {
                     if (f.openedOk()) { f.setPosition(0); f.truncate(); png.writeImageToStream(img, f); }
                     check(img.isValid(), "mixer, inputs and decay pages paint");
                 }
+                p.setMixerCompactEnabled(false); ed->showPage(2, -1);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+                auto normal = ed->createComponentSnapshot(ed->getLocalBounds());
+                juce::FileOutputStream f(dir.getChildFile("normal_" + juce::String(width) + ".png"));
+                juce::PNGImageFormat png;
+                if (f.openedOk()) { f.setPosition(0); f.truncate(); png.writeImageToStream(normal, f); }
+                p.setMixerCompactEnabled(true);
             }
             ed->showPage(2, -1);
             std::function<juce::Slider*(juce::Component&)> findGain = [&](juce::Component& c) -> juce::Slider* {

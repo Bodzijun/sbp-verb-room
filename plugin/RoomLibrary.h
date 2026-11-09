@@ -2,6 +2,7 @@
 // scene text, so it loads exactly like a room file (walls, floor/ceiling, zones, air, clutter, source and listener).
 #pragma once
 #include <array>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -418,6 +419,76 @@ inline BuiltinRoom chamberHall() {
     return orchestraRoom(h, chamberPlayers());
 }
 
+// A complete VSL Studio template: stereo pairs are averaged into independent
+// point sources, leaving the hall responsible for positioning and room sound.
+inline std::vector<Player> vslGrandPlayers() {
+    return {
+        {"Violins I", -7.8, 2.3, 0, 1.35}, {"Violins II", -3.8, 3.0, 0, 1.35},
+        {"Violas", 0.8, 3.2, 0, 1.30}, {"Cellos", 5.2, 2.6, 0, 0.90}, {"Double basses", 9.8, 5.4, 0, 1.20},
+        {"Solo violin", 0.0, 1.2, 0, 1.40}, {"Harp I", -10.8, 4.1, 0, 1.00}, {"Harp II", -11.5, 5.4, 0, 1.00},
+        {"Piccolo", -5.4, 8.0, 1, 1.45}, {"Flute I", -5.5, 6.8, 1, 1.45}, {"Flute II", -3.8, 6.8, 1, 1.45},
+        {"Oboe I", -2.0, 6.8, 1, 1.35}, {"Oboe II", -0.3, 6.8, 1, 1.35}, {"English horn", 1.4, 7.6, 1, 1.30},
+        {"Clarinet I", 0.0, 8.2, 1, 1.25}, {"Clarinet II", 1.7, 8.2, 1, 1.25}, {"Bass clarinet", 3.4, 8.2, 1, 1.25},
+        {"Bassoon I", 3.2, 6.8, 1, 1.30}, {"Bassoon II", 4.8, 6.8, 1, 1.30}, {"Contrabassoon", 5.2, 8.3, 1, 1.30},
+        {"Horns I-II", -7.3, 9.4, 2, 1.20}, {"Horns III-IV", -4.9, 9.6, 2, 1.20},
+        {"Trumpets I-II", -1.9, 9.7, 2, 1.45}, {"Trumpet III", 0.2, 9.7, 2, 1.45},
+        {"Tenor trombones", 3.0, 9.9, 2, 1.35}, {"Bass trombone", 5.5, 10.0, 2, 1.35}, {"Tuba", 7.8, 10.1, 2, 1.10},
+        {"Timpani", -4.0, 12.4, 3, 0.95}, {"Percussion - drums", 0.3, 12.6, 3, 1.00},
+        {"Percussion - metals", 4.5, 12.5, 3, 1.30}, {"Mallets", 8.2, 12.3, 3, 1.00}, {"Piano / celesta", -10.5, 2.3, 0, 1.10},
+    };
+}
+
+inline BuiltinRoom vslGrandHall(bool conductor) {
+    HallSpec h;
+    h.name = conductor ? "VSL Grand hall - conductor (32 stereo groups)" : "VSL Grand hall - audience (32 stereo groups)";
+    h.width = 28.0; h.audienceDepth = 34.0; h.stageDepth = 14.0; h.height = 18.5;
+    h.wall = "Wood_panel"; h.backWall = "Velvet_drapes";
+    h.stageH = 1.0; h.riserStep = 0.35;
+    h.riserY[0] = 6.3; h.riserY[1] = 8.9; h.riserY[2] = 11.7;
+    h.zoneX0 = -10.0; h.zoneX1 = 10.0; h.zoneY0 = -27.5; h.zoneY1 = -2.0;
+    h.canopyZ = 11.5; h.length = 3.2;
+    h.lisX = 0.0; h.lisY = conductor ? 0.2 : -14.0; h.lisZ = conductor ? 2.9 : 1.2;
+    auto room = orchestraRoom(h, vslGrandPlayers());
+    std::istringstream in(room.text);
+    auto sc = verb::parseScene(in, room.name);
+    // orchestraRoom shifted the construction frame by (+14, +34).
+    auto point = [](double x, double y) { return std::make_pair(x + 14.0, y + 34.0); };
+    verb::Material oak = verb::presetByName("Wood_panel");
+    oak.name = "Faceted_oak_wall"; oak.tau.fill(0); oak.scatter = 0.30; oak.scatterHf = 0.75;
+    const int side = (int)sc.mats.size(); sc.mats.push_back(oak);
+    auto rear = verb::presetByName("Velvet_drapes"); rear.name = "Rear_absorbing_wall"; rear.tau.fill(0);
+    const int back = (int)sc.mats.size(); sc.mats.push_back(rear);
+    const std::vector<std::pair<double, double>> outline = {
+        {-8.0, -34.0}, {7.2, -34.0}, {13.4, -29.0}, {16.0, -21.0}, {15.2, -12.0}, {13.8, -4.0},
+        {14.0, 0.0}, {14.0, 14.0}, {9.0, 17.0}, {-10.0, 17.0}, {-14.0, 14.0}, {-14.0, 0.0},
+        {-15.0, -6.0}, {-17.0, -15.0}, {-16.0, -24.0}, {-12.5, -30.0},
+    };
+    sc.walls.clear();
+    for (size_t i = 0; i < outline.size(); ++i) {
+        const auto a = point(outline[i].first, outline[i].second);
+        const auto b = point(outline[(i + 1) % outline.size()].first, outline[(i + 1) % outline.size()].second);
+        // Include the right bevel's endpoint at y=-29: both rear bevels and the back wall absorb.
+        const bool rearFace = outline[i].second <= -29 && outline[(i + 1) % outline.size()].second <= -29;
+        sc.walls.push_back(verb::Wall{a.first, a.second, b.first, b.second, rearFace ? back : side});
+    }
+    auto zone = [&](std::initializer_list<std::pair<double, double>> vertices, double z, const char* material, bool ceiling) {
+        verb::Zone a; a.z = z; a.mat = (int)sc.mats.size(); sc.mats.push_back(verb::presetByName(material));
+        for (const auto& p : vertices) a.poly.push_back(point(p.first, p.second));
+        (ceiling ? sc.ceilZones : sc.floorZones).push_back(a);
+    };
+    zone({{-8, -32.8}, {6.8, -32.8}, {10, -28}, {-10, -28}}, -1, "Audience_seated", false);
+    zone({{-14.2, -22}, {-11.5, -24}, {-10.8, -9}, {-14.5, -10}}, 3.6, "Audience_seated", false);
+    zone({{11.2, -23}, {14.3, -21}, {13.4, -7}, {10.8, -9}}, 4.2, "Audience_seated", false);
+    zone({{-8, -9}, {8, -8}, {7, -2}, {-7, -2}}, 10.6, "Wood_panel", true);
+    for (size_t i = 0; i < room.setup.size(); ++i) {
+        auto& c = room.setup[i]; c.format = 1; c.channels = 2; c.firstIn = 2 * (int)i; c.sum = true;
+    }
+    detail::listenerUp(sc, 0.0, true);
+    verb::sanitizeScene(sc); verb::compactMaterials(sc);
+    room.text = verb::serializeScene(sc);
+    return room;
+}
+
 inline std::vector<BuiltinRoom> builtinRooms() {
     using namespace detail;
     std::vector<std::pair<std::string, verb::Scene>> v;
@@ -489,6 +560,8 @@ inline std::vector<BuiltinRoom> builtinRooms() {
     out.push_back(chamberHall());
     out.push_back(symphonyHall(false));
     out.push_back(symphonyHall(true));
+    out.push_back(vslGrandHall(false));
+    out.push_back(vslGrandHall(true));
     return out;
 }
 

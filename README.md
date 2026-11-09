@@ -1,6 +1,6 @@
 # Verb Room
 
-Version 0.1.7: source mixer with input meters and automatable gain faders, Keep I/O when changing rooms, and longer tails with conservative host tail reporting. See the [0.1.7 release notes (Ukrainian)](docs/Release_0.1.7_uk.md) and [source mixer guide](docs/Source_mixer_0.1.7_uk.md). Includes [0.1.5 quality, decay and Solo controls](docs/Quality_decay_solo_0.1.5_uk.md) and the [0.1.4 tail fixes](docs/Tail_fix_0.1.4_uk.md).
+Version 0.1.10: complete shareable `.verbroom` presets, Compact / Normal source mixer with automatable Solo/Mute, and two VSL Grand Hall presets for 32 stereo groups. Includes Keep I/O and the long-tail cutoff fix. See the [English release notes](docs/Release_0.1.10_en.md), [preset exchange guide (Ukrainian)](docs/Presets_0.1.10_uk.md), and [earlier 0.1.7 notes (Ukrainian)](docs/Release_0.1.7_uk.md).
 
 A physically based room reverb for **REAPER and other VST3 hosts** (Windows x64), built for scenes where
 sources and the listener *move*: cars, fly-bys, games-style sound design, virtual rooms with many sources.
@@ -30,19 +30,25 @@ listener move. Position and orientation of every source and of the listener are 
   microphone patterns (omni … figure-8) and a **human-ears** pattern with head shadow (mic radius = ear spacing).
 - **Mix controls**: Dry/Wet (equal power), output gain, early-reflection level, diffusion, Doppler strength,
   **tail level**, and automatable, combinable **Direct / Early / Tail Solo** with smooth switching.
+- **Source mixer**: Compact / Normal channel strips with input meters, automatable gain and Solo/Mute,
+  input formats and assignments, summing, spread and directivity. Existing tails decay naturally when a source is muted.
+- **Shareable presets**: Save room creates a complete `.verbroom` file, including the scene, I/O setup, mixer and
+  tail quality. Keep I/O retains the current source setup and output when trying another room. Legacy `.txt` scenes still load.
 - **Tail quality**: Preview / Mix / Render profiles, manual ray budgets and bounded adaptive refinement, updated in the background without restarting the engine.
 - **Decay tab**: seven octave-band energy-decay curves, estimated RT60 from T20, and an indication of extrapolated regions. Individual curves can be hidden for comparison.
 - **Editor**: plan, front, side and 3D views; wall/zone/box-select tools; undo; a room library with 10 starter rooms and
   two MotorSynth car cabins; layers (show / lock / hide walls, floors, ceilings, plates); repeated click steps through
   surfaces that overlap; optional input channel meters (numbered as in the host).
-- **Tail length that fits the room**: the late tail is made as long as the room needs (up to 10 s) and fades out smoothly, so long decays are not cut off.
+- **Tail length that fits the room**: the late tail is made as long as the room needs (up to 20 s) and fades out smoothly, with conservative tail reporting to the host from startup.
 - **Orchestra halls**: a chamber hall and a symphony hall (listener in the audience or on the conductor's podium) with the instrument groups at their real places and heights on stage risers; see `docs/Orchestra_presets.md`.
+- **VSL Grand Hall**: two editable presets with audience and conductor positions, 32 stereo groups on 64 inputs,
+  a faceted asymmetric outline, balconies and stage risers. [Ready-to-load presets](presets/) are included; instruments and samples are loaded separately.
 - **IR export**: renders one 32-bit float WAV per engine point plus a text description of the room.
 
 ## Install (binary)
 
-Copy `Verb Room.vst3` to `C:\Program Files\Common Files\VST3\` and rescan plug-ins. If REAPER is running it keeps the old
-DLL in memory: restart it after replacing the file. A room is saved with the project; choose a library room again
+Close the DAW, copy the entire `Verb Room.vst3` folder to `C:\Program Files\Common Files\VST3\`, then reopen the DAW
+and rescan plug-ins if needed. A room is saved with the project; choose a library room again
 after updating if you want the new defaults.
 
 ## Using it in REAPER
@@ -51,12 +57,18 @@ Insert one instance on a bus and send your sources to it. Each source takes the 
 *Objects → First input channel*. With 30 sources of stereo pairs, put `Wind` on channels 21/22 in the send, and so on.
 The built-in "MotorSynth" rooms expect the layout of the SBP MotorSynth2 routing scheme (see `docs/`).
 
+For the 32-group VSL Grand Hall, configure 64 track inputs and disable Keep I/O when first loading the full setup.
+Presets configure the plug-in; host sends, pin mapping and Vienna instruments are set up separately.
+
+To share a room, use **Save room**, then **Open my library folder** and send the saved `.verbroom` file.
+The recipient loads it through **Load from file ...**. Complete presets require version 0.1.10 or a later version supporting format 1.
+
 ## Build
 
 Requirements: CMake ≥ 3.16, MSVC 2019+ (Windows), Git. JUCE 8.0.15 is a submodule.
 
 ```
-git clone --recurse-submodules https://github.com/<you>/sbp-verb-room.git
+git clone --recurse-submodules https://github.com/Bodzijun/sbp-verb-room.git
 cd sbp-verb-room
 cmake -S . -B build -DVERB_BUILD_PLUGIN=ON
 cmake --build build --config Release
@@ -75,6 +87,14 @@ build\plugin\VerbPluginStress_artefacts\Release\VerbPluginStress.exe
 ```
 
 The timing checks in `rt_test` depend on how busy the machine is and can fail on a loaded system.
+
+Portable-preset and VSL tests are also registered with CTest:
+
+```
+ctest --test-dir build -C Release -R "portable_presets|vsl_hall_presets|vsl_hall_tail" --output-on-failure
+```
+
+Before creating or changing scenes, read the [scene-authoring guide](docs/Scene_authoring_agents_uk.md).
 
 ## Limits worth knowing
 

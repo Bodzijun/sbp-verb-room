@@ -78,7 +78,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     addAndMakeVisible(exportBtn);
     roomBox.setTextWhenNothingSelected("Room library ...");
     roomBox.onChange = [this] { onRoomChosen(); };
-    saveRoomBtn.setTooltip("Save the room (walls, surfaces, zones, air, clutter, roughness) with the current source and listener positions to your library");
+    saveRoomBtn.setTooltip("Save a shareable .verbroom preset: room, positions, source formats and inputs, output, mixer, Solo/Mute and tail quality");
     exportBtn.setTooltip("Render the impulse responses of the current scene (one WAV per source point, one channel per output) to a folder");
     saveRoomBtn.onClick = [this] { saveRoomDialog(); };
     exportBtn.onClick = [this] { exportDialog(); };
@@ -842,7 +842,7 @@ void VerbEditor::refreshRoomBox() {
     userRooms.clear();
     const auto dir = libraryDir();
     if (dir.isDirectory()) {
-        for (auto& f : dir.findChildFiles(juce::File::findFiles, false, "*.txt")) userRooms.push_back(f);
+        for (auto& f : dir.findChildFiles(juce::File::findFiles, false, "*.txt;*.verbroom")) userRooms.push_back(f);
         std::sort(userRooms.begin(), userRooms.end(), [](const juce::File& a, const juce::File& b) { return a.getFileName().compareIgnoreCase(b.getFileName()) < 0; });
     }
     if (!userRooms.empty()) {
@@ -856,11 +856,19 @@ void VerbEditor::refreshRoomBox() {
 }
 
 void VerbEditor::loadRoomText(const juce::String& text, const juce::String& name) {
+    if (name.endsWithIgnoreCase(".verbroom")) {
+        juce::String error;
+        if (!proc.loadRoomPresetText(text, error)) {
+            juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Cannot load preset", error);
+            return;
+        }
+    } else {
+        proc.loadSceneText(text, name, true);
+    }
     undoStack.clear();
     selKind = SelKind::Object;
     selWall = -1;
     zonePts.clear();
-    proc.loadSceneText(text, name, true);
 }
 
 void VerbEditor::onRoomChosen() {
@@ -891,10 +899,25 @@ void VerbEditor::saveRoomDialog() {
                            const auto name = juce::File::createLegalFileName(w->getTextEditorContents("name").trim());
                            if (name.isEmpty()) return;
                            auto dir = libraryDir();
-                           if (!dir.createDirectory()) return;
-                           auto f = dir.getChildFile(name + ".txt");
-                           f.replaceWithText(self->proc.getRoomText());
-                           self->refreshRoomBox();
+                           const auto preset = self->proc.getRoomPresetText();
+                           if (preset.isEmpty()) {
+                               juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Cannot save preset", "Wait for the room to finish loading, then save again.");
+                               return;
+                           }
+                           auto f = dir.getChildFile(name + ".verbroom");
+                           auto save = [self, f, preset](int result) {
+                               if (result != 1 || self == nullptr) return;
+                               if (!f.getParentDirectory().createDirectory() || !f.replaceWithText(preset)) {
+                                   juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Cannot save preset", "Could not write " + f.getFullPathName());
+                                   return;
+                               }
+                               self->refreshRoomBox();
+                           };
+                           if (f.existsAsFile())
+                               juce::AlertWindow::showAsync(juce::MessageBoxOptions().withIconType(juce::MessageBoxIconType::QuestionIcon)
+                                   .withTitle("Replace preset?").withMessage(f.getFileName() + " already exists.")
+                                   .withButton("Replace").withButton("Cancel"), save);
+                           else save(1);
                        }),
                        true);
 }
@@ -913,15 +936,12 @@ void VerbEditor::exportDialog() {
 }
 
 void VerbEditor::chooseScene() {
-    chooser = std::make_unique<juce::FileChooser>("Choose a room scene", juce::File(), "*.txt");
-    chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this](const juce::FileChooser& fc) {
+    chooser = std::make_unique<juce::FileChooser>("Choose a room preset or scene", juce::File(), "*.verbroom;*.txt");
+    juce::Component::SafePointer<VerbEditor> self(this);
+    chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [self](const juce::FileChooser& fc) {
+        if (self == nullptr) return;
         auto f = fc.getResult();
-        if (f.existsAsFile()) {
-            undoStack.clear();
-            selKind = SelKind::Object;
-            selWall = -1;
-            proc.loadSceneText(f.loadFileAsString(), f.getFileName(), true);
-        }
+        if (f.existsAsFile()) self->loadRoomText(f.loadFileAsString(), f.getFileName());
     });
 }
 

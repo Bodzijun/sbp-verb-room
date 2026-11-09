@@ -35,3 +35,10 @@ target_link_libraries(VerbPluginTest PRIVATE
     verbcore
     juce::juce_audio_utils
     juce::juce_recommended_config_flags)
+
+add_test(NAME portable_presets COMMAND VerbPluginTest)
+set_tests_properties(portable_presets PROPERTIES
+    ENVIRONMENT "VERB_PRESETS_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 240)
+add_test(NAME vsl_hall_presets COMMAND VerbPluginTest)
+set_tests_properties(vsl_hall_presets PROPERTIES
+    ENVIRONMENT "VERB_VSL_HALL_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 360)

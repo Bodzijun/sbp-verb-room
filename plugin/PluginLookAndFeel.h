@@ -201,6 +201,8 @@ public:
         r = r.reduced(0.5f);
         juce::Colour fill;
         if (st == "primary") fill = (hover ? accentHi : accent).withMultipliedBrightness(down ? 0.85f : 1.f);
+        else if (st == "sourceSolo" && on) fill = juce::Colour(0xffe6bd61).withAlpha(0.3f);
+        else if (st == "sourceMute" && on) fill = juce::Colour(0xfff07882).withAlpha(0.3f);
         else if (st == "ghost") fill = on ? accent.withAlpha(0.20f) : (hover ? fieldHi : juce::Colours::transparentBlack);
         else fill = on ? accent.withAlpha(0.24f) : (hover ? fieldHi : field);
         if (down && st != "primary") fill = fill.brighter(0.08f);
@@ -215,6 +217,8 @@ public:
         juce::Colour c = text;
         if (st == "tab") c = on ? text : (hover ? textMid : textDim);
         else if (st == "primary") c = juce::Colours::white;
+        else if (st == "sourceSolo" && on) c = juce::Colour(0xffe6bd61);
+        else if (st == "sourceMute" && on) c = juce::Colour(0xfff07882);
         else if (on) c = accentHi;
         else if (!b.isEnabled()) c = textDim;
         g.setColour(c);

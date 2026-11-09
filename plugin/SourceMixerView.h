@@ -7,7 +7,7 @@ class SourceMixerView : public juce::Component {
     class Strip : public juce::Component {
     public:
         Strip(VerbProcessor& p, int i) : proc(p), index(i) {
-            for (auto* c : std::initializer_list<juce::Component*>{&name, &format, &input, &gain, &spread, &pattern, &sum}) addAndMakeVisible(*c);
+            for (auto* c : std::initializer_list<juce::Component*>{&name, &format, &input, &gain, &spread, &pattern, &sum, &solo, &mute}) addAndMakeVisible(*c);
             name.setSelectAllWhenFocused(true);
             name.onReturnKey = [this] { commitName(); name.giveAwayKeyboardFocus(); };
             name.onFocusLost = [this] { commitName(); };
@@ -17,6 +17,14 @@ class SourceMixerView : public juce::Component {
             input.onChange = [this] { edit([this](auto& c) { c.firstIn = input.getSelectedId() - 1; }); };
             sum.setButtonText("Sum to mono");
             sum.onClick = [this] { edit([this](auto& c) { c.sum = sum.getToggleState(); }); };
+            for (auto* button : {&solo, &mute}) button->setClickingTogglesState(true);
+            solo.setName("Source " + juce::String(index + 1) + " solo");
+            mute.setName("Source " + juce::String(index + 1) + " mute");
+            solo.getProperties().set("style", "sourceSolo"); mute.getProperties().set("style", "sourceMute");
+            solo.setTooltip("Solo this source. Several sources can be soloed together; existing reverb tails decay naturally.");
+            mute.setTooltip("Mute new input from this source. Existing reverb tails decay naturally. Mute takes priority over Solo.");
+            soloAttachment = std::make_unique<juce::ButtonParameterAttachment>(*proc.apvts.getParameter(verbp::sourceSwitchId(index, true)), solo);
+            muteAttachment = std::make_unique<juce::ButtonParameterAttachment>(*proc.apvts.getParameter(verbp::sourceSwitchId(index, false)), mute);
             gain.setSliderStyle(juce::Slider::LinearVertical);
             gain.getProperties().set("sourceFader", true);
             gain.setName("Source " + juce::String(index + 1) + " gain");
@@ -42,6 +50,7 @@ class SourceMixerView : public juce::Component {
         void sync(const verbp::SourceCfg& c) {
             syncing = true;
             if (!name.hasKeyboardFocus(true)) name.setText(c.name, false);
+            name.setTooltip(c.name);
             format.setSelectedId(c.format + 1, juce::dontSendNotification);
             input.setSelectedId(c.firstIn + 1, juce::dontSendNotification);
             sum.setToggleState(c.sum, juce::dontSendNotification);
@@ -57,24 +66,33 @@ class SourceMixerView : public juce::Component {
             repaint();
         }
         void resized() override {
-            auto a = getLocalBounds().reduced(12);
+            const bool compact = getWidth() < 120;
+            auto a = getLocalBounds().reduced(compact ? 8 : 12);
+            sum.setButtonText(compact ? "Sum" : "Sum to mono");
+            for (int k = 1; k <= verbp::kMaxInputChannels; ++k) input.changeItemText(k, compact ? juce::String(k) : "Input " + juce::String(k));
+            gain.setTextBoxStyle(juce::Slider::TextBoxBelow, false, std::min(84, a.getWidth()), 24);
+            for (auto* s : {&spread, &pattern}) s->setTextBoxStyle(juce::Slider::TextBoxBelow, false, std::min(100, a.getWidth()), 20);
             a.removeFromTop(22); name.setBounds(a.removeFromTop(26)); a.removeFromTop(10);
             format.setBounds(a.removeFromTop(26)); a.removeFromTop(6);
             input.setBounds(a.removeFromTop(26));
             a.removeFromTop(8); inputCaption = a.removeFromTop(18);
             a.removeFromTop(10); sum.setBounds(a.removeFromTop(24)); a.removeFromTop(8);
+            auto buttons = a.removeFromTop(26);
+            solo.setBounds(buttons.removeFromLeft((buttons.getWidth() - 4) / 2)); buttons.removeFromLeft(4); mute.setBounds(buttons);
+            a.removeFromTop(8);
             auto bottom = a.removeFromBottom(126);
             bottom.removeFromTop(18); spread.setBounds(bottom.removeFromTop(42));
             bottom.removeFromTop(24); pattern.setBounds(bottom.removeFromTop(42));
-            meter = a.removeFromRight(18).withTrimmedBottom(28).toFloat();
-            a.removeFromRight(8); gain.setBounds(a);
+            meter = a.removeFromRight(compact ? 8 : 12).withTrimmedBottom(28).toFloat();
+            a.removeFromRight(compact ? 4 : 6); gain.setBounds(a);
         }
         void paint(juce::Graphics& g) override {
             g.setColour(skin::canvas.brighter(0.05f)); g.fillRoundedRectangle(getLocalBounds().reduced(3).toFloat(), 6);
             const float hue = std::fmod(164.f / 360.f + 0.137f * index, 1.f);
             auto colour = juce::Colour::fromHSV(hue, 0.6f, 0.92f, 1.f);
-            g.setColour(colour); g.fillRect(12, 12, getWidth() - 24, 3);
-            g.setFont(12.f); g.drawText("SOURCE " + juce::String(index + 1), 12, 17, getWidth() - 24, 18, juce::Justification::centredLeft);
+            const int pad = getWidth() < 120 ? 8 : 12;
+            g.setColour(colour); g.fillRect(pad, 12, getWidth() - 2 * pad, 3);
+            g.setFont(12.f); g.drawText((getWidth() < 120 ? "SRC " : "SOURCE ") + juce::String(index + 1), pad, 17, getWidth() - 2 * pad, 18, juce::Justification::centredLeft);
             const bool missing = first + channels > proc.hostInputChannels();
             g.setColour(missing ? juce::Colours::orange : skin::textDim);
             g.drawText("Inputs " + juce::String(first + 1) + (channels > 1 ? "-" + juce::String(first + channels) : "") + (missing ? " !" : ""), inputCaption, juce::Justification::centredLeft);
@@ -85,7 +103,7 @@ class SourceMixerView : public juce::Component {
             g.fillRect(meter.withTrimmedTop(meter.getHeight() * (1.f - level)));
             g.setColour(skin::textDim);
             g.drawText("Spread", spread.getX(), spread.getY() - 18, spread.getWidth(), 18, juce::Justification::centredLeft);
-            g.drawText("Directivity", pattern.getX(), pattern.getY() - 18, pattern.getWidth(), 18, juce::Justification::centredLeft);
+            g.drawText(getWidth() < 120 ? "Pattern" : "Directivity", pattern.getX(), pattern.getY() - 18, pattern.getWidth(), 18, juce::Justification::centredLeft);
         }
     private:
         template <typename Fn> void edit(Fn fn) {
@@ -109,16 +127,26 @@ class SourceMixerView : public juce::Component {
         juce::ComboBox format, input;
         juce::Slider gain, spread, pattern;
         juce::ToggleButton sum;
+        juce::TextButton solo{"S"}, mute{"M"};
         std::unique_ptr<juce::SliderParameterAttachment> gainAttachment;
+        std::unique_ptr<juce::ButtonParameterAttachment> soloAttachment, muteAttachment;
     };
 public:
     explicit SourceMixerView(VerbProcessor& p) : proc(p) {
         addAndMakeVisible(viewport);
         viewport.setViewedComponent(&content, false);
         viewport.setScrollBarsShown(false, true);
+        for (auto* button : {&compactButton, &normalButton}) {
+            addAndMakeVisible(*button); button->setClickingTogglesState(true);
+        }
+        compactButton.setName("Compact source strips"); normalButton.setName("Normal source strips");
+        compactButton.onClick = [this] { proc.setMixerCompactEnabled(true); refreshLayout(); };
+        normalButton.onClick = [this] { proc.setMixerCompactEnabled(false); refreshLayout(); };
+        refreshLayout();
     }
     void refresh() {
         const auto cfg = proc.getSources();
+        if (compact != proc.mixerCompactEnabled()) refreshLayout();
         if (strips.size() != cfg.size()) {
             strips.clear();
             for (int i = 0; i < (int)cfg.size(); ++i) {
@@ -130,20 +158,31 @@ public:
         for (size_t i = 0; i < cfg.size(); ++i) strips[i]->sync(cfg[i]);
     }
     void resized() override {
+        normalButton.setBounds(getWidth() - 82, 8, 70, 26);
+        compactButton.setBounds(getWidth() - 162, 8, 76, 26);
         viewport.setBounds(getLocalBounds().withTrimmedTop(44).withTrimmedBottom(26));
-        const int height = std::max(410, viewport.getHeight() - viewport.getScrollBarThickness());
-        content.setSize(std::max(viewport.getWidth(), (int)strips.size() * 180), height);
-        for (size_t i = 0; i < strips.size(); ++i) strips[i]->setBounds((int)i * 180, 0, 180, height);
+        const int height = std::max(450, viewport.getHeight() - viewport.getScrollBarThickness());
+        const int width = compact ? 92 : 160;
+        content.setSize(std::max(viewport.getWidth(), (int)strips.size() * width), height);
+        for (size_t i = 0; i < strips.size(); ++i) strips[i]->setBounds((int)i * width, 0, width, height);
         viewport.setScrollBarsShown(height > viewport.getHeight(), true);
     }
     void paint(juce::Graphics& g) override {
         g.fillAll(skin::canvas); g.setColour(skin::text); g.setFont(16.f);
-        g.drawText("Source mixer", 14, 8, getWidth() - 28, 26, juce::Justification::centredLeft);
+        g.drawText("Source mixer", 14, 8, getWidth() - 188, 26, juce::Justification::centredLeft);
         g.setColour(skin::textDim); g.setFont(11.f);
         g.drawText("Meters: input peaks before source gain. Scroll to see more sources.", 14, getHeight() - 22, getWidth() - 28, 18, juce::Justification::centredLeft);
     }
 private:
+    void refreshLayout() {
+        compact = proc.mixerCompactEnabled();
+        compactButton.setToggleState(compact, juce::dontSendNotification);
+        normalButton.setToggleState(!compact, juce::dontSendNotification);
+        resized();
+    }
     VerbProcessor& proc;
+    bool compact = true;
+    juce::TextButton compactButton{"Compact"}, normalButton{"Normal"};
     juce::Component content;
     juce::Viewport viewport;
     std::vector<std::unique_ptr<Strip>> strips;

@@ -22,6 +22,7 @@ inline juce::String paramId(int obj, int k) {
     static const char* comp[5] = {"x", "y", "z", "az", "g"};
     return (obj == kListener ? juce::String("l") : "s" + juce::String(obj + 1)) + comp[k];
 }
+inline juce::String sourceSwitchId(int source, bool solo) { return "s" + juce::String(source + 1) + (solo ? "solo" : "mute"); }
 
 struct OutputCfg {
     // The output layout is a setting of the listener, independent of how many channels the track happens to have
@@ -98,6 +99,10 @@ public:
     // ---- room library / IR export ----
     // The room as scene text with the CURRENT source and listener positions (for the room library).
     juce::String getRoomText() const;
+    // Portable XML preset, including the complete source setup, output and mix. Message thread only.
+    juce::String getRoomPresetText();
+    // Validates before changing state. Keep I/O and local display preferences remain local.
+    bool loadRoomPresetText(const juce::String&, juce::String& error);
     // Renders the impulse response of every engine point (one multichannel WAV per point, channels = the output
     // layout) from the current scene, positions and layout, into `dir`, on a background thread. Also writes the room.
     void startExportIR(const juce::File& dir);
@@ -117,6 +122,8 @@ public:
     void setInputMetersEnabled(bool on) { inputMetersOn = on; }  // an editor option saved with the project
     bool keepRoutingEnabled() const { return keepRouting.load(); }
     void setKeepRoutingEnabled(bool on) { keepRouting = on; }
+    bool mixerCompactEnabled() const { return mixerCompact.load(); }
+    void setMixerCompactEnabled(bool on) { mixerCompact = on; }
     float inputPeak(int ch) const { return ch >= 0 && ch < verbp::kMaxInputChannels ? inPeaks[(size_t)ch].load(std::memory_order_relaxed) : 0.f; }
     int numPoints() const { return numPts.load(); }
     int numOutputChannels() const { return builtOutCh.load(); }  // channels the engine renders (the layout's)
@@ -181,6 +188,7 @@ private:
     std::atomic<int> state{0};
     std::atomic<bool> inputMetersOn{true};
     std::atomic<bool> keepRouting{false};
+    std::atomic<bool> mixerCompact{true};
     std::array<std::atomic<float>, verbp::kMaxInputChannels> inPeaks{};
     std::array<int, verbp::kMaxInputChannels> inMap{};  // host input channel -> buffer channel (see InputOrder.h)
     std::atomic<int> numPts{0}, builtOutCh{0}, builtLayout{0}, hostOutCh{2}, hostInCh{2}, builtForHostCh{0};
@@ -201,6 +209,8 @@ private:
     std::atomic<float>* mixParam = nullptr;
     std::atomic<float>* tailParam = nullptr;
     std::atomic<float>* soloParam[3] = {};
+    std::atomic<float>* sourceMute[verbp::kMaxSources] = {};
+    std::atomic<float>* sourceSolo[verbp::kMaxSources] = {};
     juce::SmoothedValue<float> lfeSoloGain{1.f};
     float prevWet = 1.f, prevDry = 0.f;  // audio thread: the dry/wet gains at the end of the last block
     std::atomic<float> srcPattern[verbp::kMaxSources] = {};  // live directivity of every source (audio thread reads)
@@ -215,6 +225,8 @@ private:
     int hN = 0, hN2 = 0;
     uint64_t hSeen = ~0ull;  // engine serial the smoothing state belongs to
     float prevGain[verbp::kMaxSources] = {};
+    float prevSourceGate[verbp::kMaxSources] = {};
+    bool prevAnySourceSolo = false;
     double hostSr = 48000;
     int maxBlock = 512;
 

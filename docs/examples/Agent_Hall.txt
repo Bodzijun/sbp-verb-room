@@ -1,0 +1,23 @@
+# Minimal closed hall. Units: metres / degrees / seconds. UTF-8.
+# Import in Verb Room, configure I/O and mixer, then Save room as .verbroom.
+sr 48000
+length 3
+height 8
+temp 20
+humidity 50
+order 2
+rays 48000
+seed 17
+detect_radius 0.5
+material Oak 0.10 0.08 0.08 0.10 0.12 0.15 0.18 0.25 0.65
+material Rear 0.12 0.25 0.45 0.60 0.65 0.70 0.70 0.20 0.50
+floor Oak
+ceiling Oak
+wall 0 0 12 0 Rear
+wall 12 0 12 20 Oak
+wall 12 20 0 20 Oak
+wall 0 20 0 0 Oak
+listener 6 6 1.2 90
+source Violins 4 15 1.4 -90 0 0 0
+receiver L 5.91 6 1.2 120 0.5 0 0
+receiver R 6.09 6 1.2 60 0.5 0 0
