@@ -1,6 +1,6 @@
 # Verb Room
 
-Version 0.1.10: complete shareable `.verbroom` presets, Compact / Normal source mixer with automatable Solo/Mute, and two VSL Grand Hall presets for 32 stereo groups. Includes Keep I/O and the long-tail cutoff fix. See the [English release notes](docs/Release_0.1.10_en.md), [preset exchange guide (Ukrainian)](docs/Presets_0.1.10_uk.md), and [earlier 0.1.7 notes (Ukrainian)](docs/Release_0.1.7_uk.md).
+Version 0.1.10: complete shareable `.verbroom` presets, Compact / Normal source mixer with automatable Solo/Mute, and two VSL Grand Hall presets for 32 stereo groups. Includes Keep I/O and the long-tail cutoff fix. See the [English release notes](docs/Release_0.1.10_en.md), [preset exchange guide](docs/Presets_0.1.10_en.md), and [earlier 0.1.7 notes (Ukrainian)](docs/Release_0.1.7_uk.md).
 
 A physically based room reverb for **REAPER and other VST3 hosts** (Windows x64), built for scenes where
 sources and the listener *move*: cars, fly-bys, games-style sound design, virtual rooms with many sources.
@@ -94,7 +94,7 @@ Portable-preset and VSL tests are also registered with CTest:
 ctest --test-dir build -C Release -R "portable_presets|vsl_hall_presets|vsl_hall_tail" --output-on-failure
 ```
 
-Before creating or changing scenes, read the [scene-authoring guide](docs/Scene_authoring_agents_uk.md).
+Before creating or changing scenes, read the [scene-authoring guide](docs/Scene_authoring_agents_en.md).
 
 ## Limits worth knowing
 

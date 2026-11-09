@@ -1,5 +1,7 @@
 # Verb Room: інструкція агенту для створення сцен
 
+[English version](Scene_authoring_agents_en.md)
+
 Цей документ описує поточну реалізацію 0.1.10. Перед зміною формату перевіряй код: `src/scene.hpp`, `src/rt_engine.cpp`, `plugin/SourceModel.h`, `plugin/RoomLibrary.h`, `plugin/PluginProcessor.cpp`. Не змінюй відкритий проєкт користувача в DAW або Vienna без завдання на це.
 
 ## 1. Обери формат

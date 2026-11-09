@@ -2,6 +2,8 @@
 
 Source mixer improvements, a larger orchestra setup, and complete presets you can share.
 
+Documentation: [preset sharing and Keep I/O](Presets_0.1.10_en.md) · [scene authoring for agents](Scene_authoring_agents_en.md).
+
 ## Changes since 0.1.7
 
 ### 0.1.10 — Shareable presets and hall correction
