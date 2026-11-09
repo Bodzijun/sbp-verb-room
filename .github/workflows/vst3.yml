@@ -90,7 +90,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           bundle="build/plugin/VerbPlugin_artefacts/Release/VST3/Verb Room.vst3"
-          lipo -verify_arch arm64 x86_64 "$bundle/Contents/MacOS/Verb Room"
+          lipo "$bundle/Contents/MacOS/Verb Room" -verify_arch arm64 x86_64
           codesign --force --deep --sign - "$bundle"
           codesign --verify --deep --strict "$bundle"
 
