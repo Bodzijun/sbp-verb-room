@@ -151,6 +151,27 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     const std::string dir = argc > 1 ? argv[1] : "";
     if (!dir.empty()) std::filesystem::create_directories(dir);
+    if (std::getenv("VERB_CATHEDRAL_ONLY")) {
+        const auto rooms = verbp::builtinRooms();
+        const auto it = std::find_if(rooms.begin(), rooms.end(), [](const auto& r) { return r.name == "Cathedral (long tail)"; });
+        if (it == rooms.end()) return 1;
+        std::istringstream in(it->text);
+        Scene sc = parseScene(in, it->name);
+        sc.sr = 44100;
+        sc.receivers = makeReceiverArray(Layout::StereoORTF, sc.listenerPos, 0.1, 2);
+        while (sc.sources.size() < 8) sc.sources.push_back(sc.sources[0]);
+        const auto run = impulse(sc, true, 0);
+        std::printf("Cathedral shared: %.3f s\n", run.length);
+        const auto levels = envelope(run.wav);
+        const double peak = *std::max_element(levels.begin(), levels.end());
+        const size_t beforeFade = (size_t)std::max(0.0, std::floor((run.length - 0.65) / 0.05));
+        const double fadeStart = levels[std::min(beforeFade, levels.size() - 1)] - peak;
+        std::printf("  level before final fade: %.1f dB relative to peak\n", fadeStart);
+        check(run.length > 10.0, "long cathedral is not truncated at ten seconds");
+        check(fadeStart < -75.0, "final fade starts after cathedral tail becomes quiet");
+        if (!dir.empty()) save(run, dir + "/cathedral");
+        return failures ? 1 : 0;
+    }
     const bool quick = argc > 2 && std::string(argv[2]) == "quick";
     const char* names[] = {"chamber", "audience", "conductor", "conductor-further"};
     try {

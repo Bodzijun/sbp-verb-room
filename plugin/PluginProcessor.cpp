@@ -341,6 +341,7 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
         st.setProperty("sceneText", sceneText, nullptr);
         st.setProperty("sceneName", sceneName, nullptr);
         st.setProperty("inputMeters", inputMetersOn.load(), nullptr);
+        st.setProperty("keepRouting", keepRouting.load(), nullptr);
         st.setProperty("tailRays", tailSettings.rays, nullptr);
         st.setProperty("adaptiveTail", tailSettings.adaptive, nullptr);
         st.removeChild(st.getChildWithName("Sources"), nullptr);
@@ -418,6 +419,7 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
         syncPatterns();
     }
     inputMetersOn = (bool)st.getProperty("inputMeters", true);
+    keepRouting = (bool)st.getProperty("keepRouting", false);
     for (const char* id : {"soloDirect", "soloEarly", "soloTail"}) {
         if (!st.getChildWithProperty("id", id).isValid()) {
             juce::ValueTree p("PARAM"); p.setProperty("id", id, nullptr); p.setProperty("value", 0.f, nullptr);
@@ -447,6 +449,7 @@ void VerbProcessor::loadSceneText(const juce::String& text, const juce::String& 
         req.name = name.toStdString();
         req.setup = nextSetup;
         req.micPattern = nextMic;
+        req.keepRouting = keepRouting.load();
         nextSetup.clear();
         nextMic = -1;
         req.sr = hostSr;
@@ -768,9 +771,9 @@ void VerbProcessor::run() {
             verbp::OutputCfg ocfg;
             {
                 juce::ScopedLock l(dispLock);
-                if (useDefaults && !r.setup.empty()) {  // the room brings its own sources (e.g. the car's engine stems)
+                if (useDefaults && !r.keepRouting && !r.setup.empty()) {  // the room brings its own sources (e.g. the car's engine stems)
                     srcCfg = r.setup;
-                } else if (useDefaults || srcCfg.empty()) {
+                } else if ((useDefaults && !r.keepRouting) || srcCfg.empty()) {
                     srcCfg.clear();
                     for (size_t i = 0; i < sc.sources.size() && (int)i < verbp::kMaxSources; ++i) {
                         verbp::SourceCfg c;
@@ -780,8 +783,8 @@ void VerbProcessor::run() {
                     }
                     if (srcCfg.empty()) srcCfg.push_back(verbp::SourceCfg{});
                 }
-                if (useDefaults && r.micPattern >= 0) outCfg.micPattern = std::min(std::max(r.micPattern, 0), (int)verb::MicPattern::HumanEars);
-                if (useDefaults && r.micPattern == (int)verb::MicPattern::HumanEars) outCfg.radius = 0.0875;  // ears at the head half-width
+                if (useDefaults && !r.keepRouting && r.micPattern >= 0) outCfg.micPattern = std::min(std::max(r.micPattern, 0), (int)verb::MicPattern::HumanEars);
+                if (useDefaults && !r.keepRouting && r.micPattern == (int)verb::MicPattern::HumanEars) outCfg.radius = 0.0875;  // ears at the head half-width
                 cfg = srcCfg;
                 ocfg = outCfg;
             }
@@ -873,7 +876,6 @@ void VerbProcessor::run() {
             {
                 juce::SpinLock::ScopedLockType l(engineLock);
                 bundle.swap(nb);
-                tailSeconds = bundle->engine->tailSeconds() + 0.25;  // the host keeps calling us until the tail has died away
                 updateBounds(sc);
                 ++loadSerial;
             }

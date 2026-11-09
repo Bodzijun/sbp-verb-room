@@ -259,7 +259,7 @@ inline double clampTo(double v, double lo, double hi, double def) { return std::
 // Makes any scene safe for the engine: finite, in range, no degenerate walls, consistent materials. Used for every
 // scene that comes from outside (files, project state) and after every edit.
 inline void sanitizeScene(Scene& s) {
-    s.length = clampTo(s.length, 0.2, 10.0, 2.0);
+    s.length = clampTo(s.length, 0.2, 20.0, 2.0);
     s.height = clampTo(s.height, 0.3, 100.0, 3.0);
     s.tempC = clampTo(s.tempC, -60.0, 70.0, 20.0);
     s.humidity = clampTo(s.humidity, 0.0, 100.0, 50.0);

@@ -10,6 +10,7 @@
 #include "PluginProcessor.h"
 #include "RoomLibrary.h"
 #include "TailDecayView.h"
+#include "SourceMixerView.h"
 
 // Room editor. Canvas: drag sources/listener; Move tool: drag wall endpoints (shared corners move together) or
 // whole segments; Add-wall tool: drag out a new segment (snaps to corners and a 10 cm grid, Alt = free);
@@ -150,6 +151,7 @@ private:
     // header
     juce::TextButton loadButton{"Load scene..."};  // (not shown: the room box has "Load from file...")
     juce::ComboBox roomBox;                         // room library: built-in rooms, the user's saved rooms, load from file
+    juce::ToggleButton keepRoutingBtn{"Keep I/O"};
     juce::TextButton saveRoomBtn{"Save room"}, exportBtn{"Export IR"};
     std::vector<verbp::BuiltinRoom> builtins;
     std::vector<juce::File> userRooms;
@@ -164,6 +166,7 @@ private:
     juce::TextButton tabObjects{"Objects"}, tabSurfaces{"Surfaces"}, tabMix{"Mix"}, tabSpace{"Space"};
     juce::TextButton tabDecay{"Decay"};
     TailDecayView decayView;
+    SourceMixerView sourceMixer{proc};
     juce::ComboBox qualityBox;
     juce::Label qualityLabel, qualityInfo;
     Row rayRow;

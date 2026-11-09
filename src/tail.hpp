@@ -42,7 +42,7 @@ TailHist traceTailAdaptive(const Scene&, const Transducer&, const std::vector<Tr
 TailDiagnostics analyzeTail(const TailHist& finalized);
 
 // How long the late tail has to be so that nothing audible is cut off: the time (a quick trace of the room, mid bands) at
-// which the remaining energy has fallen 70 dB (a held tone is still audible at 60), plus a margin. The scene's own `length` is the minimum; at most 10 s.
+// which the remaining energy has fallen 80 dB, plus a margin for the final fade. The scene's own length is the minimum; at most 20 s.
 double effectiveTailSeconds(const Scene& sc, int erOrder);
 
 // Fades the last part of every channel of a tail IR to silence (a raised cosine), so that a tail that is still audible at the

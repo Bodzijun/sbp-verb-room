@@ -52,7 +52,9 @@ public:
     bool hasEditor() const override { return true; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
-    double getTailLengthSeconds() const override { return tailSeconds.load(); }
+    // Hosts may query and cache this before the asynchronous room has loaded.
+    // Report the maximum supported tail from the outset, including engine latency.
+    double getTailLengthSeconds() const override { return 20.25; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
@@ -113,6 +115,8 @@ public:
     // numbering of the host's sends can be checked against the sources that read them.
     bool inputMetersEnabled() const { return inputMetersOn.load(); }
     void setInputMetersEnabled(bool on) { inputMetersOn = on; }  // an editor option saved with the project
+    bool keepRoutingEnabled() const { return keepRouting.load(); }
+    void setKeepRoutingEnabled(bool on) { keepRouting = on; }
     float inputPeak(int ch) const { return ch >= 0 && ch < verbp::kMaxInputChannels ? inPeaks[(size_t)ch].load(std::memory_order_relaxed) : 0.f; }
     int numPoints() const { return numPts.load(); }
     int numOutputChannels() const { return builtOutCh.load(); }  // channels the engine renders (the layout's)
@@ -134,6 +138,7 @@ private:
         double sr = 48000;
         std::vector<verbp::SourceCfg> setup;  // optional sources that come with the room (applied with the defaults)
         int micPattern = -1;                   // optional listener microphone pattern (-1 = keep)
+        bool keepRouting = false;              // preserve source configuration and listener output settings
     };
     std::vector<verbp::SourceCfg> nextSetup;   // guarded by reqLock: picked up by the next loadSceneText
     int nextMic = -1;
@@ -175,10 +180,11 @@ private:
     verbp::TailSettings tailSettings;
     std::atomic<int> state{0};
     std::atomic<bool> inputMetersOn{true};
+    std::atomic<bool> keepRouting{false};
     std::array<std::atomic<float>, verbp::kMaxInputChannels> inPeaks{};
     std::array<int, verbp::kMaxInputChannels> inMap{};  // host input channel -> buffer channel (see InputOrder.h)
     std::atomic<int> numPts{0}, builtOutCh{0}, builtLayout{0}, hostOutCh{2}, hostInCh{2}, builtForHostCh{0};
-    std::atomic<double> sceneHeight{3.0}, tailSeconds{2.0}, builtSr{0.0};
+    std::atomic<double> sceneHeight{3.0}, builtSr{0.0};
     std::atomic<double> bounds[4] = {};
     std::atomic<bool> hasBounds{false}, ceilOpen{false};
     std::atomic<bool> geomDirty{false};

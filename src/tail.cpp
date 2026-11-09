@@ -365,34 +365,40 @@ double effectiveTailSeconds(const Scene& sc, int erOrder) {
     double len = sc.length;
     if (!sc.sources.empty() && !sc.receivers.empty() && !sc.walls.empty()) {
         Scene t = sc;
-        t.length = 10.0;  // the longest tail the engine will make
+        t.length = 20.0;  // allow long-decay rooms to reach the target before the final fade
         const std::vector<Transducer> rc{t.receivers[0]};
         // A 6000-ray probe often loses confidence during the initial build-up in
         // absorbing halls, making a tiny slope error inflate the allocation to
         // several seconds. Use the same order of ray budget as the live tail.
         const TailHist h = traceTail(t, t.sources[0], rc, erOrder, 48000, t.seed);
         double need = 0;
-        for (int b = 2; b <= 4; ++b) {  // 500 Hz .. 2 kHz
+        std::array<double, NB> totals{};
+        double largest = 0;
+        for (int b = 0; b < NB; ++b) {
+            for (double v : h.h[0][(size_t)b]) totals[(size_t)b] += v;
+            largest = std::max(largest, totals[(size_t)b]);
+        }
+        for (int b = 0; b < NB; ++b) {
             const auto& e = h.h[0][(size_t)b];
-            double total = 0;
-            for (double v : e) total += v;
-            if (total <= 0) continue;
+            const double total = totals[(size_t)b];
+            if (total <= largest * 1e-5) continue;
             double rem = total;
             size_t k = 0, k5 = 0, k35 = 0;
             for (; k < e.size(); ++k) {
                 rem -= e[k];
                 if (k5 == 0 && rem < 0.316 * total) k5 = k;     // -5 dB
                 if (k35 == 0 && rem < 3.16e-4 * total) k35 = k;  // -35 dB
-                if (rem < 1e-7 * total) break;  // 70 dB of the energy has passed
+                if (rem < 1e-8 * total) break;  // 80 dB of the energy has passed
             }
             need = std::max(need, (double)k * h.binDur);
-            // a sparse trace can fall below the threshold too early: the slope between -5 and -35 dB gives the 70 dB time as well.
-            // (At 60 dB a held pure tone was still audible when the tail ended: it stopped at about -55 dB under the peak.)
-            if (k5 > 0 && k35 > k5) need = std::max(need, 1.05 * (70.0 / 30.0) * (double)(k35 - k5) * h.binDur);
+            // A truncated or sparse trace underestimates the remaining energy.
+            // Extrapolate the measured -5..-35 dB segment to -80 dB from its actual onset.
+            if (k5 > 0 && k35 > k5)
+                need = std::max(need, ((double)k5 + 2.5 * (double)(k35 - k5)) * h.binDur);
         }
-        len = std::max(len, need + 0.2);
+        len = std::max(len, need + 0.8);  // leave the maximum 0.6 s end fade beyond the target
     }
-    return std::min(std::max(len, 0.2), 10.0);
+    return std::min(std::max(len, 0.2), 20.0);
 }
 
 void fadeTailEnd(std::vector<std::vector<float>>& ir, size_t n, double sr) {

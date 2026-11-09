@@ -1,6 +1,6 @@
 # Verb Room
 
-Version 0.1.5: selectable/adaptive ray budgets, seven-band decay diagnostics with estimated RT60, and combinable Direct/Early/Tail Solo. Quality updates crossfade the tail without resetting audio history. See [the guide (Ukrainian)](docs/Quality_decay_solo_0.1.5_uk.md). Includes the [0.1.4 tail fixes](docs/Tail_fix_0.1.4_uk.md).
+Version 0.1.7: source mixer with input meters and automatable gain faders, Keep I/O when changing rooms, and longer tails with conservative host tail reporting. See the [0.1.7 release notes (Ukrainian)](docs/Release_0.1.7_uk.md) and [source mixer guide](docs/Source_mixer_0.1.7_uk.md). Includes [0.1.5 quality, decay and Solo controls](docs/Quality_decay_solo_0.1.5_uk.md) and the [0.1.4 tail fixes](docs/Tail_fix_0.1.4_uk.md).
 
 A physically based room reverb for **REAPER and other VST3 hosts** (Windows x64), built for scenes where
 sources and the listener *move*: cars, fly-bys, games-style sound design, virtual rooms with many sources.

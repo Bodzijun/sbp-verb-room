@@ -135,6 +135,92 @@ static void testTailControls() {
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
+    if (std::getenv("VERB_MIXER_ONLY")) {
+        VerbProcessor p;
+        p.setPlayConfigDetails(32, 2, 48000, 256);
+        p.prepareToPlay(48000, 256);
+        check(waitReady(p, 60), "mixer test room loads");
+        std::vector<verbp::SourceCfg> cfg(17);
+        for (int i = 0; i < 17; ++i) { cfg[(size_t)i].name = "Orchestra " + std::to_string(i + 1); cfg[(size_t)i].firstIn = i; }
+        cfg[0].format = 1;  // exercise the stereo input-range caption
+        p.setSources(cfg);
+        check(waitReady(p, 90), "seventeen mixer sources load");
+        juce::AudioBuffer<float> meterInput(32, 256); meterInput.clear();
+        meterInput.setSample(0, 0, 0.5f); meterInput.setSample(1, 0, 0.2f);
+        juce::MidiBuffer midi;
+        p.processBlock(meterInput, midi);
+        std::unique_ptr<juce::AudioProcessorEditor> base(p.createEditor());
+        auto* ed = dynamic_cast<VerbEditor*>(base.get());
+        check(ed != nullptr, "mixer editor opens with seventeen sources");
+        if (ed) {
+            auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("out/mixer"); dir.createDirectory();
+            for (int width : {900, 1160}) {
+                ed->setSize(width, width == 900 ? 600 : 760);
+                for (int page : {0, 2, 4}) {
+                    ed->showPage(page, 0);
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
+                    auto img = ed->createComponentSnapshot(ed->getLocalBounds());
+                    juce::FileOutputStream f(dir.getChildFile(juce::String("page_") + juce::String(page) + "_" + juce::String(width) + ".png"));
+                    juce::PNGImageFormat png;
+                    if (f.openedOk()) { f.setPosition(0); f.truncate(); png.writeImageToStream(img, f); }
+                    check(img.isValid(), "mixer, inputs and decay pages paint");
+                }
+            }
+            ed->showPage(2, -1);
+            std::function<juce::Slider*(juce::Component&)> findGain = [&](juce::Component& c) -> juce::Slider* {
+                if (c.getName() == "Source 1 gain") return dynamic_cast<juce::Slider*>(&c);
+                for (auto* child : c.getChildren()) if (auto* result = findGain(*child)) return result;
+                return nullptr;
+            };
+            auto* gain = findGain(*ed);
+            check(gain != nullptr, "first source gain is available in mixer");
+            if (gain) {
+                gain->setValue(-12, juce::sendNotificationSync);
+                check(std::abs(p.apvts.getRawParameterValue(verbp::paramId(0, 4))->load() + 12.f) < 0.01f,
+                      "mixer fader controls the matching source gain");
+            }
+        }
+        return fails ? 1 : 0;
+    }
+    if (std::getenv("VERB_ROUTING_ONLY")) {
+        VerbProcessor p;
+        check(p.getTailLengthSeconds() >= 20.0, "host sees the full possible tail before asynchronous room loading");
+        p.setPlayConfigDetails(8, 2, 48000, 256);
+        p.prepareToPlay(48000, 256);
+        check(waitReady(p, 60), "initial room loads");
+        auto sources = p.getSources();
+        sources[0].name = "Preserved input";
+        sources[0].firstIn = 3;
+        p.setSources(sources);
+        check(waitReady(p, 60), "custom input loads");
+        auto output = p.getOutputCfg();
+        output.radius = 0.23;
+        output.micPattern = 1;
+        p.setOutputCfg(output);
+        check(waitReady(p, 60), "custom output loads");
+        p.setKeepRoutingEnabled(true);
+        const auto rooms = verbp::builtinRooms();
+        auto it = std::find_if(rooms.begin(), rooms.end(), [](const auto& r) { return !r.setup.empty(); });
+        check(it != rooms.end(), "preset with source setup exists");
+        if (it != rooms.end()) {
+            p.loadRoomWithSetup(juce::String(it->text), "routing test", it->setup, it->micPattern);
+            check(waitReady(p, 90), "preset loads with routing lock");
+            const auto kept = p.getSources();
+            const auto out = p.getOutputCfg();
+            check(kept.size() == sources.size() && kept[0].firstIn == 3 && kept[0].name == "Preserved input", "source routing survives preset change");
+            check(std::abs(out.radius - 0.23) < 1e-6 && out.micPattern == 1, "listener output survives preset change");
+            juce::MemoryBlock state;
+            p.getStateInformation(state);
+            VerbProcessor restored;
+            restored.setStateInformation(state.getData(), (int)state.getSize());
+            check(restored.keepRoutingEnabled(), "routing lock survives project state restore");
+            p.setKeepRoutingEnabled(false);
+            p.loadRoomWithSetup(juce::String(it->text), "routing test unlocked", it->setup, it->micPattern);
+            check(waitReady(p, 90), "preset loads without routing lock");
+            check(p.getSources().size() == it->setup.size() && p.getSources()[0].name == it->setup[0].name, "unlocked preset replaces source setup");
+        }
+        return fails ? 1 : 0;
+    }
     testTailControls();
     if (std::getenv("VERB_QUALITY_ONLY")) return fails ? 1 : 0;
     if (std::getenv("VERB_MEMPROBE")) {  // exploration: does the plugin grow while a room is reloaded and a source is moved?

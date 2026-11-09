@@ -288,6 +288,20 @@ public:
     int getSliderThumbRadius(juce::Slider&) override { return 6; }
     void drawLinearSlider(juce::Graphics& g, int x, int y, int w, int h, float pos, float, float, const juce::Slider::SliderStyle style, juce::Slider& s) override {
         using namespace skin;
+        if (style == juce::Slider::LinearVertical && (bool)s.getProperties().getWithDefault("sourceFader", false)) {
+            const float cx = x + w * 0.5f;
+            const float trackWidth = juce::jlimit(16.f, 28.f, w * 0.24f);
+            const float top = (float)y + 6.f, bottom = (float)(y + h) - 6.f;
+            const float p = juce::jlimit(top, bottom, pos);
+            const bool active = s.isMouseOverOrDragging();
+            g.setColour(line);
+            g.fillRoundedRectangle(cx - trackWidth * 0.5f, top, trackWidth, bottom - top, 5.f);
+            g.setColour(accent.withAlpha(active ? 0.8f : 0.55f));
+            g.fillRoundedRectangle(cx - trackWidth * 0.5f, p, trackWidth, bottom - p, 5.f);
+            g.setColour(active ? accentHi : accent);
+            g.fillRoundedRectangle(cx - trackWidth * 0.5f - 5.f, p - 5.f, trackWidth + 10.f, 10.f, 3.f);
+            return;
+        }
         if (style != juce::Slider::LinearHorizontal && style != juce::Slider::LinearBar) {
             LookAndFeel_V4::drawLinearSlider(g, x, y, w, h, pos, 0, 0, style, s);
             return;

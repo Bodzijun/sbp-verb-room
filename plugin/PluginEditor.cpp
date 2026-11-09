@@ -70,6 +70,10 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     // ---- header ----
     builtins = verbp::builtinRooms();
     addAndMakeVisible(roomBox);
+    addAndMakeVisible(keepRoutingBtn);
+    keepRoutingBtn.setToggleState(proc.keepRoutingEnabled(), juce::dontSendNotification);
+    keepRoutingBtn.setTooltip("Keep current source inputs and listener output settings when loading a room. Preset positions are still applied by source order.");
+    keepRoutingBtn.onClick = [this] { proc.setKeepRoutingEnabled(keepRoutingBtn.getToggleState()); };
     addAndMakeVisible(saveRoomBtn);
     addAndMakeVisible(exportBtn);
     roomBox.setTextWhenNothingSelected("Room library ...");
@@ -513,6 +517,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     addAndMakeVisible(showMic);
 
     // ---- tail quality and diagnostics ----
+    addAndMakeVisible(sourceMixer);
     addAndMakeVisible(decayView);
     for (auto* c : std::initializer_list<juce::Component*>{&qualityBox, &qualityLabel, &qualityInfo, &adaptiveTail}) addAndMakeVisible(*c);
     setupRow(rayRow, "Base rays", 8000, 384000, 1000, "");
@@ -644,8 +649,10 @@ void VerbEditor::showTab(int t) {
     tabSpace.setToggleState(t == 3, juce::dontSendNotification);
     tabDecay.setToggleState(t == 4, juce::dontSendNotification);
     decayView.setVisible(t == 4);
+    sourceMixer.setVisible(t == 2);
+    if (t == 2) sourceMixer.refresh();
     for (auto* c : std::initializer_list<juce::Component*>{&qualityBox, &qualityLabel, &qualityInfo, &rayRow.label, &rayRow.slider, &adaptiveTail}) c->setVisible(t == 4);
-    for (auto* c : std::initializer_list<juce::Component*>{&toolMove, &toolBox, &toolAdd, &toolFloorZone, &toolCeilZone, &toolDelete, &toolUndo, &toolClear, &viewTop, &viewFront, &viewSide, &viewIso, &autoViewBtn}) c->setVisible(t != 4);
+    for (auto* c : std::initializer_list<juce::Component*>{&toolMove, &toolBox, &toolAdd, &toolFloorZone, &toolCeilZone, &toolDelete, &toolUndo, &toolClear, &viewTop, &viewFront, &viewSide, &viewIso, &autoViewBtn}) c->setVisible(t != 4 && t != 2);
     for (auto* c : std::initializer_list<juce::Component*>{&soloLabel, &soloDirect, &soloEarly, &soloTail}) c->setVisible(t == 2);
     const bool s = t == 1, m = t == 2, sp = t == 3;
     updateObjectsVisibility();
@@ -672,6 +679,7 @@ void VerbEditor::showTab(int t) {
 
 void VerbEditor::updateObjectsVisibility() {
     const bool o = tab == 0;
+    keepRoutingBtn.setVisible(o);
     selLabel.setVisible(o);
     for (auto& x : sliders) x.setVisible(o);
     for (auto& x : sliderLabels) x.setVisible(o);
@@ -1142,10 +1150,12 @@ void VerbEditor::timerCallback() {
         refreshOutputs();
         refreshSpace();
     }
+    if (tab == 2) sourceMixer.refresh();
     if (tab == 4) {
         decayView.setData(proc.getTailDiagnostics());
         refreshTailSettings();
     }
+    keepRoutingBtn.setToggleState(proc.keepRoutingEnabled(), juce::dontSendNotification);
     syncSliders();  // follow host automation
     repaint();
 }
@@ -1229,7 +1239,7 @@ void VerbEditor::paint(juce::Graphics& g) {
     }
     g.setColour(kGrid);
     g.fillRect(canvas.toFloat());
-    if (tab == 4) return;
+    if (tab == 4 || tab == 2) return;
     double home[4];
     verb::Scene sc = proc.getDisplayScene(home);
     double lis[4];
@@ -1548,13 +1558,14 @@ void VerbEditor::resized() {
         const int w = row.getWidth() / 5;
         tabObjects.setBounds(row.removeFromLeft(w));
         tabSurfaces.setBounds(row.removeFromLeft(w));
-        tabMix.setBounds(row.removeFromLeft(w));
         tabSpace.setBounds(row.removeFromLeft(w));
+        tabMix.setBounds(row.removeFromLeft(w));
         tabDecay.setBounds(row);
     }
     panel.removeFromTop(8);
 
     decayView.setBounds(canvas);
+    sourceMixer.setBounds(canvas);
     // objects: source list + setup, then the position sliders
     {
         auto a = panel;
@@ -1601,6 +1612,8 @@ void VerbEditor::resized() {
             a.removeFromTop(src ? 3 : 0);
         }
         infoLabel.setBounds(src ? a.removeFromTop(44) : juce::Rectangle<int>());
+        keepRoutingBtn.setBounds(a.removeFromTop(24));
+        a.removeFromTop(4);
         header(0, a, "@SEL", src ? 6 : 2);
         selLabel.setBounds({});
         for (int k = 0; k < 4; ++k) {
