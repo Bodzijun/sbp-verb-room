@@ -198,6 +198,7 @@ struct Engine::Impl {
     std::mutex worldMx;
     std::vector<std::shared_ptr<World>> worlds;
     std::shared_ptr<World> latest;
+    std::shared_ptr<const Scene> analysisScene;
     uint64_t serialCounter = 0;
     World* wd = nullptr;
     std::atomic<World*> pendingWorld{nullptr};
@@ -250,6 +251,7 @@ struct Engine::Impl {
     mutable std::mutex diagnosticsMx;
     std::shared_ptr<const TailDiagnostics> diagnostics;
     std::atomic<int> soloMask{0};
+    std::atomic<float> reverbMix{1.f};
     float componentGain[3] = {1.f, 1.f, 1.f};
     float componentTarget[3] = {1.f, 1.f, 1.f};
     float componentStep[3] = {};
@@ -300,6 +302,7 @@ struct Engine::Impl {
         if ((int)scene.walls.size() > maxWalls) throw std::runtime_error("too many walls for this reflection order (max " + std::to_string(maxWalls) + ")");
         B = cfg.tailBlock;
         latest = std::make_shared<World>(sc, maxWalls);
+        analysisScene = std::shared_ptr<const Scene>(latest, &latest->sc);
         latest->serial = ++serialCounter;
         worlds.push_back(latest);
         wd = latest.get();
@@ -730,6 +733,7 @@ struct Engine::Impl {
             w->serial = ++serialCounter;
             worlds.push_back(w);
             latest = w;
+            std::atomic_store(&analysisScene, std::shared_ptr<const Scene>(w, &w->sc));
         }
         pendingWorld.store(w.get(), std::memory_order_release);
         geomSerial.store(w->serial);
@@ -920,7 +924,8 @@ struct Engine::Impl {
     void startPeriod() {
         const int mask = soloMask.load(std::memory_order_relaxed);
         for (int k = 0; k < 3; ++k) {
-            const float target = mask == 0 || (mask & (1 << k)) ? 1.f : 0.f;
+            const float target = (mask == 0 || (mask & (1 << k)))
+                ? (k == 0 ? 1.f : reverbMix.load(std::memory_order_relaxed)) : 0.f;
             if (target != componentTarget[k]) {
                 componentTarget[k] = target;
                 componentRamp[k] = std::max(1, (int)std::lround(0.01 * sr));
@@ -1256,6 +1261,7 @@ void Engine::setEarlyLevel(double dB) { p_->params[p_->S * 4 + 5].store(dB); }
 void Engine::setEarlyDiffusion(double a) { p_->params[p_->S * 4 + 6].store(a); }
 void Engine::setTailLevel(double dB) { p_->params[p_->S * 5 + 8].store(dB); }
 void Engine::setSoloMask(int mask) { p_->soloMask.store(mask & 7, std::memory_order_relaxed); }
+void Engine::setReverbMix(double amount) { p_->reverbMix.store((float)clampTo(amount, 0.0, 1.0, 1.0), std::memory_order_relaxed); }
 void Engine::setTailQuality(int rays, bool adaptive) {
     p_->requestedRays.store(std::min(std::max(rays, 8000), 384000));
     p_->requestedAdaptive.store(adaptive);
@@ -1275,5 +1281,6 @@ std::shared_ptr<const TailDiagnostics> Engine::tailDiagnostics() const {
     std::lock_guard<std::mutex> lock(p_->diagnosticsMx);
     return p_->diagnostics;
 }
+std::shared_ptr<const Scene> Engine::sceneSnapshot() const { return std::atomic_load(&p_->analysisScene); }
 
 }  // namespace verb

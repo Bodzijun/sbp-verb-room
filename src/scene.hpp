@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <random>
 #include <sstream>
@@ -145,11 +146,18 @@ inline const Material& presetByName(const std::string& n) {
     return surfacePresets()[(size_t)(i < 0 ? 0 : i)];
 }
 
+// Editor metadata only: visibility/locking never remove acoustic surfaces from the model.
+struct SurfaceTag {
+    std::string name, group;
+    bool hidden = false, locked = false;
+};
+
 struct Wall {  // vertical rectangle over the 2D segment a-b, from z0 up to z1 (default: floor to ceiling)
     double ax, ay, bx, by;
     int mat;
     double z0 = 0;    // bottom edge, metres above the floor
     double z1 = 1e9;  // top edge; >= the ceiling height means a full-height wall
+    SurfaceTag editor;
 };
 
 // A region of the floor or the ceiling with its own material (a carpet here, tiles there, a suspended ceiling over part of
@@ -162,6 +170,7 @@ struct Zone {
     // ceiling such as a bonnet, a raised platform, a mezzanine): it reflects from both sides and, if its material lets
     // sound through (transmission loss), passes some of it. Plates are separate surfaces for the reflection tree.
     double z = -1;
+    SurfaceTag editor;
 };
 constexpr int kMaxPlates = 8;
 
@@ -208,6 +217,7 @@ struct Scene {
     std::vector<Wall> walls;
     std::vector<Zone> floorZones, ceilZones;
     std::vector<Transducer> sources, receivers;
+    SurfaceTag floorEditor, ceilEditor;
 };
 
 inline bool pointInZone(const Zone& z, double x, double y) {  // even-odd rule
@@ -338,6 +348,8 @@ inline void sanitizeScene(Scene& s) {
 inline Scene parseScene(std::istream& in, const std::string& path) {
     Scene s;
     std::map<std::string, int> matIdx;
+    struct EditorEntry { std::string kind; int index; SurfaceTag tag; };
+    std::vector<EditorEntry> editorEntries;
     std::string line;
     int ln = 0;
     auto fail = [&](const std::string& m) { throw std::runtime_error(path + ":" + std::to_string(ln) + ": " + m); };
@@ -348,6 +360,17 @@ inline Scene parseScene(std::istream& in, const std::string& path) {
     };
     while (std::getline(in, line)) {
         ++ln;
+        const std::string editorPrefix = "#@verbroom-editor-v1 ";
+        if (line.rfind(editorPrefix, 0) == 0) {
+            EditorEntry e;
+            int hidden = 0, locked = 0;
+            std::istringstream meta(line.substr(editorPrefix.size()));
+            if (!(meta >> e.kind >> e.index >> std::quoted(e.tag.name) >> std::quoted(e.tag.group) >> hidden >> locked))
+                fail("invalid editor metadata");
+            e.tag.hidden = hidden != 0; e.tag.locked = locked != 0;
+            editorEntries.push_back(e);
+            continue;
+        }
         auto h = line.find('#');
         if (h != std::string::npos) line.resize(h);
         std::istringstream ss(line);
@@ -453,6 +476,16 @@ inline Scene parseScene(std::istream& in, const std::string& path) {
     }
     if (s.floorMat < 0) throw std::runtime_error("scene needs a 'floor <material>' line");
     if (s.sources.empty() || s.receivers.empty()) throw std::runtime_error("scene needs at least one source and one receiver");
+    for (const auto& e : editorEntries) {
+        SurfaceTag* tag = nullptr;
+        if (e.kind == "wall" && e.index >= 0 && e.index < (int)s.walls.size()) tag = &s.walls[(size_t)e.index].editor;
+        if (e.kind == "floor-zone" && e.index >= 0 && e.index < (int)s.floorZones.size()) tag = &s.floorZones[(size_t)e.index].editor;
+        if (e.kind == "ceiling-zone" && e.index >= 0 && e.index < (int)s.ceilZones.size()) tag = &s.ceilZones[(size_t)e.index].editor;
+        if (e.kind == "floor" && e.index == 0) tag = &s.floorEditor;
+        if (e.kind == "ceiling" && e.index == 0) tag = &s.ceilEditor;
+        if (!tag) throw std::runtime_error(path + ": invalid editor surface reference");
+        *tag = e.tag;
+    }
     sanitizeScene(s);
     if (s.floorMat < 0) throw std::runtime_error("scene needs a valid floor material");
     return s;
@@ -634,6 +667,17 @@ inline std::string serializeScene(const Scene& s) {
     if (s.hasListener) o << "listener " << s.listenerPos.x << ' ' << s.listenerPos.y << ' ' << s.listenerPos.z << ' ' << s.listenerYaw << "\n";
     for (auto& t : s.sources) o << "source " << tok(t.name) << ' ' << t.pos.x << ' ' << t.pos.y << ' ' << t.pos.z << ' ' << t.azimuthDeg << ' ' << t.pattern << ' ' << t.gainDb << ' ' << t.elevationDeg << "\n";
     for (auto& t : s.receivers) o << "receiver " << tok(t.name) << ' ' << t.pos.x << ' ' << t.pos.y << ' ' << t.pos.z << ' ' << t.azimuthDeg << ' ' << t.pattern << ' ' << t.gainDb << ' ' << t.elevationDeg << "\n";
+    auto editorTag = [&](const char* kind, int index, SurfaceTag tag) {
+        for (auto* text : {&tag.name, &tag.group})
+            for (char& c : *text) if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+        if (tag.name.empty() && tag.group.empty() && !tag.hidden && !tag.locked) return;
+        o << "#@verbroom-editor-v1 " << kind << ' ' << index << ' ' << std::quoted(tag.name) << ' '
+          << std::quoted(tag.group) << ' ' << tag.hidden << ' ' << tag.locked << "\n";
+    };
+    editorTag("floor", 0, s.floorEditor); editorTag("ceiling", 0, s.ceilEditor);
+    for (size_t i = 0; i < s.walls.size(); ++i) editorTag("wall", (int)i, s.walls[i].editor);
+    for (size_t i = 0; i < s.floorZones.size(); ++i) editorTag("floor-zone", (int)i, s.floorZones[i].editor);
+    for (size_t i = 0; i < s.ceilZones.size(); ++i) editorTag("ceiling-zone", (int)i, s.ceilZones[i].editor);
     return o.str();
 }
 

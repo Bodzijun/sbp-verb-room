@@ -73,10 +73,12 @@ public:
     juce::String getStatus() const;
     juce::String getSceneName() const;
     verb::Scene getDisplayScene(double* home /*[4]: x y z yaw of the listener anchor*/ = nullptr) const;
+    verb::Scene getEnergyScene(int source = -1) const; // message-thread snapshot, live poses/gains and audible spatial points
     // Edit the live room (message thread): `fn` changes a copy of the scene (walls, surface materials, floor,
     // ceiling, height); the result is validated, kept in the saved state and pushed to the running engine without
     // interrupting the audio. Rejected edits (too many walls, bad indices) change nothing.
     void editScene(const std::function<void(verb::Scene&)>& fn);
+    void editSceneMetadata(const std::function<void(verb::Scene&)>& fn);
     uint64_t getLoadSerial() const { return loadSerial.load(); }  // increments when a new engine is built (a room is loaded, the output is changed)
     uint64_t getSceneSerial() const { return sceneSerial.load(); }  // increments on every change of the room or the setup
 
@@ -124,6 +126,10 @@ public:
     void setKeepRoutingEnabled(bool on) { keepRouting = on; }
     bool mixerCompactEnabled() const { return mixerCompact.load(); }
     void setMixerCompactEnabled(bool on) { mixerCompact = on; }
+    bool navigationLocked() const { return navLocked.load(); }
+    void setNavigationLocked(bool on) { navLocked = on; }
+    bool outlinerVisible() const { return showOutliner.load(); }
+    void setOutlinerVisible(bool on) { showOutliner = on; }
     float inputPeak(int ch) const { return ch >= 0 && ch < verbp::kMaxInputChannels ? inPeaks[(size_t)ch].load(std::memory_order_relaxed) : 0.f; }
     int numPoints() const { return numPts.load(); }
     int numOutputChannels() const { return builtOutCh.load(); }  // channels the engine renders (the layout's)
@@ -189,6 +195,7 @@ private:
     std::atomic<bool> inputMetersOn{true};
     std::atomic<bool> keepRouting{false};
     std::atomic<bool> mixerCompact{true};
+    std::atomic<bool> navLocked{false}, showOutliner{false};
     std::array<std::atomic<float>, verbp::kMaxInputChannels> inPeaks{};
     std::array<int, verbp::kMaxInputChannels> inMap{};  // host input channel -> buffer channel (see InputOrder.h)
     std::atomic<int> numPts{0}, builtOutCh{0}, builtLayout{0}, hostOutCh{2}, hostInCh{2}, builtForHostCh{0};
@@ -207,6 +214,7 @@ private:
     std::atomic<float>* diffusionParam = nullptr;
     std::atomic<float>* dopplerParam = nullptr;
     std::atomic<float>* mixParam = nullptr;
+    std::atomic<float>* spatialDryParam = nullptr;
     std::atomic<float>* tailParam = nullptr;
     std::atomic<float>* soloParam[3] = {};
     std::atomic<float>* sourceMute[verbp::kMaxSources] = {};

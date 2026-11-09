@@ -66,6 +66,35 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     setResizable(true, true);
     setResizeLimits(900, 600, 2600, 1800);
     setWantsKeyboardFocus(true);
+    addAndMakeVisible(navLockBtn); navLockBtn.setToggleState(proc.navigationLocked(), juce::dontSendNotification);
+    navLockBtn.setTooltip("Lock map panning. Missing a surface will no longer drag the grid. Zoom and object editing remain available.");
+    navLockBtn.onClick = [this] { proc.setNavigationLocked(navLockBtn.getToggleState()); panPending = panning = false; };
+    addAndMakeVisible(outlinerBtn); outlinerBtn.setClickingTogglesState(true);
+    outlinerBtn.setToggleState(proc.outlinerVisible(), juce::dontSendNotification);
+    outlinerBtn.onClick = [this] { proc.setOutlinerVisible(outlinerBtn.getToggleState()); refreshOutliner(); resized(); repaint(); };
+    addChildComponent(outliner);
+    outliner.onSelect = [this](auto refs, bool groups) { setSurfaceSelection(std::move(refs), groups); };
+    outliner.onFlag = [this](auto refs, int flag, bool value) {
+        pushUndo(); proc.editSceneMetadata([refs, flag, value](verb::Scene& scene) {
+            for (auto ref : refs) if (auto* tag = verbp::surfaceTag(scene, ref)) (flag ? tag->locked : tag->hidden) = value;
+        }); refreshOutliner(); refreshSurface(); repaint();
+    };
+    outliner.onLink = [this](juce::String name) { linkSurfaces(name); };
+    outliner.onUnlink = [this] { unlinkSurfaces(); };
+    outliner.onRename = [this](auto refs, juce::String name, bool group) {
+        if (group) {
+            const auto scene = proc.getDisplayScene(); const auto base = name;
+            auto conflicts = [&](const juce::String& candidate) {
+                for (auto ref : verbp::surfaceRefs(scene)) if (verbp::surfaceTag(scene, ref)->group == candidate.toStdString()
+                    && std::find(refs.begin(), refs.end(), ref) == refs.end()) return true;
+                return false;
+            };
+            for (int suffix = 2; conflicts(name); ++suffix) name = base + " " + juce::String(suffix);
+        }
+        pushUndo(); proc.editSceneMetadata([refs, name, group](verb::Scene& scene) {
+            for (auto ref : refs) if (auto* tag = verbp::surfaceTag(scene, ref)) (group ? tag->group : tag->name) = name.toStdString();
+        }); refreshOutliner(); repaint();
+    };
 
     // ---- header ----
     builtins = verbp::builtinRooms();
@@ -83,13 +112,13 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     saveRoomBtn.onClick = [this] { saveRoomDialog(); };
     exportBtn.onClick = [this] { exportDialog(); };
     refreshRoomBox();
-    for (auto* b : {&tabObjects, &tabSurfaces, &tabMix, &tabSpace, &tabDecay}) b->getProperties().set("style", "tab");
+    for (auto* b : {&tabObjects, &tabSurfaces, &tabMix, &tabSpace, &tabDecay, &tabEnergy}) b->getProperties().set("style", "tab");
     saveRoomBtn.getProperties().set("style", "ghost");
     exportBtn.getProperties().set("style", "primary");
     addAndMakeVisible(statusLabel);
     statusLabel.setJustificationType(juce::Justification::topLeft);
     statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
-    for (auto* b : {&tabObjects, &tabSurfaces, &tabMix, &tabSpace, &tabDecay}) {
+    for (auto* b : {&tabObjects, &tabSurfaces, &tabMix, &tabSpace, &tabDecay, &tabEnergy}) {
         addAndMakeVisible(*b);
         b->setClickingTogglesState(true);
         b->setRadioGroupId(201);
@@ -99,6 +128,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     tabMix.onClick = [this] { showTab(2); };
     tabDecay.onClick = [this] { showTab(4); };
     tabSpace.onClick = [this] { showTab(3); };
+    tabEnergy.onClick = [this] { showTab(5); };
 
     // ---- canvas toolbar ----
     // tools: a vertical strip of icon buttons on the left of the map; views: a slim switcher above the map
@@ -519,6 +549,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     // ---- tail quality and diagnostics ----
     addAndMakeVisible(sourceMixer);
     addAndMakeVisible(decayView);
+    addChildComponent(energyView); addChildComponent(energyView.controlsPanel());
     for (auto* c : std::initializer_list<juce::Component*>{&qualityBox, &qualityLabel, &qualityInfo, &adaptiveTail}) addAndMakeVisible(*c);
     setupRow(rayRow, "Base rays", 8000, 384000, 1000, "");
     qualityLabel.setText("Tail quality", juce::dontSendNotification);
@@ -561,6 +592,9 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     diffLabel.setText("Early diffusion  - higher = less flanger/phaser", juce::dontSendNotification);
     mixLabel.setText("Dry / wet mix  - 0 % = input only, 100 % = room only", juce::dontSendNotification);
     mixAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("mix"), mixSlider);
+    addAndMakeVisible(positionedDry);
+    positionedDry.setTooltip("Keep the direct sound's position, distance, propagation delay and microphone cues. Dry/Wet scales reflections and tail without duplicating the direct sound. Off = original input-channel bypass.");
+    positionedDryAttachment = std::make_unique<juce::ButtonParameterAttachment>(*proc.apvts.getParameter("spatialDry"), positionedDry);
     mixSlider.textFromValueFunction = [](double v) { return juce::String((int)std::lround(v)) + " %"; };
     mixSlider.valueFromTextFunction = [](const juce::String& t) { return t.getDoubleValue(); };
     mixSlider.updateText();
@@ -574,7 +608,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     gainAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("gain"), gainSlider);
     earlyAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("early"), earlySlider);
     diffAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("diffusion"), diffSlider);
-    soloLabel.setText("Solo components (dry signal excluded)", juce::dontSendNotification);
+    soloLabel.setText("Solo components (ignores Dry/Wet)", juce::dontSendNotification);
     addAndMakeVisible(soloLabel);
     juce::ToggleButton* soloButtons[] = {&soloDirect, &soloEarly, &soloTail};
     const char* soloIds[] = {"soloDirect", "soloEarly", "soloTail"};
@@ -648,11 +682,20 @@ void VerbEditor::showTab(int t) {
     tabMix.setToggleState(t == 2, juce::dontSendNotification);
     tabSpace.setToggleState(t == 3, juce::dontSendNotification);
     tabDecay.setToggleState(t == 4, juce::dontSendNotification);
+    tabEnergy.setToggleState(t == 5, juce::dontSendNotification);
+    energyView.setVisible(t == 5); energyView.controlsPanel().setVisible(t == 5);
+    if (t == 5) energyView.update();
     decayView.setVisible(t == 4);
     sourceMixer.setVisible(t == 2);
     if (t == 2) sourceMixer.refresh();
+    navLockBtn.setVisible(t != 2 && t != 4 && t != 5); outlinerBtn.setVisible(t != 2 && t != 4 && t != 5);
+    outliner.setVisible(t != 2 && t != 4 && t != 5 && proc.outlinerVisible());
+    updateLayerButtons();
+    positionedDry.setVisible(t == 2);
+    mixLabel.setText(proc.apvts.getRawParameterValue("spatialDry")->load() >= 0.5f
+        ? "Dry / wet - positioned direct to full room" : "Dry / wet - original channels to full room", juce::dontSendNotification);
     for (auto* c : std::initializer_list<juce::Component*>{&qualityBox, &qualityLabel, &qualityInfo, &rayRow.label, &rayRow.slider, &adaptiveTail}) c->setVisible(t == 4);
-    for (auto* c : std::initializer_list<juce::Component*>{&toolMove, &toolBox, &toolAdd, &toolFloorZone, &toolCeilZone, &toolDelete, &toolUndo, &toolClear, &viewTop, &viewFront, &viewSide, &viewIso, &autoViewBtn}) c->setVisible(t != 4 && t != 2);
+    for (auto* c : std::initializer_list<juce::Component*>{&toolMove, &toolBox, &toolAdd, &toolFloorZone, &toolCeilZone, &toolDelete, &toolUndo, &toolClear, &viewTop, &viewFront, &viewSide, &viewIso, &autoViewBtn}) c->setVisible(t != 4 && t != 2 && t != 5);
     for (auto* c : std::initializer_list<juce::Component*>{&soloLabel, &soloDirect, &soloEarly, &soloTail}) c->setVisible(t == 2);
     const bool s = t == 1, m = t == 2, sp = t == 3;
     updateObjectsVisibility();
@@ -675,6 +718,10 @@ void VerbEditor::showTab(int t) {
                                                            &minLenRow.label, &minLenRow.slider, &maxLenRow.label, &maxLenRow.slider, &tlMinRow.label, &tlMinRow.slider,
                                                            &tlMaxRow.label, &tlMaxRow.slider, &hMinRow.label, &hMinRow.slider, &hMaxRow.label, &hMaxRow.slider, &seedSlider, &seedLabel, &airInfo, &clutterInfo, &randomizeBtn, &showClutter, &showMeters, &versionLabel})
         c->setVisible(sp);
+    // The outliner reserves map space only on editing pages. Tab clicks must
+    // update geometry immediately, including when returning from Mix/Decay.
+    resized();
+    repaint();
 }
 
 void VerbEditor::updateObjectsVisibility() {
@@ -802,6 +849,7 @@ void VerbEditor::refreshOutputs() {
 
 void VerbEditor::selectObject(int obj) {
     selKind = SelKind::Object;
+    surfaceSelection.clear(); selWalls.clear(); refreshOutliner();
     selected = obj;
     const bool lis = obj == verbp::kListener;
     sliderLabels[3].setText(lis ? "Yaw" : "Azimuth", juce::dontSendNotification);
@@ -813,15 +861,90 @@ void VerbEditor::selectObject(int obj) {
     repaint();
 }
 
-void VerbEditor::selectSurface(SelKind kind, int wall) {
-    selKind = kind;
-    selWall = wall;
-    selWalls.clear();
-    if (kind == SelKind::Wall && wall >= 0) selWalls.push_back(wall);
+void VerbEditor::selectSurface(SelKind kind, int wall, bool expandGroups) {
+    const int k = kind == SelKind::Wall ? 1 : kind == SelKind::Floor ? 2 : kind == SelKind::Ceiling ? 3 : kind == SelKind::FloorZone ? 4 : kind == SelKind::CeilZone ? 5 : 0;
+    setSurfaceSelection(k ? std::vector<verbp::SurfaceRef>{{k, wall}} : std::vector<verbp::SurfaceRef>(), expandGroups);
+}
+
+std::vector<verbp::SurfaceRef> VerbEditor::currentSurfaceSelection() const {
+    if (selKind == SelKind::Object) return {};
+    if (selKind == SelKind::Wall && !selWalls.empty()) {
+        // Older wall-selection tools still fill selWalls directly.
+        auto result = surfaceSelection;
+        result.erase(std::remove_if(result.begin(), result.end(), [](auto ref) { return ref.kind == 1; }), result.end());
+        for (int index : selWalls) result.push_back({1, index});
+        return result;
+    }
+    return surfaceSelection;
+}
+
+bool VerbEditor::isSurfaceSelected(verbp::SurfaceRef ref) const {
+    const auto refs = currentSurfaceSelection(); return std::find(refs.begin(), refs.end(), ref) != refs.end();
+}
+
+void VerbEditor::setSurfaceSelection(std::vector<verbp::SurfaceRef> refs, bool groups) {
+    const auto scene = proc.getDisplayScene();
+    refs.erase(std::remove_if(refs.begin(), refs.end(), [&](auto ref) { return verbp::surfaceTag(scene, ref) == nullptr; }), refs.end());
+    surfaceSelection = groups ? verbp::expandSurfaceGroups(scene, refs) : refs;
+    selWalls.clear(); for (auto ref : surfaceSelection) if (ref.kind == 1) selWalls.push_back(ref.index);
+    if (surfaceSelection.empty()) { selKind = SelKind::Object; selWall = -1; }
+    else {
+        const auto ref = surfaceSelection.front(); selWall = ref.index;
+        selKind = ref.kind == 1 ? SelKind::Wall : ref.kind == 2 ? SelKind::Floor : ref.kind == 3 ? SelKind::Ceiling : ref.kind == 4 ? SelKind::FloorZone : SelKind::CeilZone;
+    }
     showTab(1);
     refreshSurface();
+    refreshOutliner();
     resized();
     repaint();
+}
+
+void VerbEditor::refreshOutliner() { outliner.refresh(proc.getDisplayScene(), currentSurfaceSelection()); }
+
+void VerbEditor::linkSurfaces(const juce::String& requestedName) {
+    auto refs = currentSurfaceSelection();
+    refs.erase(std::remove_if(refs.begin(), refs.end(), [](auto ref) { return ref.kind == 2 || ref.kind == 3; }), refs.end());
+    if (refs.size() < 2) return;
+    const auto scene = proc.getDisplayScene();
+    const auto base = requestedName.trim().isEmpty() ? juce::String("Construction") : requestedName.trim();
+    juce::String name = base;
+    auto conflicts = [&](const juce::String& n) {
+        for (auto ref : verbp::surfaceRefs(scene)) if (verbp::surfaceTag(scene, ref)->group == n.toStdString()
+            && std::find(refs.begin(), refs.end(), ref) == refs.end()) return true;
+        return false;
+    };
+    for (int suffix = 2; conflicts(name); ++suffix) name = base + " " + juce::String(suffix);
+    pushUndo(); proc.editSceneMetadata([refs, name](verb::Scene& s) {
+        for (auto ref : refs) if (auto* tag = verbp::surfaceTag(s, ref)) tag->group = name.toStdString();
+    }); setSurfaceSelection(refs);
+}
+
+void VerbEditor::unlinkSurfaces() {
+    const auto refs = currentSurfaceSelection(); if (refs.empty()) return;
+    pushUndo(); proc.editSceneMetadata([refs](verb::Scene& s) {
+        for (auto ref : refs) if (auto* tag = verbp::surfaceTag(s, ref)) tag->group.clear();
+    }); setSurfaceSelection(refs, false);
+}
+
+bool VerbEditor::canPickSurface(const verb::Scene& scene, verbp::SurfaceRef ref) const {
+    const auto* tag = verbp::surfaceTag(scene, ref); if (!tag || tag->hidden || tag->locked) return false;
+    int layer = ref.kind == 1 ? (int)LayerWalls : ref.kind == 2 ? (int)LayerFloors : (int)LayerCeilings;
+    if (ref.kind == 4 || ref.kind == 5) layer = zoneLayer((ref.kind == 4 ? scene.floorZones : scene.ceilZones)[(size_t)ref.index], ref.kind == 5);
+    return layerMode[layer] == 0;
+}
+
+bool VerbEditor::beginConstructionDrag(verbp::SurfaceRef ref, const juce::MouseEvent& event) {
+    const auto scene = proc.getDisplayScene(); const auto* tag = verbp::surfaceTag(scene, ref);
+    auto refs = currentSurfaceSelection();
+    const bool selected = std::find(refs.begin(), refs.end(), ref) != refs.end();
+    if (event.mods.isAltDown() || (!selected && (!tag || tag->group.empty())) || (selected && refs.size() < 2 && (!tag || tag->group.empty()))) return false;
+    if (!selected) setSurfaceSelection({ref});
+    refs = currentSurfaceSelection();
+    if (verbp::surfacesLocked(scene, refs)) return true;
+    pushUndo(); constructionOriginal = scene; constructionSelection = refs;
+    view.toWorld(event.position, dragStartX, dragStartY);
+    dragMode = DragMode::Construction; lockView = true; pickPending = false;
+    return true;
 }
 
 double VerbEditor::paramValue(int obj, int k) const { return proc.apvts.getRawParameterValue(verbp::paramId(obj, k))->load(); }
@@ -1019,14 +1142,29 @@ void VerbEditor::refreshSurface() {
         wallBotRow.slider.setValue(std::min(w.z0, sc.height), juce::dontSendNotification);
         wallTopRow.slider.setValue(w.z1 >= sc.height ? sc.height : w.z1, juce::dontSendNotification);  // the maximum = full height
     }
-    const bool on = mi >= 0 && mi < (int)sc.mats.size();
+    const auto selectedRefs = currentSurfaceSelection();
+    const bool locked = verbp::surfacesLocked(sc, selectedRefs);
+    if (!selectedRefs.empty()) if (auto* tag = verbp::surfaceTag(sc, selectedRefs.front())) {
+        if (selectedRefs.size() > 1) surfTitle.setText((tag->group.empty() ? "Selection" : juce::String(tag->group))
+            + " (" + juce::String((int)selectedRefs.size()) + " surfaces)", juce::dontSendNotification);
+        else if (!tag->name.empty()) surfTitle.setText(tag->name, juce::dontSendNotification);
+    }
+    const bool on = mi >= 0 && mi < (int)sc.mats.size() && !locked;
+    if (locked) surfTitle.setText("Locked selection - unlock in Outliner", juce::dontSendNotification);
+    const bool single = selectedRefs.size() <= 1;
+    wallBotRow.slider.setEnabled(isWall && !locked && single); wallTopRow.slider.setEnabled(isWall && !locked && single);
+    zoneZRow.slider.setEnabled(zoneZRow.slider.isEnabled() && !locked && single);
+    const bool roomLocked = verbp::surfacesLocked(sc, verbp::surfaceRefs(sc));
+    heightRow.slider.setEnabled(!roomLocked); scaleRow.slider.setEnabled(!roomLocked);
+    scaleRoomBtn.setEnabled(!roomLocked);
+    openSky.setEnabled(!locked);
     for (auto& r : absRows) r.slider.setEnabled(on);
     for (auto& r : scRows) r.slider.setEnabled(on);
     for (auto& r : tlRows) r.slider.setEnabled(on);
     passRow.slider.setEnabled(on);
     presetBox.setEnabled(on);
     classBox.setEnabled(on);
-    if (on) {
+    if (mi >= 0 && mi < (int)sc.mats.size()) {
         const verb::Material& m = sc.mats[(size_t)mi];
         for (int b = 0; b < 7; ++b) absRows[(size_t)b].slider.setValue(m.alpha[(size_t)b] * 100.0, juce::dontSendNotification);
         scRows[0].slider.setValue(m.scatter * 100.0, juce::dontSendNotification);
@@ -1056,12 +1194,16 @@ void VerbEditor::editSurface(std::function<void(verb::Material&)> fn) {
                      : selKind == SelKind::FloorZone ? 4 : selKind == SelKind::CeilZone ? 5 : 0;
     const int wall = selWall;
     if (kind == 0) return;
+    const auto refs = currentSurfaceSelection();
+    if (verbp::surfacesLocked(proc.getDisplayScene(), refs)) return;
     // every selected wall takes the change (each keeps its own material, only the edited property is set)
     std::vector<int> targets{wall};
     if (kind == 1 && !selWalls.empty()) targets = selWalls;
-    proc.editScene([kind, targets, fn](verb::Scene& s) {
-        for (int w : targets) {
-            const int idx = ownMaterialFor(s, kind, w);
+    proc.editScene([kind, targets, fn, refs](verb::Scene& s) {
+        auto surfaces = refs;
+        if (surfaces.empty()) for (int index : targets) surfaces.push_back({kind, index});
+        for (auto ref : surfaces) {
+            const int idx = ownMaterialFor(s, ref.kind, ref.index);
             if (idx < 0) continue;
             verb::Material& m = s.mats[(size_t)idx];
             fn(m);
@@ -1093,21 +1235,23 @@ void VerbEditor::undo() {
 
 void VerbEditor::deleteSelectedWall() {
     if (selWall < 0 || (selKind != SelKind::Wall && selKind != SelKind::FloorZone && selKind != SelKind::CeilZone)) return;
+    const auto refs = currentSurfaceSelection();
+    if (verbp::surfacesLocked(proc.getDisplayScene(), refs)) return;
     pushUndo();
-    const int w = selWall;
-    const SelKind kind = selKind;
-    std::vector<int> ws = selWalls;
-    if (ws.empty()) ws.push_back(w);
-    std::sort(ws.begin(), ws.end(), std::greater<int>());  // from the back, so the indices stay valid
-    proc.editScene([w, kind, ws](verb::Scene& s) {
-        auto& list = kind == SelKind::FloorZone ? s.floorZones : s.ceilZones;
-        if (kind == SelKind::Wall) {
-            for (int i : ws)
-                if (i >= 0 && i < (int)s.walls.size()) s.walls.erase(s.walls.begin() + i);
-        } else if (w >= 0 && w < (int)list.size()) {
-            list.erase(list.begin() + w);
+    proc.editScene([refs](verb::Scene& s) {
+        for (int kind : {1, 4, 5}) {
+            std::vector<int> indices;
+            for (auto ref : refs) if (ref.kind == kind) indices.push_back(ref.index);
+            std::sort(indices.begin(), indices.end(), std::greater<int>());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+            for (int index : indices) {
+                if (kind == 1 && index >= 0 && index < (int)s.walls.size()) s.walls.erase(s.walls.begin() + index);
+                if (kind == 4 && index >= 0 && index < (int)s.floorZones.size()) s.floorZones.erase(s.floorZones.begin() + index);
+                if (kind == 5 && index >= 0 && index < (int)s.ceilZones.size()) s.ceilZones.erase(s.ceilZones.begin() + index);
+            }
         }
     });
+    surfaceSelection.clear();
     selKind = SelKind::Object;
     selWall = -1;
     selWalls.clear();
@@ -1134,6 +1278,7 @@ void VerbEditor::clearRoom() {
 }
 
 bool VerbEditor::keyPressed(const juce::KeyPress& key) {
+    if (tab == 5) return false;
     if (!zonePts.empty()) {  // drawing a zone: Enter closes it, Escape drops it
         if (key == juce::KeyPress::returnKey) { finishZone(); return true; }
         if (key == juce::KeyPress::escapeKey) { zonePts.clear(); repaint(); return true; }
@@ -1171,12 +1316,20 @@ void VerbEditor::timerCallback() {
         refreshSpace();
     }
     if (tab == 2) sourceMixer.refresh();
+    if (tab == 5 || energyView.isBusy()) energyView.update();
+    if (outliner.isVisible()) refreshOutliner();
+    const bool positioned = proc.apvts.getRawParameterValue("spatialDry")->load() >= 0.5f;
+    mixLabel.setText(positioned ? "Dry / wet - positioned direct to full room" : "Dry / wet - original channels to full room", juce::dontSendNotification);
     if (tab == 4) {
         decayView.setData(proc.getTailDiagnostics());
         refreshTailSettings();
     }
     keepRoutingBtn.setToggleState(proc.keepRoutingEnabled(), juce::dontSendNotification);
     syncSliders();  // follow host automation
+    navLockBtn.setToggleState(proc.navigationLocked(), juce::dontSendNotification);
+    outlinerBtn.setToggleState(proc.outlinerVisible(), juce::dontSendNotification);
+    const bool showTree = proc.outlinerVisible() && tab != 2 && tab != 4 && tab != 5;
+    if (outliner.isVisible() != showTree) { resized(); if (showTree) refreshOutliner(); }
     repaint();
 }
 
@@ -1244,7 +1397,7 @@ void VerbEditor::paint(juce::Graphics& g) {
     g.fillRect(toolStrip.withTop(0).withBottom(getHeight()).toFloat());
     {   // section headers: a small spaced caption and a hairline after it
         const juce::Font hf = juce::Font(juce::FontOptions(10.5f, juce::Font::bold)).withExtraKerningFactor(0.14f);
-        for (auto& h : headers[std::min(std::max(tab, 0), 4)]) {
+        for (auto& h : headers[std::min(std::max(tab, 0), 5)]) {
             const juce::String t = h.second == "@SEL" ? selLabel.getText().toUpperCase() : h.second;
             juce::GlyphArrangement ga;
             ga.addLineOfText(hf, t, 0.f, 0.f);
@@ -1259,7 +1412,7 @@ void VerbEditor::paint(juce::Graphics& g) {
     }
     g.setColour(kGrid);
     g.fillRect(canvas.toFloat());
-    if (tab == 4 || tab == 2) return;
+    if (tab == 4 || tab == 2 || tab == 5) return;
     double home[4];
     verb::Scene sc = proc.getDisplayScene(home);
     double lis[4];
@@ -1322,7 +1475,7 @@ void VerbEditor::paint(juce::Graphics& g) {
         const auto& zl = ceiling ? sc.ceilZones : sc.floorZones;
         const bool active = ceiling == zoneLayerCeiling;
         for (size_t i = 0; i < zl.size(); ++i) {
-            if (zl[i].poly.size() < 3 || layerMode[zoneLayer(zl[i], ceiling)] == 2) continue;
+            if (zl[i].poly.size() < 3 || zl[i].editor.hidden || layerMode[zoneLayer(zl[i], ceiling)] == 2) continue;
             juce::Path path;
             juce::Point<float> centre;
             for (size_t k = 0; k < zl[i].poly.size(); ++k) {
@@ -1336,7 +1489,7 @@ void VerbEditor::paint(juce::Graphics& g) {
             const juce::Colour c = mat >= 0 && mat < (int)sc.mats.size()
                                        ? juce::Colour(verb::surfaceClasses()[(size_t)std::min(std::max(sc.mats[(size_t)mat].cls, 0), (int)verb::SC_Custom)].argb)
                                        : juce::Colours::black;
-            const bool sel = selKind == (ceiling ? SelKind::CeilZone : SelKind::FloorZone) && selWall == (int)i;
+            const bool sel = isSurfaceSelected({ceiling ? 5 : 4, (int)i});
             g.setColour(c.withAlpha(mat < 0 ? 0.35f : (active ? 0.24f : 0.09f)));
             g.fillPath(path);
             g.setColour(sel ? kSel : c.withAlpha(active ? 0.9f : 0.4f));
@@ -1375,6 +1528,7 @@ void VerbEditor::paint(juce::Graphics& g) {
     // walls: warm tint = absorbent, dashed blue = lets sound through (doorway, window, curtain, partition)
     for (size_t i = 0; i < sc.walls.size() && layerMode[LayerWalls] != 2; ++i) {
         const auto& w = sc.walls[i];
+        if (w.editor.hidden) continue;
         double t = 0;
         juce::Colour classColour = kWall;
         if (w.mat >= 0 && w.mat < (int)sc.mats.size()) {
@@ -1541,12 +1695,16 @@ void VerbEditor::resized() {
     auto panel = b.removeFromRight(kPanelW).reduced(16, 14);
     auto strip = b.removeFromLeft(54).reduced(7, 10);  // the tool strip, like a 3D editor
     auto viewBar = b.removeFromTop(36).reduced(8, 5);
-    canvas = b.reduced(8);
+    auto mapArea = b.reduced(8);
+    const bool showTree = proc.outlinerVisible() && tab != 2 && tab != 4 && tab != 5;
+    outliner.setVisible(showTree);
+    if (showTree) { outliner.setBounds(mapArea.removeFromLeft(220)); mapArea.removeFromLeft(6); }
+    canvas = mapArea;
     toolStrip = juce::Rectangle<int>(0, 0, 54, getHeight());
     {
         int lx = canvas.getX() + 8;
         for (int i = 0; i < 4; ++i) {
-            const int w = layerMode[i] == 0 ? 74 : 112;
+            const int w = std::min(layerMode[i] == 0 ? 74 : 112, std::max(42, (canvas.getWidth() - 28) / 4));
             layerBtn[i].setBounds(lx, canvas.getY() + 6, w, 22);
             lx += w + 4;
         }
@@ -1559,7 +1717,10 @@ void VerbEditor::resized() {
     place({&toolAdd, &toolFloorZone, &toolCeilZone});
     place({&toolDelete, &toolUndo});
     place({&toolClear});
-    autoViewBtn.setBounds(viewBar.removeFromRight(100));
+    autoViewBtn.setBounds(viewBar.removeFromRight(90));
+    navLockBtn.setBounds(viewBar.removeFromRight(82));
+    viewBar.removeFromRight(8);
+    outlinerBtn.setBounds(viewBar.removeFromRight(74));
     for (auto* t : {&viewTop, &viewFront, &viewSide, &viewIso}) { t->setBounds(viewBar.removeFromLeft(54)); viewBar.removeFromLeft(2); }
 
     {
@@ -1575,17 +1736,20 @@ void VerbEditor::resized() {
     panel.removeFromTop(2);
     {
         auto row = panel.removeFromTop(28);
-        const int w = row.getWidth() / 5;
+        const int w = row.getWidth() / 6;
         tabObjects.setBounds(row.removeFromLeft(w));
         tabSurfaces.setBounds(row.removeFromLeft(w));
         tabSpace.setBounds(row.removeFromLeft(w));
         tabMix.setBounds(row.removeFromLeft(w));
-        tabDecay.setBounds(row);
+        tabDecay.setBounds(row.removeFromLeft(w));
+        tabEnergy.setBounds(row);
     }
     panel.removeFromTop(8);
 
     decayView.setBounds(canvas);
     sourceMixer.setBounds(canvas);
+    energyView.setBounds(canvas);
+    energyView.controlsPanel().setBounds(panel); energyView.layoutControls();
     // objects: source list + setup, then the position sliders
     {
         auto a = panel;
@@ -1752,6 +1916,7 @@ void VerbEditor::resized() {
     {
         auto a = panel;
         header(2, a, "MIX", 2);
+        positionedDry.setBounds(a.removeFromTop(24)); a.removeFromTop(4);
         for (auto* pr : {&mixLabel, &gainLabel, &tailLabel, &earlyLabel, &diffLabel, &dopplerLabel}) {
             pr->setBounds(a.removeFromTop(16));
             juce::Slider* s = pr == &mixLabel ? &mixSlider : pr == &gainLabel ? &gainSlider : pr == &tailLabel ? &tailSlider : pr == &earlyLabel ? &earlySlider : pr == &diffLabel ? &diffSlider : &dopplerSlider;
@@ -1804,13 +1969,15 @@ juce::Point<double> VerbEditor::snapWorld(const juce::MouseEvent& e, const verb:
     float best = 10.f;
     bool found = false;
     juce::Point<double> res;
-    for (size_t i = 0; i < sc.walls.size(); ++i)
+    for (size_t i = 0; i < sc.walls.size(); ++i) {
+        if (sc.walls[i].editor.hidden || layerMode[LayerWalls] == 2) continue;
         for (int end = 0; end < 2; ++end) {
             if (excludeDragged && std::find(dragEnds.begin(), dragEnds.end(), std::make_pair((int)i, end)) != dragEnds.end()) continue;
             const double px = end ? sc.walls[i].bx : sc.walls[i].ax, py = end ? sc.walls[i].by : sc.walls[i].ay;
             const float d = view.toScreen(px, py).getDistanceFrom(e.position);
             if (d < best) { best = d; res = {px, py}; found = true; }
         }
+    }
     if (found) return res;
     if (!e.mods.isAltDown()) { x = std::round(x * 10.0) / 10.0; y = std::round(y * 10.0) / 10.0; }
     return {x, y};
@@ -1821,7 +1988,7 @@ void VerbEditor::updateLayerButtons() {
     for (int i = 0; i < 4; ++i) {
         layerBtn[i].setButtonText(juce::String(names[i]) + (layerMode[i] == 1 ? " (locked)" : layerMode[i] == 2 ? " (hidden)" : ""));
         layerBtn[i].setAlpha(layerMode[i] == 0 ? 1.f : (layerMode[i] == 1 ? 0.75f : 0.5f));
-        layerBtn[i].setVisible(inPlan());
+        layerBtn[i].setVisible(inPlan() && tab != 2 && tab != 4 && tab != 5);
     }
 }
 
@@ -1830,6 +1997,7 @@ std::vector<VerbEditor::Pick> VerbEditor::pickCandidates(const verb::Scene& sc, 
     if (layerMode[LayerWalls] == 0) {
         std::vector<std::pair<double, int>> near;
         for (size_t i = 0; i < sc.walls.size(); ++i) {
+            if (!canPickSurface(sc, {1, (int)i})) continue;
             const double d = distPointSeg(pos, view.toScreen(sc.walls[i].ax, sc.walls[i].ay), view.toScreen(sc.walls[i].bx, sc.walls[i].by));
             if (d < 7.0) near.push_back({d, (int)i});
         }
@@ -1845,7 +2013,7 @@ std::vector<VerbEditor::Pick> VerbEditor::pickCandidates(const verb::Scene& sc, 
             const bool ceiling = pass == 1;
             const auto& zl = ceiling ? sc.ceilZones : sc.floorZones;
             for (int i = (int)zl.size() - 1; i >= 0; --i)
-                if (zoneLayer(zl[(size_t)i], ceiling) == layer && zl[(size_t)i].poly.size() >= 3 && verb::pointInZone(zl[(size_t)i], wx, wy))
+                if (canPickSurface(sc, {ceiling ? 5 : 4, i}) && zoneLayer(zl[(size_t)i], ceiling) == layer && zl[(size_t)i].poly.size() >= 3 && verb::pointInZone(zl[(size_t)i], wx, wy))
                     out.push_back({ceiling ? SelKind::CeilZone : SelKind::FloorZone, i});
         }
     }
@@ -1856,6 +2024,7 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
     grabKeyboardFocus();
     if (!canvas.contains(e.getPosition())) return;
     if (e.mods.isMiddleButtonDown()) {  // middle button: pan the view, whatever is under the pointer
+        if (proc.navigationLocked()) return;
         panPending = true;
         panStart = e.position;
         panCx0 = view.minX + view.area.getWidth() / (2 * view.scale);
@@ -1956,6 +2125,7 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
         int hit = -1;
         double hd = 8.0;
         for (size_t i = 0; i < sc.walls.size(); ++i) {
+            if (!canPickSurface(sc, {1, (int)i})) continue;
             const double d = distPointSeg(e.position, view.toScreen(sc.walls[i].ax, sc.walls[i].ay), view.toScreen(sc.walls[i].bx, sc.walls[i].by));
             if (d < hd) { hd = d; hit = (int)i; }
         }
@@ -1965,10 +2135,9 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
             if (it == selWalls.end()) selWalls.push_back(hit); else selWalls.erase(it);
             selKind = selWalls.empty() ? SelKind::Object : SelKind::Wall;
             selWall = selWalls.empty() ? -1 : selWalls.back();
-            showTab(1);
-            refreshSurface();
-            resized();
-            repaint();
+            std::vector<verbp::SurfaceRef> refs;
+            for (int index : selWalls) refs.push_back({1, index});
+            setSurfaceSelection(refs);
             return;
         }
     }
@@ -1976,10 +2145,12 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
     // corners of the selected zone
     if (selKind == SelKind::FloorZone || selKind == SelKind::CeilZone) {
         const auto& zl = selKind == SelKind::FloorZone ? sc.floorZones : sc.ceilZones;
-        if (selWall >= 0 && selWall < (int)zl.size() && layerMode[zoneLayer(zl[(size_t)selWall], selKind == SelKind::CeilZone)] == 0) {
+        if (selWall >= 0 && selWall < (int)zl.size() && canPickSurface(sc, {selKind == SelKind::CeilZone ? 5 : 4, selWall})) {
             const auto& poly = zl[(size_t)selWall].poly;
             for (size_t i = 0; i < poly.size(); ++i)
                 if (view.toScreen(poly[i].first, poly[i].second).getDistanceFrom(e.position) < 11.f) {
+                    if (beginConstructionDrag({selKind == SelKind::CeilZone ? 5 : 4, selWall}, e)) return;
+                    if (e.mods.isAltDown()) setSurfaceSelection({{selKind == SelKind::CeilZone ? 5 : 4, selWall}}, false);
                     pushUndo();
                     dragMode = DragMode::ZoneVertex;
                     zoneVertex = (int)i;
@@ -1992,21 +2163,24 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
     // wall corners
     int bw = -1, bend = 0;
     float bd = 11.f;
-    for (size_t i = 0; i < sc.walls.size() && layerMode[LayerWalls] == 0; ++i)
+    for (size_t i = 0; i < sc.walls.size() && layerMode[LayerWalls] == 0; ++i) {
+        if (!canPickSurface(sc, {1, (int)i})) continue;
         for (int end = 0; end < 2; ++end) {
             const float d = view.toScreen(end ? sc.walls[i].bx : sc.walls[i].ax, end ? sc.walls[i].by : sc.walls[i].ay).getDistanceFrom(e.position);
             if (d < bd) { bd = d; bw = (int)i; bend = end; }
         }
+    }
     if (bw >= 0) {
+        if (beginConstructionDrag({1, bw}, e)) return;
         const double cx = bend ? sc.walls[(size_t)bw].bx : sc.walls[(size_t)bw].ax, cy = bend ? sc.walls[(size_t)bw].by : sc.walls[(size_t)bw].ay;
         dragEnds.clear();
         for (size_t i = 0; i < sc.walls.size(); ++i)
             for (int end = 0; end < 2; ++end)
-                if (std::hypot((end ? sc.walls[i].bx : sc.walls[i].ax) - cx, (end ? sc.walls[i].by : sc.walls[i].ay) - cy) < 1e-4) dragEnds.push_back({(int)i, end});
+                if (canPickSurface(sc, {1, (int)i}) && std::hypot((end ? sc.walls[i].bx : sc.walls[i].ax) - cx, (end ? sc.walls[i].by : sc.walls[i].ay) - cy) < 1e-4) dragEnds.push_back({(int)i, end});
         pushUndo();
         dragMode = DragMode::Vertex;
         lockView = true;
-        selectSurface(SelKind::Wall, bw);
+        selectSurface(SelKind::Wall, bw, !e.mods.isAltDown());
         return;
     }
 
@@ -2016,6 +2190,7 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
         const auto cands = pickCandidates(sc, e.position);
         pickPending = false;
         if (cands.empty()) {  // empty space: dragging pans the view (a plain click does nothing)
+            if (proc.navigationLocked()) return;
             panPending = true;
             panStart = e.position;
             panCx0 = view.minX + view.area.getWidth() / (2 * view.scale);
@@ -2034,6 +2209,7 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
         pickDownPos = e.position;
         pickPending = cands.size() > 1;
         const Pick pk = cands[(size_t)cur];
+        if (beginConstructionDrag({pk.kind == SelKind::Wall ? 1 : pk.kind == SelKind::CeilZone ? 5 : 4, pk.idx}, e)) return;
         if (pk.kind == SelKind::Wall) {
             pushUndo();
             dragMode = DragMode::Wall;
@@ -2041,7 +2217,7 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
             view.toWorld(e.position, dragStartX, dragStartY);
             const auto& w = sc.walls[(size_t)pk.idx];
             dragOrig = {w.ax, w.ay, w.bx, w.by};
-            selectSurface(SelKind::Wall, pk.idx);
+            selectSurface(SelKind::Wall, pk.idx, !e.mods.isAltDown());
         } else {
             const bool ceiling = pk.kind == SelKind::CeilZone;
             const auto& zl = ceiling ? sc.ceilZones : sc.floorZones;
@@ -2056,7 +2232,7 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
                 dragStartY = wy;
                 zoneOrig = zl[(size_t)pk.idx].poly;
             } else {
-                selectSurface(pk.kind, pk.idx);
+                selectSurface(pk.kind, pk.idx, !e.mods.isAltDown());
             }
         }
     }
@@ -2142,6 +2318,7 @@ void VerbEditor::mouseDownElevation(const juce::MouseEvent& e) {
     // wall rectangles: the top and bottom edges drag the wall's vertical extent, the body selects it
     int hit = -1, edge = 0;
     for (int i = (int)sc.walls.size() - 1; i >= 0 && hit < 0; --i) {
+        if (!canPickSurface(sc, {1, i})) continue;
         const auto& w = sc.walls[(size_t)i];
         const double ua = horiz(w.ax, w.ay), ub = horiz(w.bx, w.by);
         const double zb = std::max(0.0, w.z0), zt = std::min(w.z1, H);
@@ -2155,8 +2332,8 @@ void VerbEditor::mouseDownElevation(const juce::MouseEvent& e) {
     }
     if (hit >= 0) {
         pushUndo();
-        selectSurface(SelKind::Wall, hit);
-        if (edge) { dragMode = edge == 1 ? DragMode::WallTop : DragMode::WallBottom; lockView = true; }
+        selectSurface(SelKind::Wall, hit, !e.mods.isAltDown());
+        if (edge && currentSurfaceSelection().size() < 2) { dragMode = edge == 1 ? DragMode::WallTop : DragMode::WallBottom; lockView = true; }
         return;
     }
     // floor / ceiling lines (and the zones lying on them)
@@ -2168,13 +2345,15 @@ void VerbEditor::mouseDownElevation(const juce::MouseEvent& e) {
         if (!onLine(ceiling ? H : 0.0)) continue;
         const auto& zl = ceiling ? sc.ceilZones : sc.floorZones;
         for (int i = (int)zl.size() - 1; i >= 0; --i) {
+            if (!canPickSurface(sc, {ceiling ? 5 : 4, i})) continue;
             double lo = 1e18, hi = -1e18;
             for (auto& p : zl[(size_t)i].poly) { const double v = horiz(p.first, p.second); lo = std::min(lo, v); hi = std::max(hi, v); }
-            if (u >= lo && u <= hi) { selectSurface(ceiling ? SelKind::CeilZone : SelKind::FloorZone, i); return; }
+            if (u >= lo && u <= hi) { selectSurface(ceiling ? SelKind::CeilZone : SelKind::FloorZone, i, !e.mods.isAltDown()); return; }
         }
-        selectSurface(ceiling ? SelKind::Ceiling : SelKind::Floor, -1);
+        if (canPickSurface(sc, {ceiling ? 3 : 2, -1})) selectSurface(ceiling ? SelKind::Ceiling : SelKind::Floor, -1);
         return;
     }
+    if (proc.navigationLocked()) return;
     panPending = true;
     panStart = e.position;
     panCx0 = view.minX + view.area.getWidth() / (2 * view.scale);
@@ -2191,8 +2370,10 @@ void VerbEditor::paintElevation(juce::Graphics& g, const verb::Scene& sc, const 
     // floor and ceiling
     const float yf = view.toScreen(0, 0).y, yc = view.toScreen(0, H).y;
     g.setColour(classColour(sc.floorMat).withAlpha(0.9f));
-    g.drawLine(x0, yf, x1, yf, selKind == SelKind::Floor ? 2.4f : 1.4f);
-    if (sc.ceilMat >= 0) {
+    if (!sc.floorEditor.hidden && layerMode[LayerFloors] != 2) g.drawLine(x0, yf, x1, yf, selKind == SelKind::Floor ? 2.4f : 1.4f);
+    if (sc.ceilEditor.hidden || layerMode[LayerCeilings] == 2) {
+        // Hidden editor surfaces remain in the acoustic scene.
+    } else if (sc.ceilMat >= 0) {
         g.setColour(classColour(sc.ceilMat).withAlpha(0.9f));
         g.drawLine(x0, yc, x1, yc, selKind == SelKind::Ceiling ? 2.4f : 1.4f);
     } else {
@@ -2200,17 +2381,18 @@ void VerbEditor::paintElevation(juce::Graphics& g, const verb::Scene& sc, const 
         g.setColour(juce::Colours::grey);
         g.drawDashedLine(juce::Line<float>(x0, yc, x1, yc), dash, 2, 1.f);
     }
-    if (selKind == SelKind::Floor) { g.setColour(kSel); g.drawLine(x0, yf, x1, yf, 2.4f); }
-    if (selKind == SelKind::Ceiling) { g.setColour(kSel); g.drawLine(x0, yc, x1, yc, 2.4f); }
+    if (selKind == SelKind::Floor && !sc.floorEditor.hidden && layerMode[LayerFloors] != 2) { g.setColour(kSel); g.drawLine(x0, yf, x1, yf, 2.4f); }
+    if (selKind == SelKind::Ceiling && !sc.ceilEditor.hidden && layerMode[LayerCeilings] != 2) { g.setColour(kSel); g.drawLine(x0, yc, x1, yc, 2.4f); }
     // zones: a bar along the line over the zone's extent
     for (int pass = 0; pass < 2; ++pass) {
         const bool ceiling = pass == 1;
         const auto& zl = ceiling ? sc.ceilZones : sc.floorZones;
         for (size_t i = 0; i < zl.size(); ++i) {
+            if (zl[i].editor.hidden || layerMode[zoneLayer(zl[i], ceiling)] == 2) continue;
             double lo = 1e18, hi = -1e18;
             for (auto& p : zl[i].poly) { const double v = horiz(p.first, p.second); lo = std::min(lo, v); hi = std::max(hi, v); }
             const float sx0 = view.toScreen(lo, 0).x, sx1 = view.toScreen(hi, 0).x, y = zl[i].z >= 0 ? view.toScreen(0, zl[i].z).y : (ceiling ? yc + 6.f : yf - 6.f);  // a plate sits at its own height
-            const bool sel = selKind == (ceiling ? SelKind::CeilZone : SelKind::FloorZone) && selWall == (int)i;
+            const bool sel = isSurfaceSelected({ceiling ? 5 : 4, (int)i});
             if (zl[i].mat < 0) {  // opening
                 g.setColour(sel ? kSel : juce::Colours::black);
                 g.fillRect(sx0, yc - 3.f, sx1 - sx0, 6.f);
@@ -2225,6 +2407,7 @@ void VerbEditor::paintElevation(juce::Graphics& g, const verb::Scene& sc, const 
     // walls as rectangles over their horizontal extent and height range
     for (size_t i = 0; i < sc.walls.size(); ++i) {
         const auto& w = sc.walls[i];
+        if (w.editor.hidden || layerMode[LayerWalls] == 2) continue;
         const double ua = horiz(w.ax, w.ay), ub = horiz(w.bx, w.by);
         const double zb = std::max(0.0, w.z0), zt = std::min(w.z1, H);
         const auto tl = view.toScreen(std::min(ua, ub), zt), br = view.toScreen(std::max(ua, ub), zb);
@@ -2306,7 +2489,7 @@ void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double*
         floorP.lineTo(d.x, d.y);
         floorP.closeSubPath();
         g.setColour(classColour(sc.floorMat).withAlpha(0.05f));
-        g.fillPath(floorP);
+        if (!sc.floorEditor.hidden && layerMode[LayerFloors] != 2) g.fillPath(floorP);
         g.setColour(skin::gridLine);
         const double step = (gx1 - gx0 > 60 || gy1 - gy0 > 60) ? 5.0 : 1.0;
         for (double x = gx0; x <= gx1 + 1e-6; x += step) { const auto p = proj(x, gy0, 0), q = proj(x, gy1, 0); g.drawLine(p.x, p.y, q.x, q.y, 0.8f); }
@@ -2314,14 +2497,14 @@ void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double*
     }
     auto drawZones = [&](const std::vector<verb::Zone>& zl, double z, bool ceiling) {
         for (size_t i = 0; i < zl.size(); ++i) {
-            if (zl[i].poly.size() < 3) continue;
+            if (zl[i].poly.size() < 3 || zl[i].editor.hidden || layerMode[zoneLayer(zl[i], ceiling)] == 2) continue;
             juce::Path p;
             for (size_t k = 0; k < zl[i].poly.size(); ++k) {
                 const auto q = proj(zl[i].poly[k].first, zl[i].poly[k].second, zl[i].z >= 0 ? zl[i].z : z);  // a plate has its own height
                 if (k == 0) p.startNewSubPath(q.x, q.y); else p.lineTo(q.x, q.y);
             }
             p.closeSubPath();
-            const bool sel = selKind == (ceiling ? SelKind::CeilZone : SelKind::FloorZone) && selWall == (int)i;
+            const bool sel = isSurfaceSelected({ceiling ? 5 : 4, (int)i});
             const juce::Colour c = zl[i].mat < 0 ? skin::textDim : classColour(zl[i].mat);
             g.setColour(c.withAlpha(ceiling ? 0.06f : 0.16f));
             g.fillPath(p);
@@ -2342,6 +2525,7 @@ void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double*
     std::vector<WallQ> order;
     for (int i = 0; i < (int)sc.walls.size(); ++i) {
         const auto& w = sc.walls[(size_t)i];
+        if (w.editor.hidden || layerMode[LayerWalls] == 2) continue;
         order.push_back({i, proj(0.5 * (w.ax + w.bx), 0.5 * (w.ay + w.by), 0.5 * H).depth});
     }
     std::sort(order.begin(), order.end(), [](const WallQ& a, const WallQ& b) { return a.depth > b.depth; });
@@ -2451,6 +2635,7 @@ void VerbEditor::mouseDrag(const juce::MouseEvent& e) {
         return;
     }
     if (panPending) {
+        if (proc.navigationLocked()) { panPending = panning = false; return; }
         const auto d = e.position - panStart;
         if (!panning && std::hypot(d.x, d.y) < 3.f) return;
         if (!panning) { panning = true; setAutoView(false); }
@@ -2479,7 +2664,14 @@ void VerbEditor::mouseDrag(const juce::MouseEvent& e) {
         repaint();
         return;
     }
-    if (dragMode == DragMode::Object && dragging >= 0) {
+    if (dragMode == DragMode::Construction) {
+        double x, y; view.toWorld(e.position, x, y);
+        double dx = x - dragStartX, dy = y - dragStartY;
+        if (!e.mods.isAltDown()) { dx = std::round(dx * 10) / 10; dy = std::round(dy * 10) / 10; }
+        const auto original = constructionOriginal; const auto refs = constructionSelection;
+        proc.editScene([original, refs, dx, dy](verb::Scene& s) { verbp::translateSurfaces(s, original, refs, dx, dy); });
+        repaint();
+    } else if (dragMode == DragMode::Object && dragging >= 0) {
         double x, y;
         view.toWorld(e.position, x, y);  // free placement: inside, outside or beside the walls
         if (inPlan()) {
@@ -2578,7 +2770,7 @@ void VerbEditor::mouseUp(const juce::MouseEvent& e) {
                    seg.intersects(juce::Line<float>(rect.getBottomRight(), rect.getBottomLeft()), tmp) || seg.intersects(juce::Line<float>(rect.getBottomLeft(), rect.getTopLeft()), tmp);
         };
         for (int i = 0; i < (int)sc.walls.size(); ++i)
-            if (touches(sc.walls[(size_t)i]) && std::find(selWalls.begin(), selWalls.end(), i) == selWalls.end()) selWalls.push_back(i);
+            if (canPickSurface(sc, {1, i}) && touches(sc.walls[(size_t)i]) && std::find(selWalls.begin(), selWalls.end(), i) == selWalls.end()) selWalls.push_back(i);
         dragMode = DragMode::None;
         lockView = false;
         if (!selWalls.empty()) {
@@ -2589,6 +2781,8 @@ void VerbEditor::mouseUp(const juce::MouseEvent& e) {
             selKind = SelKind::Object;
             selWall = -1;
         }
+        std::vector<verbp::SurfaceRef> refs; for (int index : selWalls) refs.push_back({1, index});
+        setSurfaceSelection(refs);
         refreshSurface();
         resized();
         repaint();
@@ -2611,7 +2805,7 @@ void VerbEditor::mouseUp(const juce::MouseEvent& e) {
         dragMode = DragMode::None;
         lockView = false;
         if (pk.kind != SelKind::Wall) zoneLayerCeiling = pk.kind == SelKind::CeilZone;
-        selectSurface(pk.kind, pk.idx);
+        selectSurface(pk.kind, pk.idx, !e.mods.isAltDown());
         return;
     }
     pickPending = false;
@@ -2643,5 +2837,6 @@ void VerbEditor::mouseUp(const juce::MouseEvent& e) {
     lockView = false;
     zoneVertex = -1;
     dragEnds.clear();
+    constructionSelection.clear();
     repaint();
 }

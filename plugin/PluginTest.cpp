@@ -135,6 +135,317 @@ static void testTailControls() {
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
+    if (std::getenv("VERB_ENERGY_ONLY")) {
+        VerbProcessor p; p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
+        check(waitReady(p, 90), "energy test processor starts");
+        auto cfg = p.getSources(); cfg.resize(1); cfg[0].format = 1; cfg[0].sum = false; cfg[0].freePoints = true;
+        cfg[0].ox = {1.f, -1.f}; cfg[0].oy = {.5f, -.5f}; cfg[0].oz = {.2f, -.2f}; p.setSources(cfg);
+        check(waitReady(p, 90), "energy snapshot stereo setup loads");
+        setP(p, verbp::paramId(0, 0), 3); setP(p, verbp::paramId(0, 1), 4); setP(p, verbp::paramId(0, 2), 1.2);
+        setP(p, verbp::paramId(0, 3), 90); setP(p, verbp::paramId(0, 4), -6);
+        const auto points = p.getEnergyScene();
+        if (!points.sources.empty()) std::printf("  Analysis point: %.7f %.7f %.7f, gain %.7f\n", points.sources[0].pos.x, points.sources[0].pos.y, points.sources[0].pos.z, points.sources[0].gainDb);
+        check(points.sources.size() == 2 && std::fabs(points.sources[0].pos.x - 2.5) < .001
+            && std::fabs(points.sources[0].pos.y - 5) < .001 && std::fabs(points.sources[0].pos.z - 1.4) < .001
+            && std::fabs(points.sources[0].gainDb + 6) < .001, "analysis snapshots live pose, rotation, free XYZ offsets and gain");
+        setP(p, verbp::sourceSwitchId(0, false), 1);
+        check(p.getEnergyScene().sources.empty(), "muted sources are omitted from coverage excitation");
+        setP(p, verbp::sourceSwitchId(0, false), 0);
+        auto twoSources = cfg; twoSources.push_back(cfg[0]); twoSources[1].format = 0; twoSources[1].freePoints = false; p.setSources(twoSources);
+        check(waitReady(p, 90), "second analysis source loads");
+        setP(p, verbp::sourceSwitchId(1, true), 1);
+        check(p.getEnergyScene(0).sources.empty() && p.getEnergyScene().sources.size() == 1,
+            "source selection respects Solo on other sources");
+        setP(p, verbp::sourceSwitchId(1, true), 0); p.setSources(cfg); check(waitReady(p, 90), "single source setup restores");
+        p.setOutlinerVisible(true);
+        std::unique_ptr<juce::AudioProcessorEditor> base(p.createEditor()); auto* editor = dynamic_cast<VerbEditor*>(base.get());
+        EnergyMapView* view = nullptr;
+        if (editor) for (int i = 0; i < editor->getNumChildComponents(); ++i)
+            if (auto* v = dynamic_cast<EnergyMapView*>(editor->getChildComponent(i))) view = v;
+        check(view != nullptr, "Energy view is available in the editor");
+        if (view && editor) {
+            editor->showPage(5, -1);
+            check(view->isVisible() && view->controlsPanel().isVisible() && editor->testCanvas().getX() < 100,
+                "Energy view uses the full canvas while Outliner preference is enabled");
+            auto& controls = view->controlsPanel();
+            for (int i = 0; i < controls.getNumChildComponents(); ++i)
+                if (auto* box = dynamic_cast<juce::ComboBox*>(controls.getChildComponent(i)))
+                    if (box->getItemText(0).startsWith("Preview")) box->setSelectedId(1, juce::sendNotificationSync);
+            auto wait = [&] {
+                const auto until = juce::Time::getMillisecondCounterHiRes() + 60000;
+                while (view->isBusy() && juce::Time::getMillisecondCounterHiRes() < until) {
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil(20); view->update();
+                }
+                view->update(); return !view->isBusy();
+            };
+            const auto roomBefore = p.getRoomText(); const float mixBefore = p.apvts.getRawParameterValue("mix")->load();
+            view->startAnalysis(); check(wait() && view->result() && !view->isStale(), "background analysis publishes a current energy map");
+            check(roomBefore == p.getRoomText() && mixBefore == p.apvts.getRawParameterValue("mix")->load(),
+                "analysis leaves the scene, routing and audio mix unchanged");
+            bool fineOption = false;
+            for (int i = 0; i < controls.getNumChildComponents(); ++i)
+                if (auto* box = dynamic_cast<juce::ComboBox*>(controls.getChildComponent(i)))
+                    if (box->getItemId(0) == 16) {
+                        box->setSelectedId(96, juce::sendNotificationSync); fineOption = box->getSelectedId() == 96;
+                    }
+            check(fineOption && view->isStale(), "96-cell resolution is selectable and marks the previous map as outdated");
+            view->startAnalysis();
+            check(wait() && view->result() && std::max(view->result()->nx, view->result()->ny) == 96 && !view->isStale(),
+                "the editor publishes a newly sampled 96-cell map");
+            juce::Slider* colourRange = nullptr; juce::Button* autoContrast = nullptr;
+            for (int i = 0; i < controls.getNumChildComponents(); ++i) {
+                auto* child = controls.getChildComponent(i);
+                if (child->getName() == "Energy colour range") colourRange = dynamic_cast<juce::Slider*>(child);
+                if (auto* button = dynamic_cast<juce::Button*>(child)) if (button->getButtonText() == "Auto") autoContrast = button;
+            }
+            check(colourRange && colourRange->getMinimum() == .5 && colourRange->getMaximum() == 120,
+                "colour range supports subtle tail differences and wide dynamic ranges");
+            const auto beforeContrast = view->result();
+            if (autoContrast && autoContrast->onClick) autoContrast->onClick();
+            check(autoContrast && autoContrast->isEnabled() && colourRange && colourRange->getValue() >= .5
+                && colourRange->getValue() < 20 && view->result() == beforeContrast && !view->isBusy() && !view->isStale(),
+                "Auto reveals map variation without retracing or changing the result's validity");
+            const auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("out/energy"); dir.createDirectory();
+            for (int width : {900, 1160}) {
+                editor->setSize(width, width == 900 ? 600 : 760);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(150);
+                auto image = editor->createComponentSnapshot(editor->getLocalBounds());
+                juce::FileOutputStream output(dir.getChildFile("energy_" + juce::String(width) + ".png"));
+                if (output.openedOk()) { output.setPosition(0); output.truncate(); juce::PNGImageFormat png; png.writeImageToStream(image, output); }
+                bool inside = true;
+                for (int i = 0; i < controls.getNumChildComponents(); ++i) inside &= controls.getLocalBounds().contains(controls.getChildComponent(i)->getBounds());
+                check(inside, "Energy controls fit the minimum and default window heights");
+            }
+            setP(p, verbp::paramId(0, 0), 3.5); view->update(); check(view->isStale(), "source automation marks the previous map as outdated");
+            const auto previous = view->result(); view->startAnalysis(); view->cancelAnalysis();
+            check(wait() && view->result() == previous && view->isStale(), "cancellation preserves the previous map and its outdated status");
+            // Destruction must cancel and join the worker safely, including while it is busy.
+            view->startAnalysis(); base.reset();
+            check(true, "closing the editor safely cancels its background analysis");
+        }
+        return fails ? 1 : 0;
+    }
+    if (std::getenv("VERB_SPATIAL_EDITOR_ONLY")) {
+        VerbProcessor p; p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
+        check(waitReady(p, 90), "positioned dry test processor starts");
+        const auto originalRoom = p.getDisplayScene();
+        auto freeField = originalRoom;
+        freeField.walls.clear(); freeField.floorZones.clear(); freeField.ceilZones.clear(); freeField.ceilMat = -1;
+        freeField.mats[(size_t)freeField.floorMat].alpha.fill(1); freeField.clutter.count = 0; freeField.roughness = 0;
+        p.setTailSettings({12000, false});
+        p.loadSceneText(verb::serializeScene(freeField), "Positioned direct test", true);
+        check(waitReady(p, 90), "reflection-free test room loads");
+        auto output = p.getOutputCfg(); output.micPattern = (int)verb::MicPattern::HumanEars; output.radius = 0.0875;
+        p.setOutputCfg(output); check(waitReady(p, 90), "binaural direct test output loads");
+        setP(p, "s1x", 1); setP(p, "s1y", 4); setP(p, "s1z", 1.5);
+        setP(p, "spatialDry", 1);
+        juce::AudioBuffer<float> audio(64, 256); juce::MidiBuffer midi;
+        auto render = [&](int input) {
+            for (int i = 0; i < 250; ++i) { audio.clear(); p.processBlock(audio, midi); }
+            std::array<std::vector<float>, 2> result;
+            for (int block = 0; block < 16; ++block) {
+                audio.clear(); if (block == 0) audio.setSample(input, 0, 1.f); p.processBlock(audio, midi);
+                for (int ch = 0; ch < 2; ++ch) result[(size_t)ch].insert(result[(size_t)ch].end(), audio.getReadPointer(ch), audio.getReadPointer(ch) + 256);
+            }
+            return result;
+        };
+        auto energy = [](const auto& wave, int channel) { double e = 0; for (float v : wave[(size_t)channel]) e += v * v; return e; };
+        auto difference = [](const auto& a, const auto& b) {
+            double error = 0, peak = 0;
+            for (int ch = 0; ch < 2; ++ch) for (size_t i = 0; i < a[(size_t)ch].size(); ++i) {
+                error = std::max(error, std::abs((double)a[(size_t)ch][i] - b[(size_t)ch][i]));
+                peak = std::max(peak, std::abs((double)a[(size_t)ch][i]));
+            }
+            return error / std::max(peak, 1e-12);
+        };
+        setP(p, "soloDirect", 1); const auto direct = render(0);
+        setP(p, "soloDirect", 0); setP(p, "mix", 0); const auto positioned = render(0);
+        check(difference(direct, positioned) < 1e-4 && energy(positioned, 0) > 1e-8 && energy(positioned, 1) > 1e-8,
+            "0% positioned dry equals the spatial direct path, including both ears");
+        check(std::abs(energy(positioned, 0) - energy(positioned, 1)) > 0.05 * (energy(positioned, 0) + energy(positioned, 1)),
+            "off-centre source keeps its directional ear-energy difference");
+        setP(p, "mix", 50); const auto halfway = render(0);
+        setP(p, "mix", 100); const auto full = render(0);
+        check(difference(positioned, halfway) < 1e-4 && difference(positioned, full) < 1e-4,
+            "direct field stays at unity across positioned Dry/Wet without a correlated level bump");
+        setP(p, "spatialDry", 0); setP(p, "mix", 0); const auto raw = render(0);
+        check(energy(raw, 0) > 0.99 && energy(raw, 1) < 1e-10, "original input-channel dry bypass remains available");
+        auto cfg = p.getSources(); cfg[0].format = 1; cfg[0].channels = 2; cfg[0].firstIn = 62; cfg[0].sum = true;
+        p.setSources(cfg); check(waitReady(p, 90), "stereo source on inputs 63/64 loads");
+        setP(p, "spatialDry", 1); const auto lastLeft = render(62); const auto lastRight = render(63);
+        check(energy(lastLeft, 0) > 1e-8 && difference(lastLeft, lastRight) < 1e-4,
+            "positioned dry renders both channels of the final input pair at the source position");
+
+        p.loadSceneText(verb::serializeScene(originalRoom), "Editor test", true); check(waitReady(p, 90), "editor test room loads");
+        p.editScene([](verb::Scene& s) {
+            verb::Zone zone; zone.mat = s.floorMat; zone.poly = {{1, 6}, {2, 6}, {2, 7}, {1, 7}};
+            s.floorZones.push_back(zone); s.walls[0].editor.name = "Left wall \"A\" #1";
+        });
+        p.setOutlinerVisible(true); p.setNavigationLocked(true);
+        std::unique_ptr<juce::AudioProcessorEditor> base(p.createEditor());
+        auto* editor = dynamic_cast<VerbEditor*>(base.get()); check(editor != nullptr, "editor with outliner is created");
+        if (editor) {
+            auto snapshot = [&] { return editor->createComponentSnapshot(editor->getLocalBounds()); };
+            editor->setSize(1160, 760); snapshot();
+            auto clickTab = [&](const juce::String& name) {
+                for (int i = 0; i < editor->getNumChildComponents(); ++i)
+                    if (auto* button = dynamic_cast<juce::Button*>(editor->getChildComponent(i)))
+                        if (button->getButtonText() == name && button->onClick) { button->onClick(); return true; }
+                return false;
+            };
+            for (int width : {900, 1160}) {
+                editor->setSize(width, width == 900 ? 600 : 760);
+                const auto editingCanvas = editor->testCanvas();
+                check(clickTab("Mix") && editor->testCanvas().getX() == editingCanvas.getX() - 226
+                    && editor->testCanvas().getWidth() == editingCanvas.getWidth() + 226,
+                    "Mix tab immediately reclaims the hidden outliner space without resizing the window");
+                check(clickTab("Decay") && editor->testCanvas().getX() == editingCanvas.getX() - 226,
+                    "Decay also uses the complete canvas with the outliner preference enabled");
+                check(clickTab("Surfaces") && editor->testCanvas() == editingCanvas && p.outlinerVisible(),
+                    "returning to editing restores the outliner and its reserved space");
+                juce::Rectangle<int> outlinerButton, panButton, lastView;
+                for (int i = 0; i < editor->getNumChildComponents(); ++i)
+                    if (auto* button = dynamic_cast<juce::Button*>(editor->getChildComponent(i))) {
+                        if (button->getButtonText() == "Outliner") outlinerButton = button->getBounds();
+                        if (button->getButtonText() == "Lock pan") panButton = button->getBounds();
+                        if (button->getButtonText() == "3D") lastView = button->getBounds();
+                    }
+                check(panButton.getX() - outlinerButton.getRight() >= 8 && outlinerButton.getX() >= lastView.getRight(),
+                    "Outliner and Lock pan have a gap without overlapping the view buttons");
+            }
+            editor->setSize(1160, 760); snapshot();
+            editor->selectSurfaceObjects({{1, 0}, {1, 1}, {4, 0}}); editor->linkSelection("Stage structure");
+            auto linked = p.getDisplayScene();
+            check(linked.walls[0].editor.group == "Stage structure" && linked.walls[1].editor.group == "Stage structure"
+                && linked.floorZones[0].editor.group == "Stage structure" && editor->selectedSurfaces().size() == 3,
+                "Link creates a mixed wall/zone construction and expands its selection");
+            SceneOutliner* tree = nullptr;
+            for (int i = 0; i < editor->getNumChildComponents(); ++i)
+                if (auto* component = dynamic_cast<SceneOutliner*>(editor->getChildComponent(i))) tree = component;
+            juce::ListBox* treeList = nullptr;
+            if (tree) for (int i = 0; i < tree->getNumChildComponents(); ++i)
+                if (auto* component = dynamic_cast<juce::ListBox*>(tree->getChildComponent(i))) treeList = component;
+            if (treeList) {
+                auto clickFlag = [&](bool lock) {
+                    const auto point = juce::Point<float>((float)treeList->getVisibleRowWidth() - (lock ? 10.f : 34.f), 13.f);
+                    const auto now = juce::Time::getCurrentTime();
+                    juce::MouseEvent e(juce::Desktop::getInstance().getMainMouseSource(), point, juce::ModifierKeys(juce::ModifierKeys::leftButtonModifier),
+                        1.f, 0.f, 0.f, 0.f, 0.f, treeList, treeList, now, point, now, 1, false);
+                    treeList->getModel()->listBoxItemClicked(2, e); // group after Floor and Ceiling
+                };
+                clickFlag(false);
+                check(p.getDisplayScene().walls[0].editor.hidden && p.getDisplayScene().floorZones[0].editor.hidden,
+                    "outliner H control hides every member of a construction");
+                clickFlag(false); clickFlag(true);
+                check(p.getDisplayScene().walls[1].editor.locked && p.getDisplayScene().floorZones[0].editor.locked,
+                    "outliner L control locks every member of a construction");
+                clickFlag(true);
+            } else check(false, "outliner list is available");
+            editor->unlinkSelection();
+            check(p.getDisplayScene().walls[0].editor.group.empty() && p.getDisplayScene().floorZones[0].editor.group.empty(),
+                "Unlink releases the construction without removing its surfaces");
+            editor->undoEdit(); editor->selectSurfaceObjects({{1, 0}});
+            editor->deleteSelection();
+            check(p.getDisplayScene().walls.size() == 2 && p.getDisplayScene().floorZones.empty(),
+                "deleting a mixed construction removes its walls and zone together");
+            editor->undoEdit(); editor->selectSurfaceObjects({{1, 0}}); linked = p.getDisplayScene();
+            check(linked.walls.size() == 4 && linked.floorZones.size() == 1 && linked.walls[0].editor.group == "Stage structure",
+                "Undo restores deleted construction members and metadata");
+            snapshot();
+            auto event = [&](juce::Point<float> position, juce::Point<float> down, int modifiers, bool dragged) {
+                return juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(), position, juce::ModifierKeys(modifiers),
+                    1.f, 0.f, 0.f, 0.f, 0.f, editor, editor, juce::Time::getCurrentTime(), down, juce::Time::getCurrentTime(), 1, dragged);
+            };
+            const auto wallPoint = editor->testWorldPoint(0, 4);
+            editor->mouseDown(event(wallPoint, wallPoint, juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::altModifier, false));
+            editor->mouseUp(event(wallPoint, wallPoint, juce::ModifierKeys::altModifier, false));
+            check(editor->selectedSurfaces().size() == 1, "Alt-click selects an individual linked surface without unlinking it");
+            editor->selectSurfaceObjects({{1, 0}});
+            editor->mouseDown(event(wallPoint, wallPoint, juce::ModifierKeys::leftButtonModifier, false));
+            editor->mouseDrag(event(wallPoint + juce::Point<float>(30, -20), wallPoint, juce::ModifierKeys::leftButtonModifier, true));
+            editor->mouseUp(event(wallPoint + juce::Point<float>(30, -20), wallPoint, 0, true));
+            const auto moved = p.getDisplayScene();
+            const double dx = moved.walls[0].ax - linked.walls[0].ax, dy = moved.walls[0].ay - linked.walls[0].ay;
+            check(std::hypot(dx, dy) > 0.1 && std::abs(moved.walls[1].ax - linked.walls[1].ax - dx) < 1e-6
+                && std::abs(moved.floorZones[0].poly[0].second - linked.floorZones[0].poly[0].second - dy) < 1e-6
+                && moved.walls[2].ax == linked.walls[2].ax, "dragging one linked wall moves the construction rigidly and leaves other walls in place");
+            editor->undoEdit(); linked = p.getDisplayScene(); snapshot();
+            check(linked.walls[0].ax == originalRoom.walls[0].ax && linked.walls[0].editor.group == "Stage structure",
+                "Undo restores the complete construction without dropping its metadata");
+            p.editSceneMetadata([](verb::Scene& s) { s.floorZones[0].editor.locked = true; });
+            editor->deleteSelection();
+            check(p.getDisplayScene().walls.size() == 4 && p.getDisplayScene().floorZones.size() == 1,
+                "locked construction cannot be deleted");
+            const auto lockedScene = p.getDisplayScene();
+            editor->applyPresetToSelection("Velvet_drapes");
+            const auto afterMaterial = p.getDisplayScene();
+            check(afterMaterial.mats[(size_t)afterMaterial.walls[0].mat].alpha == lockedScene.mats[(size_t)lockedScene.walls[0].mat].alpha,
+                "locked construction materials cannot be changed");
+            const auto lockedPoint = editor->testWorldPoint(0, 4);
+            editor->mouseDown(event(lockedPoint, lockedPoint, juce::ModifierKeys::leftButtonModifier, false));
+            editor->mouseDrag(event(lockedPoint + juce::Point<float>(35, -15), lockedPoint, juce::ModifierKeys::leftButtonModifier, true));
+            editor->mouseUp(event(lockedPoint + juce::Point<float>(35, -15), lockedPoint, 0, true));
+            check(p.getDisplayScene().walls[0].ax == linked.walls[0].ax, "one locked member prevents partial movement of a linked construction");
+            p.editSceneMetadata([](verb::Scene& s) { s.floorZones[0].editor.locked = false; s.walls[0].editor.hidden = true; s.walls[2].editor.locked = true; });
+            snapshot();
+            check(editor->testPickCount(0, 4) == 0, "hidden surface cannot be picked on the map");
+            check(editor->testPickCount(6, 4) == 0, "locked surface cannot be picked on the map");
+            const auto before = editor->testWorldPoint(3, 2); const auto panPoint = editor->testCanvas().getCentre().toFloat();
+            const auto emptyPoint = editor->testCanvas().getBottomLeft().toFloat() + juce::Point<float>(4, -24);
+            editor->mouseDown(event(emptyPoint, emptyPoint, juce::ModifierKeys::leftButtonModifier, false));
+            editor->mouseDrag(event(emptyPoint + juce::Point<float>(30, -20), emptyPoint, juce::ModifierKeys::leftButtonModifier, true));
+            editor->mouseUp(event(emptyPoint + juce::Point<float>(30, -20), emptyPoint, 0, true)); snapshot();
+            check(editor->testWorldPoint(3, 2).getDistanceFrom(before) < 0.01f, "missing a surface with Lock pan enabled leaves the grid in place");
+            editor->mouseDown(event(panPoint, panPoint, juce::ModifierKeys::middleButtonModifier, false));
+            editor->mouseDrag(event(panPoint + juce::Point<float>(40, 25), panPoint, juce::ModifierKeys::middleButtonModifier, true));
+            editor->mouseUp(event(panPoint + juce::Point<float>(40, 25), panPoint, 0, true)); snapshot();
+            check(editor->testWorldPoint(3, 2).getDistanceFrom(before) < 0.01f, "Lock pan prevents grid movement even with the middle mouse button");
+            p.setNavigationLocked(false);
+            editor->mouseDown(event(panPoint, panPoint, juce::ModifierKeys::middleButtonModifier, false));
+            editor->mouseDrag(event(panPoint + juce::Point<float>(40, 25), panPoint, juce::ModifierKeys::middleButtonModifier, true));
+            editor->mouseUp(event(panPoint + juce::Point<float>(40, 25), panPoint, 0, true)); snapshot();
+            check(editor->testWorldPoint(3, 2).getDistanceFrom(before) > 10.f, "unlocking pan restores normal navigation");
+            editor->setAutoView(true); p.setNavigationLocked(true);
+            auto dir = juce::File::getCurrentWorkingDirectory().getChildFile("out/spatial-editor"); dir.createDirectory();
+            for (int width : {900, 1160}) {
+                editor->setSize(width, width == 900 ? 600 : 760);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(150);
+                for (int plane : {0, 1, 3}) {
+                    editor->showPlane(plane); auto image = snapshot();
+                    juce::FileOutputStream out(dir.getChildFile("outliner_" + juce::String(width) + "_" + juce::String(plane) + ".png"));
+                    juce::PNGImageFormat png; if (out.openedOk()) { out.setPosition(0); out.truncate(); png.writeImageToStream(image, out); }
+                }
+                editor->showPage(2, -1); auto image = snapshot();
+                juce::FileOutputStream out(dir.getChildFile("positioned_mix_" + juce::String(width) + ".png")); juce::PNGImageFormat png;
+                if (out.openedOk()) { out.setPosition(0); out.truncate(); png.writeImageToStream(image, out); }
+                editor->showPage(1, -1);
+            }
+        }
+        const auto text = p.getRoomText(); std::istringstream input(text.toStdString()); const auto parsed = verb::parseScene(input, "metadata roundtrip");
+        check(parsed.walls[0].editor.name == "Left wall \"A\" #1" && parsed.walls[0].editor.hidden
+            && parsed.walls[0].editor.group == "Stage structure" && parsed.floorZones[0].editor.group == "Stage structure",
+            "scene comments preserve quoted names, groups and visibility through serialization");
+        juce::String error; const auto preset = p.getRoomPresetText();
+        check(p.loadRoomPresetText(preset, error) && waitReady(p, 90) && p.getDisplayScene().walls[0].editor.hidden,
+            "complete presets preserve outliner metadata");
+        auto presetXml = juce::parseXML(preset);
+        check(presetXml->getIntAttribute("formatVersion") == 2, "new presets use format 2 so older plug-ins cannot silently discard positioned dry");
+        auto* payload = presetXml->getChildByName("VerbState");
+        payload->removeChildElement(payload->getChildByAttribute("id", "spatialDry"), true);
+        check(!p.loadRoomPresetText(presetXml->toString(), error), "format 2 requires the positioned-dry parameter");
+        presetXml->setAttribute("formatVersion", 1);
+        check(p.loadRoomPresetText(presetXml->toString(), error) && waitReady(p, 90)
+            && p.apvts.getRawParameterValue("spatialDry")->load() == 0, "format 1 presets load with their original dry bypass");
+        juce::MemoryBlock state; p.getStateInformation(state);
+        auto xml = juce::AudioProcessor::getXmlFromBinary(state.getData(), (int)state.getSize()); auto legacy = juce::ValueTree::fromXml(*xml);
+        legacy.removeChild(legacy.getChildWithProperty("id", "spatialDry"), nullptr);
+        juce::MemoryBlock old; juce::AudioProcessor::copyXmlToBinary(*legacy.createXml(), old);
+        p.setStateInformation(old.getData(), (int)old.getSize());
+        check(waitReady(p, 90) && p.apvts.getRawParameterValue("spatialDry")->load() == 0,
+            "older projects retain their original dry/wet behaviour");
+        check(p.navigationLocked() && p.outlinerVisible(), "navigation lock and outliner visibility survive project state restore");
+        return fails ? 1 : 0;
+    }
     if (std::getenv("VERB_PRESETS_ONLY")) {
         VerbProcessor p;
         p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
@@ -303,7 +614,7 @@ int main() {
         check(energy(1) > baseline * 0.5, "multiple source solos combine");
         setP(p, verbp::sourceSwitchId(1, false), 1);
         check(energy(1) < baseline * 1e-8, "Mute takes priority over Solo");
-        setP(p, "soloDirect", 0); setP(p, "mix", 0);
+        setP(p, "soloDirect", 0); setP(p, "spatialDry", 0); setP(p, "mix", 0);
         check(energy(1) < 1e-8 && energy(0) > 0.9, "source switches also gate the mapped dry bypass");
         p.setMixerCompactEnabled(false);
         juce::MemoryBlock state; p.getStateInformation(state);

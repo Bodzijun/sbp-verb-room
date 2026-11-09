@@ -1,6 +1,6 @@
 # Verb Room
 
-Version 0.1.11 adds experimental GitHub Actions builds for macOS Universal and Linux x86_64. See the [cross-platform build guide](docs/Cross_platform_builds_en.md). Includes the complete `.verbroom` presets, Compact / Normal mixer, source Solo/Mute and VSL Grand Hall presets from [0.1.10](docs/Release_0.1.10_en.md); see the [preset exchange guide](docs/Presets_0.1.10_en.md).
+Version 0.1.15 extends the Energy analyzer to 48 / 64 / 96-cell grids and adds 0.5–120 dB colour range with Auto contrast. See the [latest release notes](docs/Release_0.1.15_en.md) and [analyzer guide](docs/Energy_analyzer_0.1.14_en.md). The background energy map offers source, height, component and octave-band selection. This includes positioned dry sound and the scene Outliner from 0.1.12, plus the 0.1.13 layout fixes; see the [editor guide](docs/Spatial_editor_0.1.12_en.md) and [preset exchange guide](docs/Presets_0.1.10_en.md). Experimental macOS Universal and Linux x86_64 builds use GitHub Actions; see the [cross-platform build guide](docs/Cross_platform_builds_en.md).
 
 A physically based room reverb for **REAPER and other VST3 hosts** (Windows x64), built for scenes where
 sources and the listener *move*: cars, fly-bys, games-style sound design, virtual rooms with many sources.
@@ -28,7 +28,7 @@ listener move. Position and orientation of every source and of the listener are 
   LCR, quad, 5.0, 5.1, 7.1 or a ring of N channels, with a free position for each channel point.
 - **Listener**: output layouts Mono, Stereo (ORTF / XY), LCR, Quad, 5.1, 7.1, 7.1.4 and a ring of N channels;
   microphone patterns (omni … figure-8) and a **human-ears** pattern with head shadow (mic radius = ear spacing).
-- **Mix controls**: Dry/Wet (equal power), output gain, early-reflection level, diffusion, Doppler strength,
+- **Mix controls**: positioned Dry/Wet preserves direct sound location while adding room reflections; the original equal-power raw-input mode remains available. Output gain, early-reflection level, diffusion, Doppler strength,
   **tail level**, and automatable, combinable **Direct / Early / Tail Solo** with smooth switching.
 - **Source mixer**: Compact / Normal channel strips with input meters, automatable gain and Solo/Mute,
   input formats and assignments, summing, spread and directivity. Existing tails decay naturally when a source is muted.
@@ -36,9 +36,11 @@ listener move. Position and orientation of every source and of the listener are 
   tail quality. Keep I/O retains the current source setup and output when trying another room. Legacy `.txt` scenes still load.
 - **Tail quality**: Preview / Mix / Render profiles, manual ray budgets and bounded adaptive refinement, updated in the background without restarting the engine.
 - **Decay tab**: seven octave-band energy-decay curves, estimated RT60 from T20, and an indication of extrapolated regions. Individual curves can be hidden for comparison.
+- **Energy tab**: modeled sound-energy coverage on a horizontal slice, with all audible sources or one group, seven octave bands, Direct/Early/Tail selection and adjustable tracing quality. Background Analyze/Cancel, hover values and an outdated-result indicator; analysis leaves the audio unchanged. Uses unit excitation and omni probes, without calibrated SPL or wave-mode analysis.
 - **Editor**: plan, front, side and 3D views; wall/zone/box-select tools; undo; a room library with 10 starter rooms and
   two MotorSynth car cabins; layers (show / lock / hide walls, floors, ceilings, plates); repeated click steps through
   surfaces that overlap; optional input channel meters (numbered as in the host).
+- **Scene organization**: Lock pan prevents accidental map movement. The Outliner selects, renames, hides and locks surfaces; Link/Unlink creates constructions that move together. Hidden surfaces remain acoustically active, and organization is saved with the scene.
 - **Tail length that fits the room**: the late tail is made as long as the room needs (up to 20 s) and fades out smoothly, with conservative tail reporting to the host from startup.
 - **Orchestra halls**: a chamber hall and a symphony hall (listener in the audience or on the conductor's podium) with the instrument groups at their real places and heights on stage risers; see `docs/Orchestra_presets.md`.
 - **VSL Grand Hall**: two editable presets with audience and conductor positions, 32 stereo groups on 64 inputs,
@@ -61,7 +63,7 @@ For the 32-group VSL Grand Hall, configure 64 track inputs and disable Keep I/O 
 Presets configure the plug-in; host sends, pin mapping and Vienna instruments are set up separately.
 
 To share a room, use **Save room**, then **Open my library folder** and send the saved `.verbroom` file.
-The recipient loads it through **Load from file ...**. Complete presets require version 0.1.10 or a later version supporting format 1.
+The recipient loads it through **Load from file ...**. New complete presets use format 2 and require version 0.1.12 or a later version supporting format 2. Older format 1 presets and project states continue to load.
 
 ## Build
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(verb VERSION 0.1.11 LANGUAGES C CXX)
+project(verb VERSION 0.1.15 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -7,7 +7,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 find_package(Threads REQUIRED)
 
-add_library(verbcore STATIC src/render.cpp src/tail.cpp src/rt_engine.cpp)
+add_library(verbcore STATIC src/render.cpp src/tail.cpp src/rt_engine.cpp src/energy.cpp)
 set_target_properties(verbcore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(verbcore PUBLIC Threads::Threads)
 target_include_directories(verbcore PUBLIC src)
@@ -53,6 +53,9 @@ set_tests_properties(vsl_hall_tail PROPERTIES ENVIRONMENT "VERB_VSL_TAIL_ONLY=1"
 add_executable(quality_test src/quality_test.cpp)
 target_link_libraries(quality_test PRIVATE verbcore)
 add_test(NAME quality_test COMMAND quality_test)
+add_executable(energy_test src/energy_test.cpp)
+target_link_libraries(energy_test PRIVATE verbcore)
+add_test(NAME energy_map COMMAND energy_test)
 set_tests_properties(quality_test PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 # JUCE plugin (needs MSVC on Windows): cmake -DVERB_BUILD_PLUGIN=ON

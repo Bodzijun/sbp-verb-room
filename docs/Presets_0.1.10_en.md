@@ -10,7 +10,7 @@
 4. The recipient opens it through **Load from file ...**. Alternatively, they can place the file in their own library and reopen the plug-in editor.
 
 Library location: the system Documents folder → `SBP/Verb Room/Rooms`.
-`.verbroom` requires **Verb Room 0.1.10 or a later version supporting format 1**.
+Format 1 requires **Verb Room 0.1.10 or later**. From 0.1.12, new `.verbroom` files use **format 2** for Positioned dry and surface organization, requiring **0.1.12 or a later version supporting format 2**. The new plug-in continues to load format 1.
 
 ## What the file contains
 
@@ -20,6 +20,7 @@ Library location: the system Documents folder → `SBP/Verb Room/Rooms`.
 - Output and microphone configuration.
 - Mixer settings, Dry/Wet, output gain, Early/Tail levels, and Solo/Mute.
 - Tail ray budget and Adaptive.
+- Positioned dry and surface names, groups, visibility and locking (from 0.1.12).
 
 This is a self-contained XML file. It does not include VSL samples, other VST plug-ins, MIDI, tracks, or external DAW/Vienna connections. Impulse responses are recalculated after loading.
 
@@ -30,6 +31,8 @@ This is a self-contained XML file. It does not include VSL samples, other VST pl
 **On:** the current source list and configuration are retained, including names, formats, inputs, and channel points, together with the output configuration. The room, positions, and mixer parameters are imported from the preset by source index. To reproduce another user's setup, turn Keep I/O off before loading. To try another hall with your existing routing, leave it on.
 
 The Keep I/O switch itself, the Compact/Normal view, and input-meter visibility remain the recipient's local preferences.
+
+Lock pan and Outliner visibility also remain local. See [positioned dry and scene organization](Spatial_editor_0.1.12_en.md).
 
 The plug-in does not create DAW sends or change host pin mapping: track channel counts and connections must be configured in the host. The 32 stereo groups require 64 available inputs.
 

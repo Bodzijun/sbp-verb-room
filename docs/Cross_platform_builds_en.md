@@ -56,7 +56,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DVERB_BUILD_PLUGIN=ON -DVERB_AVX2=OFF \
   '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
-cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test --parallel 2
+cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test --parallel 2
 # Linux headless tests:
 xvfb-run -a ctest --test-dir build --output-on-failure
 # macOS tests:

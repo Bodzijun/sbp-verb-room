@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
+from binary_readme import write_binary_readme
 
 
 def main():
@@ -39,8 +40,7 @@ def main():
         raise FileExistsError(f"Package stage already exists: {stage}")
     stage.mkdir()
     shutil.copytree(bundle, stage / bundle.name, symlinks=True)
-    for filename in ("LICENSE", "README.md"):
-        shutil.copy2(source / filename, stage / filename)
+    shutil.copy2(source / "LICENSE", stage / "LICENSE")
     shutil.copytree(source / "docs", stage / "docs")
     shutil.copytree(source / "presets", stage / "Presets")
     info = {"version": version, "platform": args.platform, "commit": commit,
@@ -69,6 +69,7 @@ def main():
         "This package does not contain orchestral instruments or samples.\n"
     )
     (stage / "INSTALL.txt").write_text(instructions, encoding="utf-8")
+    write_binary_readme(stage, version, args.platform)
     if expected_os == "Darwin":
         subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(stage), str(archive)], check=True)
     else:

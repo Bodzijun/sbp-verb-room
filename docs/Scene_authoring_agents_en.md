@@ -2,12 +2,12 @@
 
 [Ukrainian version](Scene_authoring_agents_uk.md)
 
-This document describes the current 0.1.10 implementation. Before changing the format, check the code in `src/scene.hpp`, `src/rt_engine.cpp`, `plugin/SourceModel.h`, `plugin/RoomLibrary.h`, and `plugin/PluginProcessor.cpp`. Do not modify the user's open DAW or Vienna project unless the task asks for it.
+This document describes the current 0.1.12 implementation. Before changing the format, check the code in `src/scene.hpp`, `src/rt_engine.cpp`, `plugin/SourceModel.h`, `plugin/RoomLibrary.h`, and `plugin/PluginProcessor.cpp`. Do not modify the user's open DAW or Vienna project unless the task asks for it.
 
 ## 1. Choose the format
 
 - **`.txt`** is a geometric scene description for authoring, the CLI, and importing into the plug-in. It does not describe routing or mixer settings.
-- **`.verbroom`** is a complete preset for sharing between users. Configure the scene in the plug-in and save it with Save room or `VerbProcessor::getRoomPresetText()`. Do not invent XML parameters manually: the `VerbRoomPreset formatVersion="1"` container holds a complete `VerbState`. See the [preset exchange and Keep I/O guide](Presets_0.1.10_en.md).
+- **`.verbroom`** is a complete preset for sharing between users. Configure the scene in the plug-in and save it with Save room or `VerbProcessor::getRoomPresetText()`. Do not invent XML parameters manually: the 0.1.12 exporter creates a `VerbRoomPreset formatVersion="2"` container holding a complete `VerbState`; format 1 is also accepted. See the [preset exchange and Keep I/O guide](Presets_0.1.10_en.md).
 - Add built-in presets with multichannel sources through `BuiltinRoom.setup` and `loadRoomWithSetup`, rather than supplying scene text alone. See `orchestraRoom()` and `vslGrandHall()` for examples.
 
 ## 2. Coordinates and geometry
@@ -128,3 +128,17 @@ Remove-Item Env:VERB_VSL_TAIL_ONLY
 ```
 
 A new hall needs its own checks; passing the VSL tests does not validate a different scene. Do not install a VST3 over a binary currently used by a DAW. Prepare and verify the package first, then wait for the host to release the file.
+
+## 7. Scene organization and positioned dry (0.1.12)
+
+See the [editor guide](Spatial_editor_0.1.12_en.md). Surface names, flat groups, visibility and locking are stored as compatible comments:
+
+```text
+#@verbroom-editor-v1 wall 0 "Stage left" "Stage structure" 0 1
+```
+
+Fields: type (`wall`, `floor-zone`, `ceiling-zone`, `floor`, `ceiling`), zero-based index, quoted name, quoted group name, hidden (0/1), locked (0/1). The main floor/ceiling use index 0 and cannot be members of movable constructions. An empty group means unlinked. Escape quotes and backslashes inside strings; prefer the built-in serializer.
+
+These flags do not change acoustics: hidden does not mean an absent wall, and locked does not replace absorption. Do not remove geometry when hiding it. Surfaces retain their individual materials; Link only organizes them and enables joint movement. Use unique group names for independent constructions.
+
+`spatialDry` is a plug-in parameter, not a scene command. New instances enable it: the direct field stays positioned while Wet adds reflections/tail without duplicating direct sound. Older projects and format 1 presets retain the original bypass. Use format 2 for complete exchange of this mode, rather than partial XML.

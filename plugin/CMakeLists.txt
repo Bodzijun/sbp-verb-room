@@ -1,4 +1,4 @@
-set(VERB_PLUGIN_SOURCES PluginProcessor.cpp PluginEditor.cpp)
+set(VERB_PLUGIN_SOURCES PluginProcessor.cpp PluginEditor.cpp EnergyMapView.cpp)
 
 juce_add_plugin(VerbPlugin
     COMPANY_NAME "SBP"
@@ -37,6 +37,12 @@ target_link_libraries(VerbPluginTest PRIVATE
     juce::juce_recommended_config_flags)
 
 add_test(NAME portable_presets COMMAND VerbPluginTest)
+add_test(NAME spatial_editor COMMAND VerbPluginTest)
+add_test(NAME energy_editor COMMAND VerbPluginTest)
+set_tests_properties(energy_editor PROPERTIES
+    ENVIRONMENT "VERB_ENERGY_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 180)
+set_tests_properties(spatial_editor PROPERTIES
+    ENVIRONMENT "VERB_SPATIAL_EDITOR_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 360)
 set_tests_properties(portable_presets PROPERTIES
     ENVIRONMENT "VERB_PRESETS_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 240)
 add_test(NAME vsl_hall_presets COMMAND VerbPluginTest)

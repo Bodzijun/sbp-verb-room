@@ -64,6 +64,8 @@ public:
     void setTailLevel(double dB);  // level of the late field (the reverberant tail) alone, -60..+12 dB, live
     // 0 = all components; bits 1 direct, 2 early, 4 tail. Changes ramp over 10 ms.
     void setSoloMask(int mask);
+    // Positioned dry/wet: keep the direct field intact, scale early reflections and tail (0..1, 10 ms ramp).
+    void setReverbMix(double amount);
     // Retraces and crossfades the tail on its worker without resetting audio history.
     // With tailThread=false, later quality requests are not applied.
     void setTailQuality(int baseRays, bool adaptive);
@@ -84,6 +86,9 @@ public:
     int tailRefreshCount() const;
     // Message/control threads only. Immutable snapshot; never called by process().
     std::shared_ptr<const TailDiagnostics> tailDiagnostics() const;
+    // Actual immutable modeled geometry, including the seeded roughness/clutter.
+    // Control threads only; retaining it never involves the audio callback.
+    std::shared_ptr<const Scene> sceneSnapshot() const;
 
 private:
     struct Impl;

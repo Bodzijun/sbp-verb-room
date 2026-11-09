@@ -59,6 +59,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
     add("doppler", "Doppler Strength", 0.f, 2.f, 1.f, "");  // 1 = physical, 0 = no pitch shift
     add("tail", "Tail Level", -48.f, 12.f, 0.f, "dB");      // the late reverberant field alone (direct and early reflections unchanged)
     add("mix", "Dry/Wet Mix", 0.f, 100.f, 100.f, "%");      // 100 = only the room (the usual setup: dry stays on the source tracks)
+    p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"spatialDry", 1}, "Positioned Dry", true));
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloDirect", 1}, "Solo Direct", false));
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloEarly", 1}, "Solo Early", false));
     p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"soloTail", 1}, "Solo Tail", false));
@@ -84,6 +85,7 @@ VerbProcessor::VerbProcessor()
     diffusionParam = apvts.getRawParameterValue("diffusion");
     dopplerParam = apvts.getRawParameterValue("doppler");
     mixParam = apvts.getRawParameterValue("mix");
+    spatialDryParam = apvts.getRawParameterValue("spatialDry");
     tailParam = apvts.getRawParameterValue("tail");
     soloParam[0] = apvts.getRawParameterValue("soloDirect");
     soloParam[1] = apvts.getRawParameterValue("soloEarly");
@@ -189,6 +191,9 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     float wetG1 = std::sin(mixP * 1.5707963f), dryG1 = std::cos(mixP * 1.5707963f);
     if (mixP >= 0.9999f) { wetG1 = 1.f; dryG1 = 0.f; }
     if (mixP <= 0.0001f) { wetG1 = 0.f; dryG1 = 1.f; }
+    const bool positioned = spatialDryParam->load(std::memory_order_relaxed) >= 0.5f;
+    e.setReverbMix(positioned && !solo ? mixP : 1.f);
+    if (positioned) { wetG1 = 1.f; dryG1 = 0.f; }
     const float wetG0 = prevWet, dryG0 = prevDry;
 
     // The automation value read at the start of a host block is the position AT THE START of that block. The block is
@@ -368,6 +373,8 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
         st.setProperty("inputMeters", inputMetersOn.load(), nullptr);
         st.setProperty("keepRouting", keepRouting.load(), nullptr);
         st.setProperty("mixerCompact", mixerCompact.load(), nullptr);
+        st.setProperty("navLocked", navLocked.load(), nullptr);
+        st.setProperty("showOutliner", showOutliner.load(), nullptr);
         st.setProperty("tailRays", tailSettings.rays, nullptr);
         st.setProperty("adaptiveTail", tailSettings.adaptive, nullptr);
         st.removeChild(st.getChildWithName("Sources"), nullptr);
@@ -447,6 +454,12 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
     inputMetersOn = (bool)st.getProperty("inputMeters", true);
     keepRouting = (bool)st.getProperty("keepRouting", false);
     mixerCompact = (bool)st.getProperty("mixerCompact", true);
+    navLocked = (bool)st.getProperty("navLocked", false);
+    showOutliner = (bool)st.getProperty("showOutliner", false);
+    if (!st.getChildWithProperty("id", "spatialDry").isValid()) {
+        juce::ValueTree param("PARAM"); param.setProperty("id", "spatialDry", nullptr);
+        param.setProperty("value", 0.f, nullptr); st.appendChild(param, nullptr);  // old projects retain raw bypass
+    }
     for (int s = 0; s < verbp::kMaxSources; ++s) for (bool solo : {false, true}) {
         const auto id = verbp::sourceSwitchId(s, solo);
         if (!st.getChildWithProperty("id", id).isValid()) {
@@ -564,6 +577,16 @@ void VerbProcessor::editScene(const std::function<void(verb::Scene&)>& fn) {
 }
 
 // ---------- sources / outputs ----------
+void VerbProcessor::editSceneMetadata(const std::function<void(verb::Scene&)>& fn) {
+    {
+        juce::ScopedLock lock(dispLock);
+        fn(display);
+        sceneText = verb::serializeScene(display);
+        ++sceneSerial;
+    }
+    updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
+}
+
 std::vector<verbp::SourceCfg> VerbProcessor::getSources() const {
     juce::ScopedLock l(dispLock);
     return srcCfg;
@@ -967,6 +990,46 @@ verb::Scene VerbProcessor::getDisplayScene(double* home) const {
     return display;
 }
 
+verb::Scene VerbProcessor::getEnergyScene(int source) const {
+    verb::Scene sc;
+    std::vector<verbp::SourceCfg> cfg;
+    { juce::ScopedLock l(dispLock); sc = display; cfg = srcCfg; }
+    std::shared_ptr<const verb::Scene> modeled;
+    { juce::SpinLock::ScopedLockType lock(engineLock); if (bundle) modeled = bundle->engine->sceneSnapshot(); }
+    if (modeled) {
+        sc = *modeled; // copy after releasing the processor's short pointer lock
+        sc.clutter.count = 0; sc.roughness = 0; // already present in modeled geometry
+    }
+    sc.sources.clear(); sc.receivers.clear();
+    bool anySolo = false;
+    for (size_t s = 0; s < cfg.size(); ++s) anySolo |= sourceSolo[s]->load() >= .5f;
+    const double top = sc.ceilMat < 0 ? 30. : sc.height;
+    for (const auto& pm : verbp::buildPoints(cfg)) {
+        const int s = pm.source; const auto& conf = cfg[(size_t)s];
+        if ((source >= 0 && source != s) || sourceMute[s]->load() >= .5f
+            || (anySolo && sourceSolo[s]->load() < .5f) || pv[s][4]->load() <= -60.f) continue;
+        double ox = pm.radius * std::cos(pm.angleDeg * verb::kPi / 180.);
+        double oy = pm.radius * std::sin(pm.angleDeg * verb::kPi / 180.), oz = 0;
+        if (conf.freePoints && pm.channel >= 0 && conf.ox.size() > (size_t)pm.channel
+            && conf.oy.size() > (size_t)pm.channel && conf.oz.size() > (size_t)pm.channel) {
+            ox = conf.ox[(size_t)pm.channel]; oy = conf.oy[(size_t)pm.channel]; oz = conf.oz[(size_t)pm.channel];
+        }
+        verb::Transducer t; t.name = conf.name;
+        t.azimuthDeg = pv[s][3]->load(); t.pattern = conf.pattern; t.gainDb = pv[s][4]->load();
+        const double a = t.azimuthDeg * verb::kPi / 180., ca = std::cos(a), sa = std::sin(a);
+        t.pos = {pv[s][0]->load() + ca * ox - sa * oy, pv[s][1]->load() + sa * ox + ca * oy,
+            std::clamp((double)pv[s][2]->load() + oz, 0., top)};
+        sc.sources.push_back(t);
+    }
+    // Omni coverage probes have no dependency on the host's receiver layout.
+    sc.hasListener = false; sc.listenerPos = {}; sc.listenerYaw = 0;
+    sc.floorEditor = {}; sc.ceilEditor = {};
+    for (auto& w : sc.walls) w.editor = {};
+    for (auto& z : sc.floorZones) z.editor = {};
+    for (auto& z : sc.ceilZones) z.editor = {};
+    return sc;
+}
+
 // ---------- room library / IR export ----------
 juce::String VerbProcessor::getRoomText() const {
     verb::Scene sc;
@@ -1000,7 +1063,7 @@ juce::String VerbProcessor::getRoomPresetText() {
     if (!stateXml) return {};
     stateXml->setAttribute("sceneText", getRoomText());
     juce::XmlElement preset("VerbRoomPreset");
-    preset.setAttribute("formatVersion", 1);
+    preset.setAttribute("formatVersion", 2);
    #ifdef JucePlugin_VersionString
     preset.setAttribute("pluginVersion", JucePlugin_VersionString);
    #endif
@@ -1011,8 +1074,9 @@ juce::String VerbProcessor::getRoomPresetText() {
 bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& error) {
     error.clear();
     auto xml = juce::parseXML(text);
-    if (!xml || !xml->hasTagName("VerbRoomPreset") || xml->getIntAttribute("formatVersion") != 1) {
-        error = "Unsupported or damaged Verb Room preset (expected format version 1).";
+    const int format = xml ? xml->getIntAttribute("formatVersion") : 0;
+    if (!xml || !xml->hasTagName("VerbRoomPreset") || (format != 1 && format != 2)) {
+        error = "Unsupported or damaged Verb Room preset (expected format version 1 or 2).";
         return false;
     }
     auto* payload = xml->getChildByName("VerbState");
@@ -1051,6 +1115,11 @@ bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& e
         error = juce::String(e.what());
         return false;
     }
+    // Version 0.1.10 presets predate positioned dry; retain their original bypass behaviour.
+    if (format == 1 && !st.getChildWithProperty("id", "spatialDry").isValid()) {
+        juce::ValueTree param("PARAM"); param.setProperty("id", "spatialDry", nullptr);
+        param.setProperty("value", 0.f, nullptr); st.appendChild(param, nullptr);
+    }
     // Reject incomplete parameter lists instead of inheriting arbitrary values from the previous room.
     const auto current = apvts.copyState();
     for (auto param : current) {
@@ -1066,7 +1135,7 @@ bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& e
     getStateInformation(localData);
     auto localXml = getXmlFromBinary(localData.getData(), (int)localData.getSize());
     const auto local = juce::ValueTree::fromXml(*localXml);
-    for (const char* key : {"keepRouting", "inputMeters", "mixerCompact"})
+    for (const char* key : {"keepRouting", "inputMeters", "mixerCompact", "navLocked", "showOutliner"})
         st.setProperty(key, local.getProperty(key), nullptr);
     if (keepRoutingEnabled()) {
         for (const char* child : {"Sources", "Output"}) {

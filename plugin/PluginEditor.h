@@ -11,6 +11,8 @@
 #include "RoomLibrary.h"
 #include "TailDecayView.h"
 #include "SourceMixerView.h"
+#include "SceneOutliner.h"
+#include "EnergyMapView.h"
 
 // Room editor. Canvas: drag sources/listener; Move tool: drag wall endpoints (shared corners move together) or
 // whole segments; Add-wall tool: drag out a new segment (snaps to corners and a 10 cm grid, Alt = free);
@@ -36,15 +38,17 @@ public:
     void clearEverything() { clearRoom(); }  // test hook (the button asks first)
     // Multi-selection hooks (also used by the tests).
     void selectWalls(const std::vector<int>& w) {
-        if (w.empty()) return;
-        selWalls = w;
-        selKind = SelKind::Wall;
-        selWall = w.back();
-        showTab(1);
-        refreshSurface();
-        resized();
-        repaint();
+        std::vector<verbp::SurfaceRef> refs; for (int index : w) refs.push_back({1, index});
+        setSurfaceSelection(refs);
     }
+    void selectSurfaceObjects(const std::vector<verbp::SurfaceRef>& refs) { setSurfaceSelection(refs); }
+    void linkSelection(const juce::String& name) { linkSurfaces(name); }
+    void unlinkSelection() { unlinkSurfaces(); }
+    std::vector<verbp::SurfaceRef> selectedSurfaces() const { return currentSurfaceSelection(); }
+    void undoEdit() { undo(); }
+    void deleteSelection() { deleteSelectedWall(); }
+    juce::Point<float> testWorldPoint(double x, double y) const { return view.toScreen(x, y); }
+    juce::Rectangle<int> testCanvas() const { return canvas; }
     void applyPresetToSelection(const juce::String& name) {
         const verb::Material m = verb::presetByName(name.toStdString());
         editSurface([m](verb::Material& x) { x = m; });
@@ -73,13 +77,12 @@ public:
     void showPage(int tabIndex, int object) {                            // 0 Objects, 1 Surfaces, 2 Mix, 3 Space, 4 Decay
         if (object >= 0) selectObject(object);
         showTab(tabIndex);
-        resized();
     }
 
 private:
     enum class Tool { Move, BoxSelect, AddWall, AddFloorZone, AddCeilZone };
     enum class SelKind { Object, Wall, Floor, Ceiling, FloorZone, CeilZone };  // zones: selWall holds the zone index
-    enum class DragMode { None, Object, Vertex, Wall, NewWall, FreePoint, ZoneVertex, ZoneMove, WallTop, WallBottom, Box };
+    enum class DragMode { None, Object, Vertex, Wall, NewWall, FreePoint, ZoneVertex, ZoneMove, WallTop, WallBottom, Box, Construction };
     // Which view the map shows: plan (x, y) from above, an elevation (x, z) from the front / (y, z) from the side, or 3D.
     enum class Plane { Top, Front, Side, Iso };
     // The map's frame (u across, v up) is the world (x, y), or, with `rotated`, the world turned so that +x points UP and
@@ -130,7 +133,17 @@ private:
     View makeView(const verb::Scene&, const double* listener) const;
     void timerCallback() override;
     void selectObject(int obj);
-    void selectSurface(SelKind kind, int wall);
+    void selectSurface(SelKind kind, int wall, bool expandGroups = true);
+    void setSurfaceSelection(std::vector<verbp::SurfaceRef>, bool expandGroups = true);
+    std::vector<verbp::SurfaceRef> currentSurfaceSelection() const;
+    void refreshOutliner();
+    void linkSurfaces(const juce::String& name);
+    void unlinkSurfaces();
+    bool beginConstructionDrag(verbp::SurfaceRef, const juce::MouseEvent&);
+    bool canPickSurface(const verb::Scene&, verbp::SurfaceRef) const;
+    bool isSurfaceSelected(verbp::SurfaceRef) const;
+    verb::Scene constructionOriginal;
+    std::vector<verbp::SurfaceRef> surfaceSelection, constructionSelection;
     void showTab(int tab);
     void updateSliderRanges();
     void syncSliders();
@@ -146,7 +159,7 @@ private:
     void setParam(const juce::String& id, double v);
 
     VerbLookAndFeel laf;  // first member: destroyed after every component that uses it
-    std::vector<std::pair<juce::Rectangle<int>, juce::String>> headers[5];  // section headers per tab, drawn in paint()
+    std::vector<std::pair<juce::Rectangle<int>, juce::String>> headers[6];  // section headers per tab, drawn in paint()
     VerbProcessor& proc;
     // header
     juce::TextButton loadButton{"Load scene..."};  // (not shown: the room box has "Load from file...")
@@ -165,6 +178,8 @@ private:
     juce::Label statusLabel;
     juce::TextButton tabObjects{"Objects"}, tabSurfaces{"Surfaces"}, tabMix{"Mix"}, tabSpace{"Space"};
     juce::TextButton tabDecay{"Decay"};
+    juce::TextButton tabEnergy{"Energy"};
+    EnergyMapView energyView{proc};
     TailDecayView decayView;
     SourceMixerView sourceMixer{proc};
     juce::ComboBox qualityBox;
@@ -180,6 +195,8 @@ private:
         toolCeilZone{IconButton::Icon::CeilZone}, toolDelete{IconButton::Icon::Delete}, toolUndo{IconButton::Icon::Undo}, toolClear{IconButton::Icon::Clear};
     void clearRoom();  // removes every wall, zone and clutter object (one undo step)
     juce::Slider mixSlider, tailSlider;  // dry/wet, tail level
+    juce::ToggleButton positionedDry{"Positioned dry"};
+    std::unique_ptr<juce::ButtonParameterAttachment> positionedDryAttachment;
     juce::Label mixLabel, tailLabel;
     std::unique_ptr<juce::SliderParameterAttachment> mixAttachment, tailAttachment;
     juce::TextButton viewTop{"Top"}, viewFront{"Front"}, viewSide{"Side"}, viewIso{"3D"};
@@ -225,6 +242,9 @@ private:
     double horiz(double x, double y) const { return plane == Plane::Front ? x : y; }  // map-horizontal coordinate in the current plane
     int horizParam() const { return plane == Plane::Front ? 0 : 1; }
     juce::ToggleButton autoViewBtn{"Auto view"};
+    juce::ToggleButton navLockBtn{"Lock pan"};
+    juce::TextButton outlinerBtn{"Outliner"};
+    SceneOutliner outliner;
     bool autoFit = true;               // view follows walls and objects
     double vCx = 0, vCy = 0, vScale = 20;  // free view: centre (metres) and pixels per metre
     bool panning = false, panPending = false;

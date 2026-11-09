@@ -2,6 +2,7 @@
 #pragma once
 #include <array>
 #include <vector>
+#include <functional>
 
 #include "scene.hpp"
 
@@ -22,6 +23,11 @@ struct TailHist {
 // finalize=false retains raw first/second moments so independent traces can be
 // pooled before estimating confidence and decay. Finalize a histogram only once.
 TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize = true);
+// Integrated late energy for offline spatial analysis. No time histogram or
+// extrapolation is allocated; callbacks run only on the caller's worker thread.
+std::vector<std::array<double, NB>> traceTailEnergy(const Scene&, const Transducer&,
+    const std::vector<Transducer>&, int order, int rays, int seed,
+    const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {});
 void finalizeTail(TailHist& hist);
 
 // Immutable UI snapshot, generated off the audio thread from the modeled tail.

@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <limits>
 #include <random>
+#include <numeric>
+#include <stdexcept>
 
 #include "dsp.hpp"
 #include "geometry.hpp"
@@ -38,7 +40,8 @@ std::vector<std::vector<double>> makeBandFilters(double sr, int taps) {
 
 }  // namespace
 
-TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize) {
+static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize,
+    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}) {
     const Geo g(sc);
     const int R = (int)rcv.size();
     const double c = speedOfSound(sc.tempC);
@@ -47,7 +50,7 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
 
     TailHist out;
     out.binDur = 0.001;
-    out.nBins = (size_t)std::ceil(sc.length / out.binDur) + 2;
+    out.nBins = integrated ? 1 : (size_t)std::ceil(sc.length / out.binDur) + 2;
     out.h.resize(R);
     for (auto& r : out.h)
         for (auto& b : r) b.assign(out.nBins, 0.0);
@@ -73,7 +76,20 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
         }
     }
     const double Vs = 4.0 / 3.0 * kPi * rd * rd * rd;
+    // Spatial queries are used only for analysis. Clip each segment to the
+    // receivers' height slab, then search their X-sorted sphere bounds.
+    std::vector<int> receiverOrder;
+    double rz0 = 1e30, rz1 = -1e30;
+    if (integrated) {
+        receiverOrder.resize((size_t)R); std::iota(receiverOrder.begin(), receiverOrder.end(), 0);
+        std::sort(receiverOrder.begin(), receiverOrder.end(), [&](int a, int b) { return rcv[a].pos.x < rcv[b].pos.x; });
+        for (const auto& r : rcv) { rz0 = std::min(rz0, r.pos.z - rd); rz1 = std::max(rz1, r.pos.z + rd); }
+    }
     for (int i = 0; i < rays; ++i) {
+        if (integrated && i % 32 == 0) {
+            if (cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
+            if (progress) progress((double)i / rays);
+        }
         double zc = 2 * U(rng) - 1, ph = 2 * kPi * U(rng), sr_ = std::sqrt(1 - zc * zc);
         Vec3 d{sr_ * std::cos(ph), sr_ * std::sin(ph), zc};
         double gs = dirGain(src, d);
@@ -82,7 +98,9 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
         Vec3 p = src.pos;
         double path = 0;
         int refl = 0;
+        int steps = 0;
         while (true) {
+            if (integrated && ++steps % 32 == 0 && cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
             double tBest = std::numeric_limits<double>::infinity();
             int surf = -1;
             for (int w = 0; w < g.W; ++w) {
@@ -113,16 +131,16 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
             double L = surf < 0 ? maxPath - path : std::min(tBest, maxPath - path);
             if (L <= 0) break;
             if (refl > order) {
-                for (int r = 0; r < R; ++r) {
+                auto record = [&](int r) {
                     Vec3 oc = p - rcv[r].pos;
                     double bq = dot(oc, d), cc = dot(oc, oc) - rd * rd, disc = bq * bq - cc;
-                    if (disc <= 0) continue;
+                    if (disc <= 0) return;
                     double sq = std::sqrt(disc);
                     double s1 = std::max(-bq - sq, 0.0), s2 = std::min(-bq + sq, L);
-                    if (s2 <= s1) continue;
+                    if (s2 <= s1) return;
                     double mid = path + 0.5 * (s1 + s2);
-                    size_t bin = (size_t)(mid / c / out.binDur);
-                    if (bin >= out.nBins) continue;
+                    size_t bin = integrated ? 0 : (size_t)(mid / c / out.binDur);
+                    if (bin >= out.nBins) return;
                     double grb[NB];
                     dirGainBands(rcv[r], d * -1.0, grb);
                     for (int b = 0; b < NB; ++b) {
@@ -130,6 +148,25 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
                         const double contrib = 4 * kPi * e[b] * std::pow(10.0, -airDb[b] * mid / 10.0) * (s2 - s1) / Vs * gr * gr;
                         out.h[r][b][bin] += contrib;
                         out.h2[r][b][bin] += contrib * contrib;
+                    }
+                };
+                if (!integrated) {
+                    for (int r = 0; r < R; ++r) record(r);
+                } else if (R > 0) {
+                    double a = 0, b = L;
+                    if (std::fabs(d.z) > 1e-12) {
+                        double lo = (rz0 - p.z) / d.z, hi = (rz1 - p.z) / d.z;
+                        if (lo > hi) std::swap(lo, hi);
+                        a = std::max(a, lo); b = std::min(b, hi);
+                    } else if (p.z < rz0 || p.z > rz1) b = -1;
+                    if (b >= a) {
+                        const Vec3 q0 = p + d * a, q1 = p + d * b;
+                        const double x0 = std::min(q0.x, q1.x) - rd, x1 = std::max(q0.x, q1.x) + rd;
+                        const double y0 = std::min(q0.y, q1.y) - rd, y1 = std::max(q0.y, q1.y) + rd;
+                        auto it = std::lower_bound(receiverOrder.begin(), receiverOrder.end(), x0,
+                            [&](int r, double x) { return rcv[r].pos.x < x; });
+                        for (; it != receiverOrder.end() && rcv[*it].pos.x <= x1; ++it)
+                            if (rcv[*it].pos.y >= y0 && rcv[*it].pos.y <= y1) record(*it);
                     }
                 }
             }
@@ -184,6 +221,19 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
     }
     if (finalize) finalizeTail(out);
     return out;
+}
+
+TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize) {
+    return traceTailImpl(sc, src, rcv, order, rays, seed, finalize);
+}
+
+std::vector<std::array<double, NB>> traceTailEnergy(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
+    int order, int rays, int seed, const std::function<bool()>& cancelled, const std::function<void(double)>& progress) {
+    const auto hist = traceTailImpl(sc, src, rcv, order, rays, seed, false, true, cancelled, progress);
+    std::vector<std::array<double, NB>> result(rcv.size());
+    for (size_t r = 0; r < rcv.size(); ++r) for (int b = 0; b < NB; ++b) result[r][b] = hist.h[r][b][0];
+    if (progress) progress(1.0);
+    return result;
 }
 
 void finalizeTail(TailHist& out) {

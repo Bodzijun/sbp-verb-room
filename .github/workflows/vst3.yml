@@ -76,7 +76,7 @@ jobs:
             -DVERB_BUILD_PLUGIN=ON -DVERB_AVX2=OFF "${extra[@]}"
 
       - name: Build plug-in and tests
-        run: cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test --parallel 2
+        run: cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test --parallel 2
 
       - name: Test
         run: |
