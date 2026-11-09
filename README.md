@@ -1,6 +1,6 @@
 # Verb Room
 
-Version 0.1.10: complete shareable `.verbroom` presets, Compact / Normal source mixer with automatable Solo/Mute, and two VSL Grand Hall presets for 32 stereo groups. Includes Keep I/O and the long-tail cutoff fix. See the [English release notes](docs/Release_0.1.10_en.md), [preset exchange guide](docs/Presets_0.1.10_en.md), and [earlier 0.1.7 notes (Ukrainian)](docs/Release_0.1.7_uk.md).
+Version 0.1.11 adds experimental GitHub Actions builds for macOS Universal and Linux x86_64. See the [cross-platform build guide](docs/Cross_platform_builds_en.md). Includes the complete `.verbroom` presets, Compact / Normal mixer, source Solo/Mute and VSL Grand Hall presets from [0.1.10](docs/Release_0.1.10_en.md); see the [preset exchange guide](docs/Presets_0.1.10_en.md).
 
 A physically based room reverb for **REAPER and other VST3 hosts** (Windows x64), built for scenes where
 sources and the listener *move*: cars, fly-bys, games-style sound design, virtual rooms with many sources.
@@ -10,7 +10,7 @@ materials, floor/ceiling zones, lowered ceilings, doorways) and re-solves the ge
 listener move. Position and orientation of every source and of the listener are **automatable parameters**.
 
 > Status: working alpha (0.1). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
-> Windows x64 is built and tested. An AVX2/FMA CPU is required.
+> Windows x64 has been tested in REAPER. Experimental macOS Universal and Linux x86_64 builds are provided by GitHub Actions and need host testing. The default Windows build requires AVX2/FMA; the portable CI builds do not. macOS test builds are ad-hoc signed, not Apple-notarized.
 
 ## What it does
 

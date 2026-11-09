@@ -789,8 +789,10 @@ void VerbProcessor::run() {
             myRequest = reqSerial.load();
         }
         try {
+           #if VERB_REQUIRE_AVX2
             if (!(juce::SystemStats::hasAVX2() && juce::SystemStats::hasFMA3()))
                 throw std::runtime_error("This CPU has no AVX2/FMA support (needed by the room engine)");
+           #endif
             std::istringstream ss(r.text);
             verb::Scene sc = verb::parseScene(ss, r.name);
             sc.sr = r.sr;
