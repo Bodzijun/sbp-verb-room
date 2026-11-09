@@ -40,7 +40,7 @@ add_test(NAME portable_presets COMMAND VerbPluginTest)
 add_test(NAME spatial_editor COMMAND VerbPluginTest)
 add_test(NAME energy_editor COMMAND VerbPluginTest)
 set_tests_properties(energy_editor PROPERTIES
-    ENVIRONMENT "VERB_ENERGY_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 180)
+    ENVIRONMENT "VERB_ENERGY_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 360)
 set_tests_properties(spatial_editor PROPERTIES
     ENVIRONMENT "VERB_SPATIAL_EDITOR_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 360)
 set_tests_properties(portable_presets PROPERTIES

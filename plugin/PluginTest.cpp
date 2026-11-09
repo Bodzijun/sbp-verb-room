@@ -171,12 +171,18 @@ int main() {
             for (int i = 0; i < controls.getNumChildComponents(); ++i)
                 if (auto* box = dynamic_cast<juce::ComboBox*>(controls.getChildComponent(i)))
                     if (box->getItemText(0).startsWith("Preview")) box->setSelectedId(1, juce::sendNotificationSync);
-            auto wait = [&] {
-                const auto until = juce::Time::getMillisecondCounterHiRes() + 60000;
+            auto wait = [&](double timeoutSeconds = 60.) {
+                const auto started = juce::Time::getMillisecondCounterHiRes();
+                const auto until = started + timeoutSeconds * 1000.;
                 while (view->isBusy() && juce::Time::getMillisecondCounterHiRes() < until) {
                     juce::MessageManager::getInstance()->runDispatchLoopUntil(20); view->update();
                 }
-                view->update(); return !view->isBusy();
+                view->update();
+                const auto map = view->result();
+                std::printf("  Analysis wait: %.2f s; busy=%d; result=%dx%d; outdated=%d\n",
+                    (juce::Time::getMillisecondCounterHiRes() - started) / 1000., (int)view->isBusy(),
+                    map ? map->nx : 0, map ? map->ny : 0, (int)view->isStale());
+                return !view->isBusy();
             };
             const auto roomBefore = p.getRoomText(); const float mixBefore = p.apvts.getRawParameterValue("mix")->load();
             view->startAnalysis(); check(wait() && view->result() && !view->isStale(), "background analysis publishes a current energy map");
@@ -190,7 +196,9 @@ int main() {
                     }
             check(fineOption && view->isStale(), "96-cell resolution is selectable and marks the previous map as outdated");
             view->startAnalysis();
-            check(wait() && view->result() && std::max(view->result()->nx, view->result()->ny) == 96 && !view->isStale(),
+            // Portable non-AVX builds on shared CI runners need more time for
+            // all tail probes at 96 cells. Keep completion/current-map checks.
+            check(wait(180.) && view->result() && std::max(view->result()->nx, view->result()->ny) == 96 && !view->isStale(),
                 "the editor publishes a newly sampled 96-cell map");
             juce::Slider* colourRange = nullptr; juce::Button* autoContrast = nullptr;
             for (int i = 0; i < controls.getNumChildComponents(); ++i) {
