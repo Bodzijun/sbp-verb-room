@@ -31,6 +31,10 @@ if(NOT MSVC)
   target_compile_options(verbcore PRIVATE -O3 -Wall -Wextra)
   if(VERB_AVX2)
     target_compile_options(verbcore PRIVATE -mavx2 -mfma)
+  else()
+    # Portable builds: no fused multiply-add contraction (the arm64 default), so the seeded ray trace
+    # follows the same arithmetic as the x86 builds and tests see the same stochastic realisation.
+    target_compile_options(verbcore PRIVATE -ffp-contract=off)
   endif()
 elseif(VERB_AVX2)
   target_compile_options(verbcore PRIVATE /arch:AVX2)
