@@ -56,11 +56,11 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DVERB_BUILD_PLUGIN=ON -DVERB_AVX2=OFF \
   '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
-cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test --parallel 2
-# Linux headless tests:
-xvfb-run -a ctest --test-dir build --output-on-failure
+cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test stage2_test tail_transition_test --parallel 2
+# Linux headless tests (the 15-minute stage2_fixes regression is not built here):
+xvfb-run -a ctest --test-dir build --output-on-failure -E '^stage2_fixes$'
 # macOS tests:
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --output-on-failure -E '^stage2_fixes$'
 ```
 
 Use separate build directories when changing platform or architecture. `VERB_AVX2` defaults on for x86-only builds and off for ARM/universal builds. A build configured with it on still requires AVX2/FMA at runtime. The runtime CPU check is conditional on that build option; portable builds do not reject Apple Silicon. No AVX2 flag is passed to an ARM slice. The core static library uses position-independent code so it can link into Linux VST3 shared objects.

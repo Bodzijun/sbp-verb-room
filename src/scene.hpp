@@ -218,6 +218,10 @@ struct Scene {
     std::vector<Zone> floorZones, ceilZones;
     std::vector<Transducer> sources, receivers;
     SurfaceTag floorEditor, ceilEditor;
+    // Editor view state, no acoustic meaning: state of the plan layers Walls / Floors / Ceilings / Plates,
+    // 0 shown, 1 locked (drawn, clicks pass through), 2 hidden. Written as `#@verbroom-editor-v2 layers W F C P`
+    // (only when not all zero): the v1 parser of older releases takes that line for a plain comment.
+    std::array<int, 4> layerModes{};
 };
 
 inline bool pointInZone(const Zone& z, double x, double y) {  // even-odd rule
@@ -360,6 +364,21 @@ inline Scene parseScene(std::istream& in, const std::string& path) {
     };
     while (std::getline(in, line)) {
         ++ln;
+        const std::string editorPrefix2 = "#@verbroom-editor-v2 ";
+        if (line.rfind(editorPrefix2, 0) == 0) {  // forward-compatible: unknown or damaged v2 records are ignored, never fatal
+            std::istringstream meta(line.substr(editorPrefix2.size()));
+            std::string kind;
+            if ((meta >> kind) && kind == "layers") {
+                std::array<int, 4> modes{};
+                bool ok = true;
+                for (int& m : modes) {
+                    if (!(meta >> m)) { ok = false; break; }
+                    if (m < 0 || m > 2) m = 0;
+                }
+                if (ok) s.layerModes = modes;
+            }
+            continue;
+        }
         const std::string editorPrefix = "#@verbroom-editor-v1 ";
         if (line.rfind(editorPrefix, 0) == 0) {
             EditorEntry e;
@@ -678,6 +697,11 @@ inline std::string serializeScene(const Scene& s) {
     for (size_t i = 0; i < s.walls.size(); ++i) editorTag("wall", (int)i, s.walls[i].editor);
     for (size_t i = 0; i < s.floorZones.size(); ++i) editorTag("floor-zone", (int)i, s.floorZones[i].editor);
     for (size_t i = 0; i < s.ceilZones.size(); ++i) editorTag("ceiling-zone", (int)i, s.ceilZones[i].editor);
+    if (std::any_of(s.layerModes.begin(), s.layerModes.end(), [](int m) { return m != 0; })) {
+        o << "#@verbroom-editor-v2 layers";
+        for (int m : s.layerModes) o << ' ' << (m < 0 || m > 2 ? 0 : m);
+        o << "\n";
+    }
     return o.str();
 }
 

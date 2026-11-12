@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <sstream>
 
@@ -54,7 +55,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
         if (o != kListener) add(paramId(o, 4), nm + " Gain", -60.f, 12.f, 0.f, "dB");
     }
     add("gain", "Output Gain", -36.f, 12.f, 0.f, "dB");
-    add("early", "Early Reflections", -60.f, 6.f, -9.f, "dB");  // 0 dB = strict physical level
+    add("early", "Early Reflections", -60.f, 6.f, 0.f, "dB");  // 0 dB = strict physical level
     add("diffusion", "Early Diffusion", 0.f, 1.f, 0.5f, "");
     add("doppler", "Doppler Strength", 0.f, 2.f, 1.f, "");  // 1 = physical, 0 = no pitch shift
     add("tail", "Tail Level", -48.f, 12.f, 0.f, "dB");      // the late reverberant field alone (direct and early reflections unchanged)
@@ -66,6 +67,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
     for (int s = 0; s < kMaxSources; ++s) {
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{sourceSwitchId(s, false), 1}, "Source " + juce::String(s + 1) + " Mute", false));
         p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{sourceSwitchId(s, true), 1}, "Source " + juce::String(s + 1) + " Solo", false));
+    }
+    // Append new parameters so hosts that persist indices retain all existing indices.
+    p.push_back(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{"mode", 1}, "Mode", juce::StringArray{"Physical", "Creative"}, 0));
+    for (const char* id : {"absorption", "decayLow", "decayMid", "decayHigh"}) {
+        juce::NormalisableRange<float> range(.3f, 3.f, .001f); range.setSkewForCentre(1.f);
+        p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{id, 1}, id, range, 1.f));
     }
     return {p.begin(), p.end()};
 }
@@ -81,6 +88,10 @@ VerbProcessor::VerbProcessor()
     for (int o = 0; o <= verbp::kMaxSources; ++o)
         for (int k = 0; k < (o == verbp::kListener ? 4 : 5); ++k) pv[o][k] = apvts.getRawParameterValue(verbp::paramId(o, k));
     gainParam = apvts.getRawParameterValue("gain");
+    modeParam = apvts.getRawParameterValue("mode");
+    absorptionParam = apvts.getRawParameterValue("absorption");
+    const char* decayIds[] = {"decayLow","decayMid","decayHigh"};
+    for (int g=0;g<3;++g) decayParam[g] = apvts.getRawParameterValue(decayIds[g]);
     earlyParam = apvts.getRawParameterValue("early");
     diffusionParam = apvts.getRawParameterValue("diffusion");
     dopplerParam = apvts.getRawParameterValue("doppler");
@@ -97,10 +108,11 @@ VerbProcessor::VerbProcessor()
     sceneText = kDefaultScene;
     sceneName = "Built-in demo room";
     startThread();
-    loadSceneText(sceneText, sceneName, true);
+    loadSceneText(sceneText, sceneName, true); // geometry retains the Physical parameter default
 }
 
 VerbProcessor::~VerbProcessor() {
+    targetCancel = true; if (targetThread.joinable()) targetThread.join();
     exportCancel = true;
     if (exportThread.joinable()) exportThread.join();
     signalThreadShouldExit();
@@ -178,10 +190,12 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
         serialSeen = ser;
     }
     const float outGain = juce::Decibels::decibelsToGain(gainParam->load(std::memory_order_relaxed));
-    e.setEarlyLevel(earlyParam->load(std::memory_order_relaxed));
+    const bool creative = modeParam->load(std::memory_order_relaxed) >= .5f;
+    e.setDecayMultipliers(creative ? decayParam[0]->load() : 1., creative ? decayParam[1]->load() : 1., creative ? decayParam[2]->load() : 1.);
+    e.setEarlyLevel(creative ? earlyParam->load(std::memory_order_relaxed) : 0.);
     e.setEarlyDiffusion(diffusionParam->load(std::memory_order_relaxed));
-    e.setDopplerStrength(dopplerParam->load(std::memory_order_relaxed));
-    e.setTailLevel(tailParam->load(std::memory_order_relaxed));
+    e.setDopplerStrength(creative ? dopplerParam->load(std::memory_order_relaxed) : 1.);
+    e.setTailLevel(creative ? tailParam->load(std::memory_order_relaxed) : 0.);
     int solo = 0;
     for (int k = 0; k < 3; ++k) if (soloParam[k]->load(std::memory_order_relaxed) >= 0.5f) solo |= 1 << k;
     e.setSoloMask(solo);
@@ -472,6 +486,19 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
             st.appendChild(p, nullptr);
         }
     }
+    if (!st.getChildWithProperty("id", "mode").isValid() && !st.getChildWithProperty("id", "early").isValid()) {
+        juce::ValueTree p("PARAM");p.setProperty("id","early",nullptr);p.setProperty("value",-9.f,nullptr);st.appendChild(p,nullptr);
+    }
+    // Missing stage-2 controls MUST NOT inherit the previous room's overrides.
+    for (const char* id : {"mode", "absorption", "decayLow", "decayMid", "decayHigh"}) {
+        if (!st.getChildWithProperty("id", id).isValid()) {
+            juce::ValueTree p("PARAM"); p.setProperty("id", id, nullptr);
+            p.setProperty("value", 1.f, nullptr); st.appendChild(p, nullptr); // legacy => Creative; neutral scale/decays
+        }
+    }
+    // Invalidate a finishing geometry request BEFORE replacing parameter state.
+    // Geometry imports never write mode; only this state migration selects legacy Creative.
+    { juce::ScopedLock l(reqLock); hasReq=false; defaultsOwed=false; reqSerial.fetch_add(1); }
     apvts.replaceState(st);
     const juce::String text = st.getProperty("sceneText").toString(), name = st.getProperty("sceneName").toString();
     if (text.isNotEmpty()) loadSceneText(text, name, false);
@@ -489,8 +516,23 @@ void VerbProcessor::loadRoomWithSetup(const juce::String& text, const juce::Stri
 }
 
 void VerbProcessor::loadSceneText(const juce::String& text, const juce::String& name, bool applyDefaults, bool keepPendingDefaults) {
+    queueScene(text, name, applyDefaults, keepPendingDefaults, false, 0);
+}
+
+// `isRebuild`: the same room again (new engine for new sources / output / sample rate). Edits of the display scene made
+// after `editsAtRequest` (the count of edits when the text was read) must then survive the load.
+void VerbProcessor::queueScene(const juce::String& text, const juce::String& name, bool applyDefaults, bool keepPendingDefaults, bool isRebuild, uint64_t editsAtRequest) {
+    uint64_t gen;
+    {
+        juce::ScopedLock l(dispLock);
+        if (!isRebuild) ++roomGen;
+        gen = roomGen;
+    }
     {
         juce::ScopedLock l(reqLock);
+        req.rebuild = isRebuild;
+        req.editsAtRequest = editsAtRequest;
+        req.gen = gen;
         req.text = text.toStdString();
         req.name = name.toStdString();
         req.setup = nextSetup;
@@ -516,12 +558,14 @@ void VerbProcessor::loadSceneText(const juce::String& text, const juce::String& 
 
 void VerbProcessor::rebuild() {
     juce::String t, n;
+    uint64_t edits;
     {
         juce::ScopedLock l(dispLock);
         t = sceneText;
         n = sceneName;
+        edits = displayEdits;
     }
-    loadSceneText(t, n, false, true);
+    queueScene(t, n, false, true, true, edits);
 }
 
 void VerbProcessor::setParamValue(const juce::String& id, double v) {
@@ -568,9 +612,10 @@ void VerbProcessor::editScene(const std::function<void(verb::Scene&)>& fn) {
             if (w.mat < 0 || w.mat >= (int)tmp.mats.size()) return;
         tmp.height = std::min(std::max(tmp.height, 1.0), 30.0);
         display = tmp;
+        ++displayEdits;
         sceneText = verb::serializeScene(display);  // the project state keeps the edited room
         updateBounds(display);
-        ++sceneSerial;
+        ++sceneSerial; ++geometryEpoch;
     }
     geomDirty = true;
     wake.signal();
@@ -581,10 +626,22 @@ void VerbProcessor::editSceneMetadata(const std::function<void(verb::Scene&)>& f
     {
         juce::ScopedLock lock(dispLock);
         fn(display);
+        ++displayEdits;
         sceneText = verb::serializeScene(display);
         ++sceneSerial;
     }
     updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
+}
+
+std::array<int, 4> VerbProcessor::getLayerModes() const {
+    juce::ScopedLock l(dispLock);
+    return display.layerModes;
+}
+
+void VerbProcessor::setLayerMode(int layer, int mode) {
+    if (layer < 0 || layer > 3) return;
+    mode = std::min(std::max(mode, 0), 2);
+    editSceneMetadata([layer, mode](verb::Scene& s) { s.layerModes[(size_t)layer] = mode; });
 }
 
 std::vector<verbp::SourceCfg> VerbProcessor::getSources() const {
@@ -709,13 +766,22 @@ void VerbProcessor::scaleRoom(double f, bool includeObjects) {
             w.ax = cx + (w.ax - cx) * f; w.ay = cy + (w.ay - cy) * f;
             w.bx = cx + (w.bx - cx) * f; w.by = cy + (w.by - cy) * f;
         }
+        for (auto* zones : {&s.floorZones, &s.ceilZones})  // floor / ceiling patches, plates and openings follow the walls in the plan
+            for (auto& z : *zones)
+                for (auto& p : z.poly) { p.first = cx + (p.first - cx) * f; p.second = cy + (p.second - cy) * f; }
         if (includeObjects) {
             s.height = std::min(std::max(s.height * f, 1.0), 30.0);
             for (auto& w : s.walls) {  // partial-height walls scale with the room
                 w.z0 *= f;
                 if (w.z1 < 1e8) w.z1 *= f;
             }
+            for (auto* zones : {&s.floorZones, &s.ceilZones})  // plates (zones with a height) scale like partial-height walls
+                for (auto& z : *zones)
+                    if (z.z >= 0) z.z = std::min(z.z * f, s.height);
         }
+        // Not scaled on purpose: clutter objects (their lengths, heights and clearance are physical sizes of furniture; their
+        // positions are drawn from the seeded generator inside the scaled walls), the scene's own source / receiver / listener
+        // poses (the live ones are the plugin parameters, scaled below).
     });
     if (includeObjects) {
         const int ns = (int)getSources().size();
@@ -785,8 +851,109 @@ std::shared_ptr<const verb::TailDiagnostics> VerbProcessor::getTailDiagnostics()
     return bundle ? bundle->engine->tailDiagnostics() : nullptr;
 }
 
+bool VerbProcessor::isTailCurrent() const {
+    juce::SpinLock::ScopedLockType lock(engineLock);
+    return state.load()==2 && !geomDirty.load() && !qualityDirty.load() && geometryEpoch.load()==appliedGeometryEpoch.load()
+        && engineAbsorption.load()==absorptionParam->load() && bundle && bundle->engine->tailIsCurrent();
+}
+
+verb::Scene VerbProcessor::targetScene() const {
+    auto s = getDisplayScene(); // original, unscaled material data
+    std::shared_ptr<const verb::Scene> modeled;
+    {juce::SpinLock::ScopedLockType lock(engineLock);if(bundle)modeled=bundle->engine->sceneSnapshot();}
+    // Reproduce the engine's ORIGINAL seeded placement anchors before substituting live
+    // excitation. Moving a source must not regenerate a different set of furniture for
+    // the assistant. Reconstruct unscaled roughened materials to avoid undoing a clamp.
+    if (modeled) {s.sources=modeled->sources;s.receivers=modeled->receivers;}
+    s=verb::withClutter(verb::withRoughness(s),128);s.clutter.count=0;s.roughness=0;
+    if (!s.sources.empty()) {
+        s.sources.resize(1);
+        const double az=pv[0][3]->load()*verb::kPi/180.;
+        const double ox=ptOff[0][0].load(),oy=ptOff[0][1].load(),oz=ptOff[0][2].load();
+        s.sources[0].pos={pv[0][0]->load()+std::cos(az)*ox-std::sin(az)*oy,
+            pv[0][1]->load()+std::sin(az)*ox+std::cos(az)*oy,
+            std::clamp((double)pv[0][2]->load()+oz,0.,s.ceilMat<0?30.:s.height)};
+        s.sources[0].pattern=srcPattern[0].load();s.sources[0].azimuthDeg=pv[0][3]->load();
+    }
+    verb::Transducer receiver;
+    receiver.pos={pv[verbp::kListener][0]->load(),pv[verbp::kListener][1]->load(),pv[verbp::kListener][2]->load()};
+    s.receivers={receiver};return s;
+}
+
+std::array<double, 3> VerbProcessor::getRT60Estimate() const {
+    const auto d = getTailDiagnostics();
+    const auto bands = d ? d->physicalRT60 : verb::estimateRoomRT60(verb::withAbsorptionScale(targetScene(),absorptionParam->load()));
+    return {{(bands[0]+bands[1])/2.,(bands[2]+bands[3]+bands[4])/3.,(bands[5]+bands[6])/2.}};
+}
+
+double VerbProcessor::solveTargetRT60(double seconds, verb::Scene scene, uint64_t serial) {
+    if(!std::isfinite(seconds) || seconds<=0){targetState=5;return -1.;}
+    targetState = 1;
+    const auto requestAtStart = reqSerial.load();
+    auto cancelled = [&] { return targetCancel.load() || sceneSerial.load() != serial || reqSerial.load() != requestAtStart; };
+    auto mid = [](const auto& bands) { return (bands[2]+bands[3]+bands[4])/3.; };
+    try {
+        if (getLoadState() != 2 || !std::isfinite(seconds) || seconds <= 0 || scene.sources.empty()) throw std::runtime_error("Invalid target");
+        // Eyring + air loss gives a deterministic starting bracket without tracing.
+        double lo = .3, hi = 3.;
+        for (int i=0;i<16;++i) {
+            if (cancelled()) throw std::runtime_error("Cancelled");
+            const double x = std::sqrt(lo*hi);
+            const double rt = mid(verb::estimateRoomRT60(verb::withAbsorptionScale(scene,x)));
+            if (rt > seconds) lo = x; else hi = x;
+        }
+        const double estimate = std::sqrt(lo*hi);
+        auto trace = [&](double scale) {
+            if (cancelled()) throw std::runtime_error("Cancelled");
+            auto s = verb::withAbsorptionScale(scene,scale); s.length = 20.;
+            // Match the live engine's seeded roughness/clutter and 48k reference budget.
+            s = verb::withClutter(verb::withRoughness(s),128);
+            const auto h = verb::traceTail(s,s.sources[0],s.receivers,1,48000,s.seed,true,cancelled);
+            const double rt = mid(verb::analyzeTail(h).rt60);
+            if (!std::isfinite(rt) || rt <= 0) throw std::runtime_error("No measurable decay");
+            return rt;
+        };
+        lo = .3; hi = 3.; const double longest = trace(lo), shortest = trace(hi);
+        double bestScale = std::abs(longest-seconds) < std::abs(shortest-seconds) ? lo : hi;
+        double best = bestScale == lo ? longest : shortest;
+        const bool reachable = seconds <= longest && seconds >= shortest;
+        double x = estimate;
+        for (int i=0;reachable && i<5;++i) {
+            const double achieved = trace(x);
+            if (std::abs(achieved-seconds) < std::abs(best-seconds)) { best=achieved; bestScale=x; }
+            if (std::abs(best/seconds-1.) <= .025) break;
+            if (achieved > seconds) lo=x; else hi=x;
+            // Multiplicative RT/absorption correction, bounded inside the traced bracket.
+            x = std::clamp(x*achieved/seconds,lo+.08*(hi-lo),hi-.08*(hi-lo));
+        }
+        if (cancelled()) throw std::runtime_error("Cancelled");
+        setParamValue("absorption",bestScale);
+        targetAchieved = best; targetState = reachable && std::abs(best/seconds-1.) <= .07 ? 2 : 3;
+        return best;
+    } catch (...) { targetState = 4; return -1.; }
+}
+
+double VerbProcessor::setTargetRT60(double seconds) {
+    targetCancel = true; if (targetThread.joinable()) targetThread.join();
+    targetCancel = false;
+    return solveTargetRT60(seconds,targetScene(),sceneSerial.load());
+}
+
+void VerbProcessor::startTargetRT60(double seconds) {
+    targetCancel = true; if (targetThread.joinable()) targetThread.join();
+    auto scene = targetScene(); const auto serial = sceneSerial.load();
+    targetCancel = false; targetState = 1;
+    targetThread = std::thread([this, seconds, scene=std::move(scene), serial]() mutable {
+        solveTargetRT60(seconds,std::move(scene),serial);
+    });
+}
+
 // ---------- loader thread ----------
 void VerbProcessor::run() {
+    double appliedAbsorption = -1.;
+    double observedScale = -1.;
+    uint64_t observedEpoch = 0;
+    auto stableSince = std::chrono::steady_clock::now();
     while (!threadShouldExit()) {
         wake.wait(250);
         if (threadShouldExit()) break;
@@ -794,13 +961,31 @@ void VerbProcessor::run() {
             const auto settings = getTailSettings();
             bundle->engine->setTailQuality(settings.rays, settings.adaptive);
         }
-        if (geomDirty.exchange(false)) {  // only this thread replaces the bundle, so reading it here is safe
-            verb::Scene s;
+        const double scale = absorptionParam->load();
+        const bool scaleChanged = scale != appliedAbsorption;
+
+        const auto epochNow=geometryEpoch.load();
+        const auto now=std::chrono::steady_clock::now();
+        if(scale!=observedScale || epochNow!=observedEpoch) {
+            observedScale=scale;observedEpoch=epochNow;stableSince=now;
+        }
+        bool scenePending;
+        {juce::ScopedLock l(reqLock);scenePending=hasReq;}
+        // Geometry/absorption automation settles for at least 150 ms. New room loads
+        // take priority; their cancellation token also aborts an in-flight probe.
+        if (!scenePending && now-stableSince>=std::chrono::milliseconds(150) && (geomDirty.load() || scaleChanged)) {
+            geomDirty=false;
+            verb::Scene s; uint64_t epoch;
             {
                 juce::ScopedLock l(dispLock);
-                s = display;
+                s = display; epoch = geometryEpoch.load();
             }
-            if (bundle) bundle->engine->setScene(s);
+            const auto serial=reqSerial.load();
+            try {
+                if (bundle && bundle->engine->setScene(s, scale, [&]{return threadShouldExit() || reqSerial.load()!=serial || geometryEpoch.load()!=epoch || absorptionParam->load()!=scale;})) {
+                    engineAbsorption=scale;appliedAbsorption=scale;appliedGeometryEpoch=epoch;
+                } else if(bundle) geomDirty=true;
+            } catch(...) {geomDirty=true;}
         }
         Request r;
         uint64_t myRequest;
@@ -892,15 +1077,20 @@ void VerbProcessor::run() {
             ec.erOrder = 1;  // coherent specular taps only for first-order reflections; the rest is the noise-like tail
             ec.ctrlInterval = 128;
             ec.tailBlock = 512;
-            ec.tailThread = true;
+            ec.tailThread = !offlineRender.load();
             ec.sharedTail = points.size() > 4;  // many sources: one late-field convolver per output channel
             const auto quality = getTailSettings();
             ec.tailRays = quality.rays;
             ec.adaptiveTail = quality.adaptive;
             ec.maxEarlyDelaySec = ec.sharedTail ? 0.4 : 0.75;
 
+            if (modeParam->load() >= .5f) for (int g=0;g<3;++g) ec.decayMultipliers[g] = decayParam[g]->load();
+            ec.absorptionScale = absorptionParam->load();
+            ec.cancelled=[&,myRequest]{return threadShouldExit() || reqSerial.load()!=myRequest;};
             auto nb = std::make_unique<Bundle>();
-            nb->engine = std::make_unique<verb::Engine>(es, ec);
+            nb->engine = std::make_shared<verb::Engine>(es, ec);
+            if(ec.cancelled())continue;
+            appliedAbsorption=ec.absorptionScale;
             nb->cfg = cfg;
             nb->points = points;
             nb->pointStart.assign(cfg.size(), 0);
@@ -935,6 +1125,7 @@ void VerbProcessor::run() {
                 juce::ScopedLock l(dispLock);
                 livePoints = points;
             }
+
             if (useDefaults && reqSerial.load() == myRequest && defaultsOwed.exchange(false)) {
                 if (!r.keepRouting) for (int s = 0; s < verbp::kMaxSources; ++s) {
                     setParamValue(verbp::sourceSwitchId(s, false), 0.0);
@@ -945,6 +1136,7 @@ void VerbProcessor::run() {
             {
                 juce::SpinLock::ScopedLockType l(engineLock);
                 bundle.swap(nb);
+                engineAbsorption=ec.absorptionScale; appliedGeometryEpoch=geometryEpoch.load();
                 updateBounds(sc);
                 ++loadSerial;
             }
@@ -956,7 +1148,16 @@ void VerbProcessor::run() {
             builtForHostCh = hostCh;
             {
                 juce::ScopedLock l(dispLock);
-                display = sc;
+                if (r.rebuild && displayGen == r.gen && displayEdits != r.editsAtRequest) {
+                    // The engine was rebuilt for the SAME room from text that is older than the display scene: a lock / hide /
+                    // layer flag (or a geometry edit, which also re-sends itself to the engine) changed meanwhile.
+                    // The display scene is newer than `sc`; copying `sc` over it would lose those edits.
+                    display.sr = sc.sr;
+                    updateBounds(display);
+                } else {
+                    display = sc;
+                }
+                displayGen = r.gen;
                 ++sceneSerial;
                 for (int k = 0; k < 4; ++k) displayHome[k] = home[k];
                 const auto& ld = verb::layoutDefs();
@@ -968,6 +1169,7 @@ void VerbProcessor::run() {
             }
             state = reqSerial.load() == myRequest ? 2 : 1;  // a newer request is already waiting: not ready yet
         } catch (const std::exception& ex) {
+            if(threadShouldExit() || reqSerial.load()!=myRequest)continue;
             juce::ScopedLock l(dispLock);
             status = juce::String("Error: ") + ex.what();
             state = 3;
@@ -1023,7 +1225,7 @@ verb::Scene VerbProcessor::getEnergyScene(int source) const {
     }
     // Omni coverage probes have no dependency on the host's receiver layout.
     sc.hasListener = false; sc.listenerPos = {}; sc.listenerYaw = 0;
-    sc.floorEditor = {}; sc.ceilEditor = {};
+    sc.floorEditor = {}; sc.ceilEditor = {}; sc.layerModes = {};
     for (auto& w : sc.walls) w.editor = {};
     for (auto& z : sc.floorZones) z.editor = {};
     for (auto& z : sc.ceilZones) z.editor = {};
@@ -1121,11 +1323,16 @@ bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& e
         param.setProperty("value", 0.f, nullptr); st.appendChild(param, nullptr);
     }
     // Reject incomplete parameter lists instead of inheriting arbitrary values from the previous room.
+    if(!st.getChildWithProperty("id","mode").isValid()&&!st.getChildWithProperty("id","early").isValid()) {
+        juce::ValueTree param("PARAM");param.setProperty("id","early",nullptr);param.setProperty("value",-9.f,nullptr);st.appendChild(param,nullptr);
+    }
     const auto current = apvts.copyState();
     for (auto param : current) {
         const auto id = param.getProperty("id");
         if (id.isVoid()) continue;
         auto saved = st.getChildWithProperty("id", id);
+        const auto name = id.toString();
+        if (!saved.isValid() && (name == "mode" || name == "absorption" || name == "decayLow" || name == "decayMid" || name == "decayHigh")) continue;
         if (!saved.isValid() || !saved.hasProperty("value") || !std::isfinite((double)saved.getProperty("value"))) {
             error = "The preset is missing a valid parameter: " + id.toString();
             return false;
@@ -1173,37 +1380,54 @@ void VerbProcessor::runExport(juce::File dir) {
         exportMsg = m;
     };
     try {
-        verb::Scene sc;
         std::vector<verbp::SourceCfg> cfg;
-        verbp::OutputCfg ocfg;
-        verbp::TailSettings exportQuality;
         juce::String name;
         {
             juce::ScopedLock l(dispLock);
-            sc = display;
             cfg = srcCfg;
-            ocfg = outCfg;
-            exportQuality = tailSettings;
             name = sceneName;
         }
-        const auto points = verbp::buildPoints(cfg);
+        auto points = verbp::buildPoints(cfg);
         if (points.empty()) throw std::runtime_error("no sources");
         const double sr = builtSr.load() > 0 ? builtSr.load() : (hostSr > 0 ? hostSr : 48000.0);
-        sc.sr = sr;
         const int hostCh = std::max(1, builtForHostCh.load() > 0 ? builtForHostCh.load() : hostOutCh.load());
-        const verb::Layout lay = (verb::Layout)builtLayout.load();
-        const verb::Vec3 center{pv[verbp::kListener][0]->load(), pv[verbp::kListener][1]->load(), pv[verbp::kListener][2]->load()};
-        const double lyaw = pv[verbp::kListener][3]->load();
-        auto recv = verb::makeReceiverArray(lay, center, ocfg.radius, std::min(hostCh, verbp::kMaxReceivers));
-        verb::applyMicPattern(recv, (verb::MicPattern)ocfg.micPattern, ocfg.radius);
-        if ((int)recv.size() > verbp::kMaxReceivers) recv.resize(verbp::kMaxReceivers);
-        if ((int)recv.size() > hostCh) recv.resize((size_t)hostCh);
-        const double zTop = sc.ceilMat < 0 ? 30.0 : sc.height;
         if (!dir.createDirectory()) throw std::runtime_error("cannot create " + dir.getFullPathName().toStdString());
         juce::String base = juce::File::createLegalFileName(juce::File(name).getFileNameWithoutExtension());
         if (base.isEmpty()) base = "room";
-        const double tailLen = verb::effectiveTailSeconds(sc, 1);
-        const size_t total = (size_t)std::ceil(tailLen * sr);
+        // A private processor reproduces the same routing, seeded furniture, shared
+        // field, current listener pose and all mix controls as the live state.
+        // Rendering a static engine from one source used to change both the shared
+        // tail and the listener's orientation, and started before level ramps settled.
+        juce::MemoryBlock snapshot;getStateInformation(snapshot);
+        std::shared_ptr<verb::Engine> liveEngine;
+        {juce::SpinLock::ScopedLockType lock(engineLock);if(bundle)liveEngine=bundle->engine;}
+        if(!liveEngine)throw std::runtime_error("room is not ready");
+        VerbProcessor offline;
+        offline.offlineRender=true;
+        offline.setPlayConfigDetails(std::max(1,hostInCh.load()),hostCh,sr,512);
+        offline.prepareToPlay(sr,512);
+        offline.setStateInformation(snapshot.getData(),(int)snapshot.getSize());
+        const auto timeout=std::chrono::steady_clock::now()+std::chrono::seconds(120);
+        juce::AudioBuffer<float> warm(std::max({hostCh,hostInCh.load(),1}),512);juce::MidiBuffer midi;
+        auto cancelled=[&]{if(exportCancel.load())throw std::runtime_error("cancelled");};
+        while(offline.getLoadState()!=2){cancelled();if(std::chrono::steady_clock::now()>timeout)throw std::runtime_error("offline room timed out");if(offline.getLoadState()==3)throw std::runtime_error(offline.getStatus().toStdString());juce::Thread::sleep(10);}
+        const auto poseUntil=std::chrono::steady_clock::now()+std::chrono::milliseconds(650);
+        do {cancelled();if(std::chrono::steady_clock::now()>timeout)throw std::runtime_error("offline tail timed out");warm.clear();offline.processBlock(warm,midi);juce::Thread::sleep(10);}
+        while(std::chrono::steady_clock::now()<poseUntil||!offline.isTailCurrent());
+        auto& eng=*offline.bundle->engine;
+        if(!eng.copyTailForOffline(*liveEngine))throw std::runtime_error("room topology changed during export; retry");
+        const int R=eng.numReceivers();
+        const size_t total=(size_t)std::ceil(eng.tailSeconds()*sr);
+        std::vector<std::vector<float>> pointInput(points.size(),std::vector<float>(512));
+        std::vector<const float*> ip;for(const auto& ch:pointInput)ip.push_back(ch.data());
+        std::vector<std::vector<float>> block((size_t)R,std::vector<float>(512));
+        std::vector<float*> op;for(auto& ch:block)op.push_back(ch.data());
+        const double master=juce::Decibels::decibelsToGain(offline.gainParam->load());
+        int solo=0;for(int k=0;k<3;++k)if(offline.soloParam[k]->load()>=.5f)solo|=1<<k;
+        const bool positioned=offline.spatialDryParam->load()>=.5f;
+        const double mix=solo?1.:std::clamp(offline.mixParam->load()*.01,0.,1.);
+        const double wet=positioned?1.:std::sin(mix*verb::kPi*.5),dry=positioned?0.:std::cos(mix*verb::kPi*.5);
+        bool anySolo=false;for(size_t s=0;s<cfg.size();++s)anySolo|=offline.sourceSolo[s]->load()>=.5f;
         juce::StringArray used;
         int written = 0;
         for (size_t p = 0; p < points.size(); ++p) {
@@ -1211,45 +1435,23 @@ void VerbProcessor::runExport(juce::File dir) {
             setMsg("Exporting impulse responses: " + juce::String((int)p + 1) + " / " + juce::String((int)points.size()) + " ...");
             const verbp::PointMap& pm = points[p];
             const verbp::SourceCfg& c = cfg[(size_t)pm.source];
-            const double sx = pv[pm.source][0]->load(), sy = pv[pm.source][1]->load(), sz = pv[pm.source][2]->load(), az = pv[pm.source][3]->load();
-            const double ca = std::cos(az * verb::kPi / 180.0), sa = std::sin(az * verb::kPi / 180.0);
-            const double ox = ptOff[p][0].load(), oy = ptOff[p][1].load(), oz = ptOff[p][2].load();
-            verb::Transducer t;
-            t.name = c.name;
-            t.pos = {sx + ca * ox - sa * oy, sy + sa * ox + ca * oy, std::min(std::max(sz + oz, 0.0), zTop)};
-            t.azimuthDeg = az;
-            t.pattern = c.pattern;
-            verb::Scene es = sc;
-            es.length = tailLen;
-            es.sources = {t};
-            es.receivers = recv;
-            es.hasListener = true;
-            es.listenerPos = center;
-            es.listenerYaw = 0;
-            verb::EngineConfig ec;
-            ec.erOrder = 1;  // the same early field the plugin plays
-            ec.ctrlInterval = 128;
-            ec.tailBlock = 512;
-            ec.tailThread = false;  // one static tail at the selected quality for each exported point
-            ec.sharedTail = false;
-            ec.tailRays = exportQuality.rays;
-            ec.adaptiveTail = exportQuality.adaptive;
-            verb::Engine eng(es, ec);
-            eng.setListener(center.x, center.y, center.z, lyaw);
-            const int R = eng.numReceivers();
             std::vector<std::vector<float>> out((size_t)R, std::vector<float>(total, 0.f));
-            std::vector<float> in(512, 0.f);
-            std::vector<float> blk((size_t)R * 512, 0.f);
-            std::vector<float*> op((size_t)R);
+            // Flush the previous point without rebuilding the room or changing RNG seeds.
+            for(size_t pos=0;pos<total+512;pos+=512){cancelled();eng.process(ip.data(),op.data(),512);}
+            const bool enabled=offline.sourceMute[pm.source]->load()<.5f&&(!anySolo||offline.sourceSolo[pm.source]->load()>=.5f);
+            const float sourceGain=enabled?juce::Decibels::decibelsToGain(offline.pv[pm.source][4]->load(),-60.f):0.f;
             for (size_t pos = 0; pos < total; pos += 512) {
+                cancelled();
                 const int n = (int)std::min<size_t>(512, total - pos);
-                std::fill(in.begin(), in.end(), 0.f);
-                if (pos == 0) in[0] = 1.f;
-                const float* ip[1] = {in.data()};
-                for (int r = 0; r < R; ++r) op[(size_t)r] = &blk[(size_t)r * 512];
-                eng.process(ip, op.data(), n);
-                for (int r = 0; r < R; ++r) std::copy(op[(size_t)r], op[(size_t)r] + n, out[(size_t)r].begin() + (long)pos);
+                pointInput[p][0]=pos==0?sourceGain:0.f;
+                eng.process(ip.data(), op.data(), n);
+                for(int r=0;r<R;++r)for(int i=0;i<n;++i)out[(size_t)r][pos+i]=(float)(block[(size_t)r][i]*master*wet);
             }
+            pointInput[p][0]=0.f;
+            // The point IR is driven at the engine-point input (after an optional
+            // channel sum); raw bypass goes to that point's corresponding host channel.
+            const int rawChannel=c.firstIn+std::max(0,pm.channel);
+            if(enabled&&rawChannel<R&&!solo)out[(size_t)rawChannel][0]+=(float)dry;
             juce::String fname = base + "_" + juce::File::createLegalFileName(juce::String(c.name));
             if (pm.channel >= 0 && c.effectiveChannels() > 1) fname += "_ch" + juce::String(pm.channel + 1);
             for (int k = 2; used.contains(fname); ++k) fname = fname.upToLastOccurrenceOf("_#", false, false) + "_#" + juce::String(k);
@@ -1268,7 +1470,7 @@ void VerbProcessor::runExport(juce::File dir) {
             w.reset();
             ++written;
         }
-        dir.getChildFile(base + "_room.txt").replaceWithText(getRoomText());
+        dir.getChildFile(base + "_room.txt").replaceWithText(offline.getRoomText());
         setMsg("Exported " + juce::String(written) + " impulse response file(s) and the room to " + dir.getFullPathName());
         exportState = 2;
     } catch (const std::exception& ex) {

@@ -512,23 +512,20 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
             layerBtn[i].getProperties().set("style", "ghost");
             layerBtn[i].setTooltip("Click: shown -> locked (clicks pass through it) -> hidden");
             layerBtn[i].onClick = [this, i] {
-                layerMode[i] = (layerMode[i] + 1) % 3;
-                if (layerMode[i] != 0) {  // a selection in a layer that is now locked or hidden is dropped
-                    const bool wall = selKind == SelKind::Wall && i == LayerWalls;
-                    bool zone = false;
-                    if (selKind == SelKind::FloorZone || selKind == SelKind::CeilZone) {
-                        const auto sc = proc.getDisplayScene();
-                        const auto& zl = selKind == SelKind::CeilZone ? sc.ceilZones : sc.floorZones;
-                        if (selWall >= 0 && selWall < (int)zl.size()) zone = zoneLayer(zl[(size_t)selWall], selKind == SelKind::CeilZone) == i;
-                    }
-                    if (wall || zone) { selKind = SelKind::Object; selWall = -1; selWalls.clear(); refreshSurface(); }
-                }
-                updateLayerButtons();
-                resized();
-                repaint();
+                proc.setLayerMode(i, (proc.getLayerModes()[(size_t)i] + 1) % 3);  // the processor owns the masks: they outlive this window
+                syncLayers();
             };
             addAndMakeVisible(layerBtn[i]);
         }
+        for (auto* b : {&frameAllBtn, &frameSelBtn}) {
+            b->getProperties().set("style", "ghost");
+            addAndMakeVisible(*b);
+        }
+        frameAllBtn.setTooltip("Fit the whole scene in the view (F)");
+        frameSelBtn.setTooltip("Fit the selected object or surfaces (Shift+F)");
+        frameAllBtn.onClick = [this] { setup3D(proc.getDisplayScene()); frameAll3D(); };
+        frameSelBtn.onClick = [this] { setup3D(proc.getDisplayScene()); frameSelection3D(); };
+        layerMode = proc.getLayerModes();
         updateLayerButtons();
     }
     {
@@ -579,6 +576,31 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     qualityInfo.setFont(juce::Font(juce::FontOptions(12.f)));
     refreshTailSettings();
 
+    modeBox.addItem("Physical",1); modeBox.addItem("Creative",2);
+    addAndMakeVisible(modeBox);
+    modeAttachment = std::make_unique<juce::ComboBoxParameterAttachment>(*proc.apvts.getParameter("mode"),modeBox);
+    modeBox.onChange = [this] { refreshCreativeControls(); };
+    addAndMakeVisible(absorptionSlider); addAndMakeVisible(absorptionLabel);
+    absorptionLabel.setText("Absorption",juce::dontSendNotification);
+    absorptionSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    absorptionSlider.setTextBoxStyle(juce::Slider::TextBoxRight,false,60,20);
+    absorptionSlider.setTooltip("Scale every surface's absorption while preserving transmission and original materials. Available in both modes.");
+    absorptionAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("absorption"),absorptionSlider);
+    const char* decayNames[] = {"Decay Low", "Decay Mid", "Decay High"};
+    const char* decayIds[] = {"decayLow", "decayMid", "decayHigh"};
+    for (int g=0;g<3;++g) {
+        addAndMakeVisible(decaySliders[g]); addAndMakeVisible(decayLabels[g]);
+        decayLabels[g].setText(decayNames[g],juce::dontSendNotification);
+        decaySliders[g].setSliderStyle(juce::Slider::LinearHorizontal);
+        decaySliders[g].setTextBoxStyle(juce::Slider::TextBoxRight,false,60,20);
+        decayAttachments[g] = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter(decayIds[g]),decaySliders[g]);
+    }
+    for (auto* c : std::initializer_list<juce::Component*>{&targetInput,&targetApply,&targetCancel,&targetLabel,&targetResult}) addAndMakeVisible(*c);
+    targetLabel.setText("RT60 target (s)",juce::dontSendNotification);
+    targetInput.setInputRestrictions(8,"0123456789."); targetInput.setText("1.5");
+    targetInput.setTooltip("Physical mid-band RT60 (500 Hz to 2 kHz). The assistant changes absorption; Creative decay multipliers remain separate.");
+    targetApply.onClick = [this] { proc.startTargetRT60(targetInput.getText().getDoubleValue()); };
+    targetCancel.onClick = [this] { proc.cancelTargetRT60(); };
     // ---- mix tab ----
     for (auto* c : std::initializer_list<juce::Component*>{&gainSlider, &earlySlider, &diffSlider, &dopplerSlider, &mixSlider, &tailSlider, &gainLabel, &earlyLabel, &diffLabel,
                                                            &dopplerLabel, &mixLabel, &tailLabel, &layoutBox, &layoutLabel, &micBox, &micLabel, &outInfoLabel})
@@ -590,7 +612,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     gainLabel.setText("Output gain (dB)", juce::dontSendNotification);
     earlyLabel.setText("Early reflections (dB)  - lower = less comb/flanger", juce::dontSendNotification);
     diffLabel.setText("Early diffusion  - higher = less flanger/phaser", juce::dontSendNotification);
-    mixLabel.setText("Dry / wet mix  - 0 % = input only, 100 % = room only", juce::dontSendNotification);
+    mixLabel.setText("Dry / wet: positioned direct + reverb; off = raw input bypass", juce::dontSendNotification);
     mixAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("mix"), mixSlider);
     addAndMakeVisible(positionedDry);
     positionedDry.setTooltip("Keep the direct sound's position, distance, propagation delay and microphone cues. Dry/Wet scales reflections and tail without duplicating the direct sound. Off = original input-channel bypass.");
@@ -604,6 +626,12 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     tailSlider.valueFromTextFunction = [](const juce::String& t) { return t.getDoubleValue(); };
     tailSlider.updateText();
     dopplerLabel.setText("Doppler strength  - 1 = physical, 0 = no pitch shift", juce::dontSendNotification);
+    earlySlider.setTooltip("Creative only: Physical uses 0 dB. Stored values return in Creative mode.");
+    tailSlider.setTooltip("Creative only: Physical uses 0 dB. Stored values return in Creative mode.");
+    dopplerSlider.setTooltip("Creative only: Physical uses 1.0. Stored values return in Creative mode.");
+    diffSlider.setTooltip("Active in both modes: low diffusion can introduce comb/flanger colour in the discrete early field.");
+    earlyLabel.setText("Early (dB)",juce::dontSendNotification); tailLabel.setText("Tail (dB)",juce::dontSendNotification);
+    diffLabel.setText("Diffusion",juce::dontSendNotification); dopplerLabel.setText("Doppler",juce::dontSendNotification);
     dopplerAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("doppler"), dopplerSlider);
     gainAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("gain"), gainSlider);
     earlyAttachment = std::make_unique<juce::SliderParameterAttachment>(*proc.apvts.getParameter("early"), earlySlider);
@@ -692,8 +720,10 @@ void VerbEditor::showTab(int t) {
     outliner.setVisible(t != 2 && t != 4 && t != 5 && proc.outlinerVisible());
     updateLayerButtons();
     positionedDry.setVisible(t == 2);
-    mixLabel.setText(proc.apvts.getRawParameterValue("spatialDry")->load() >= 0.5f
-        ? "Dry / wet - positioned direct to full room" : "Dry / wet - original channels to full room", juce::dontSendNotification);
+    for (auto* c : std::initializer_list<juce::Component*>{&modeBox,&absorptionSlider,&absorptionLabel,&targetInput,&targetApply,&targetCancel,&targetLabel,&targetResult}) c->setVisible(t == 2);
+    for (int g=0;g<3;++g) { decaySliders[g].setVisible(t==2); decayLabels[g].setVisible(t==2); }
+    refreshCreativeControls();
+    mixLabel.setText("Dry / wet (%)",juce::dontSendNotification);
     for (auto* c : std::initializer_list<juce::Component*>{&qualityBox, &qualityLabel, &qualityInfo, &rayRow.label, &rayRow.slider, &adaptiveTail}) c->setVisible(t == 4);
     for (auto* c : std::initializer_list<juce::Component*>{&toolMove, &toolBox, &toolAdd, &toolFloorZone, &toolCeilZone, &toolDelete, &toolUndo, &toolClear, &viewTop, &viewFront, &viewSide, &viewIso, &autoViewBtn}) c->setVisible(t != 4 && t != 2 && t != 5);
     for (auto* c : std::initializer_list<juce::Component*>{&soloLabel, &soloDirect, &soloEarly, &soloTail}) c->setVisible(t == 2);
@@ -1225,7 +1255,7 @@ void VerbEditor::undo() {
     if (undoStack.empty()) return;
     verb::Scene snap = undoStack.back();
     undoStack.pop_back();
-    proc.editScene([snap](verb::Scene& s) { s = snap; });
+    proc.editScene([snap](verb::Scene& s) { const auto layers = s.layerModes; s = snap; s.layerModes = layers; });  // view masks are not part of undo
     selWalls.erase(std::remove_if(selWalls.begin(), selWalls.end(), [&](int i) { return i >= (int)snap.walls.size(); }), selWalls.end());
     if ((selKind == SelKind::Wall && selWall >= (int)snap.walls.size()) || (selKind == SelKind::FloorZone && selWall >= (int)snap.floorZones.size()) ||
         (selKind == SelKind::CeilZone && selWall >= (int)snap.ceilZones.size())) { selKind = SelKind::Object; selWall = -1; }
@@ -1285,6 +1315,16 @@ bool VerbEditor::keyPressed(const juce::KeyPress& key) {
     }
     if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey) { deleteSelectedWall(); return true; }
     if (key.getModifiers().isCommandDown() && (key.getTextCharacter() == 'z' || key.getTextCharacter() == 'Z')) { undo(); return true; }
+    if (plane == Plane::Iso && !key.getModifiers().isCommandDown() && !key.getModifiers().isAltDown()) {  // 3D camera shortcuts
+        const auto ch = key.getTextCharacter();
+        if (ch == 'f' || ch == 'F') {
+            setup3D(proc.getDisplayScene());
+            if (key.getModifiers().isShiftDown()) frameSelection3D(); else frameAll3D();
+            repaint();
+            return true;
+        }
+        if (key == juce::KeyPress::homeKey) { cam = verbp::Cam3D(); camSceneName = {}; repaint(); return true; }
+    }
     return false;
 }
 
@@ -1293,6 +1333,7 @@ void VerbEditor::timerCallback() {
     auto s = proc.getStatus();
     const int st = proc.getLoadState();
     const uint64_t ser = proc.getSceneSerial();
+    syncLayers();  // a project, preset or room load may have changed the masks
     bool exporting = false;
     if (exportShown) {  // the export's progress / result replaces the scene status until the scene status changes again
         const int es = proc.getExportState();
@@ -1319,7 +1360,8 @@ void VerbEditor::timerCallback() {
     if (tab == 5 || energyView.isBusy()) energyView.update();
     if (outliner.isVisible()) refreshOutliner();
     const bool positioned = proc.apvts.getRawParameterValue("spatialDry")->load() >= 0.5f;
-    mixLabel.setText(positioned ? "Dry / wet - positioned direct to full room" : "Dry / wet - original channels to full room", juce::dontSendNotification);
+    mixLabel.setText("Dry / wet (%)",juce::dontSendNotification);
+    refreshCreativeControls();
     if (tab == 4) {
         decayView.setData(proc.getTailDiagnostics());
         refreshTailSettings();
@@ -1456,8 +1498,8 @@ void VerbEditor::paint(juce::Graphics& g) {
         g.restoreState();
         g.setColour(skin::textDim);
         g.setFont(juce::Font(juce::FontOptions(11.5f)));
-        g.drawText("3D view  |  drag: orbit  |  wheel: zoom  |  double-click: reset the camera  |  edit in Top, Front or Side",
-                   canvas.getX() + 8, canvas.getBottom() - 20, canvas.getWidth() - 16, 16, juce::Justification::left);
+        g.drawFittedText("3D: drag orbit | Shift/middle-drag pan | wheel zoom to cursor | F fit all, Shift+F fit selection | double-click centre / fit | Home reset",
+                         canvas.getX() + 8, canvas.getBottom() - 34, canvas.getWidth() - 16, 30, juce::Justification::bottomLeft, 2);
         return;
     }
     if (!inPlan()) {
@@ -1709,6 +1751,8 @@ void VerbEditor::resized() {
             lx += w + 4;
         }
     }
+    frameAllBtn.setBounds(canvas.getX() + 8, canvas.getY() + 6, 76, 22);
+    frameSelBtn.setBounds(canvas.getX() + 8 + 80, canvas.getY() + 6, 84, 22);
     auto place = [&](std::initializer_list<juce::Component*> group) {
         for (auto* t : group) { t->setBounds(strip.removeFromTop(40).reduced(0, 2)); }
         strip.removeFromTop(10);
@@ -1916,13 +1960,19 @@ void VerbEditor::resized() {
     {
         auto a = panel;
         header(2, a, "MIX", 2);
-        positionedDry.setBounds(a.removeFromTop(24)); a.removeFromTop(4);
-        for (auto* pr : {&mixLabel, &gainLabel, &tailLabel, &earlyLabel, &diffLabel, &dopplerLabel}) {
-            pr->setBounds(a.removeFromTop(16));
-            juce::Slider* s = pr == &mixLabel ? &mixSlider : pr == &gainLabel ? &gainSlider : pr == &tailLabel ? &tailSlider : pr == &earlyLabel ? &earlySlider : pr == &diffLabel ? &diffSlider : &dopplerSlider;
-            s->setBounds(a.removeFromTop(24));
-            a.removeFromTop(6);
-        }
+        modeBox.setBounds(a.removeFromTop(24)); a.removeFromTop(3);
+        positionedDry.setBounds(a.removeFromTop(22));
+        auto row = [&](juce::Label& label, juce::Slider& slider) {
+            auto r = a.removeFromTop(24); label.setBounds(r.removeFromLeft(112)); slider.setBounds(r);
+        };
+        row(mixLabel,mixSlider); row(gainLabel,gainSlider); row(tailLabel,tailSlider);
+        row(earlyLabel,earlySlider); row(diffLabel,diffSlider); row(dopplerLabel,dopplerSlider);
+        row(absorptionLabel,absorptionSlider);
+        for (int g=0;g<3;++g) row(decayLabels[g],decaySliders[g]);
+        auto target = a.removeFromTop(26);
+        targetLabel.setBounds(target.removeFromLeft(110)); targetInput.setBounds(target.removeFromLeft(60));
+        targetApply.setBounds(target.removeFromLeft(68)); targetCancel.setBounds(target);
+        targetResult.setBounds(a.removeFromTop(20));
         soloLabel.setBounds(a.removeFromTop(20));
         auto soloRow = a.removeFromTop(28);
         soloDirect.setBounds(soloRow.removeFromLeft(100));
@@ -1983,6 +2033,29 @@ juce::Point<double> VerbEditor::snapWorld(const juce::MouseEvent& e, const verb:
     return {x, y};
 }
 
+// Takes the layer masks from the processor (a click, a loaded project / preset / room) and reacts to a change.
+void VerbEditor::syncLayers() {
+    const auto now = proc.getLayerModes();
+    if (now == layerMode) return;
+    const auto before = layerMode;
+    layerMode = now;
+    for (int i = 0; i < 4; ++i) {
+        if (layerMode[(size_t)i] == 0 || before[(size_t)i] == layerMode[(size_t)i]) continue;
+        // a selection in a layer that is now locked or hidden is dropped
+        const bool wall = selKind == SelKind::Wall && i == LayerWalls;
+        bool zone = false;
+        if (selKind == SelKind::FloorZone || selKind == SelKind::CeilZone) {
+            const auto sc = proc.getDisplayScene();
+            const auto& zl = selKind == SelKind::CeilZone ? sc.ceilZones : sc.floorZones;
+            if (selWall >= 0 && selWall < (int)zl.size()) zone = zoneLayer(zl[(size_t)selWall], selKind == SelKind::CeilZone) == i;
+        }
+        if (wall || zone) { selKind = SelKind::Object; selWall = -1; selWalls.clear(); refreshSurface(); }
+    }
+    updateLayerButtons();
+    resized();
+    repaint();
+}
+
 void VerbEditor::updateLayerButtons() {
     static const char* names[4] = {"Walls", "Floors", "Ceilings", "Plates"};
     for (int i = 0; i < 4; ++i) {
@@ -1990,6 +2063,7 @@ void VerbEditor::updateLayerButtons() {
         layerBtn[i].setAlpha(layerMode[i] == 0 ? 1.f : (layerMode[i] == 1 ? 0.75f : 0.5f));
         layerBtn[i].setVisible(inPlan() && tab != 2 && tab != 4 && tab != 5);
     }
+    for (auto* b : {&frameAllBtn, &frameSelBtn}) b->setVisible(plane == Plane::Iso && tab != 2 && tab != 4 && tab != 5);  // the 3D view has no layer buttons: its own sit there
 }
 
 std::vector<VerbEditor::Pick> VerbEditor::pickCandidates(const verb::Scene& sc, juce::Point<float> pos) {
@@ -2023,6 +2097,7 @@ std::vector<VerbEditor::Pick> VerbEditor::pickCandidates(const verb::Scene& sc, 
 void VerbEditor::mouseDown(const juce::MouseEvent& e) {
     grabKeyboardFocus();
     if (!canvas.contains(e.getPosition())) return;
+    if (plane == Plane::Iso) { mouseDown3D(e); return; }
     if (e.mods.isMiddleButtonDown()) {  // middle button: pan the view, whatever is under the pointer
         if (proc.navigationLocked()) return;
         panPending = true;
@@ -2044,13 +2119,6 @@ void VerbEditor::mouseDown(const juce::MouseEvent& e) {
     }
     verb::Scene sc = proc.getDisplayScene();
     dragMode = DragMode::None;
-    if (plane == Plane::Iso) {  // 3D: drag orbits the camera
-        orbiting = true;
-        orbitStart = e.position;
-        orbitYaw0 = camYaw;
-        orbitPitch0 = camPitch;
-        return;
-    }
     if (!inPlan()) { mouseDownElevation(e); return; }
 
     if (tool == Tool::BoxSelect) {  // rubber-band selection of walls
@@ -2450,9 +2518,10 @@ void VerbEditor::paintElevation(juce::Graphics& g, const verb::Scene& sc, const 
 
 // A light 3D view: perspective orbit camera, walls as veils with their height range, zones on the floor and ceiling,
 // sources and listener with drop lines. Read-only; the editing happens in the plan and the elevations.
-void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double* lis) {
-    (void)lis;
-    const double H = sc.height;
+// Scene extents (walls, zones, sources, listener) -> the camera's scene centre / radius and its viewport.
+VerbEditor::Bounds3D VerbEditor::setup3D(const verb::Scene& sc) {
+    Bounds3D b;
+    b.H = sc.height;
     double x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
     auto grow = [&](double x, double y) { x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y); };
     for (auto& w : sc.walls) { grow(w.ax, w.ay); grow(w.bx, w.by); }
@@ -2461,19 +2530,129 @@ void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double*
     for (int s = 0; s < (int)cfgCache.size(); ++s) grow(paramValue(s, 0), paramValue(s, 1));
     grow(paramValue(verbp::kListener, 0), paramValue(verbp::kListener, 1));
     if (x1 < x0) { x0 = y0 = -5; x1 = y1 = 5; }
-    const double cx = 0.5 * (x0 + x1), cy = 0.5 * (y0 + y1), cz = 0.5 * H;
-    const double radius = 0.5 * std::sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0) + H * H) + 0.5;
+    b.x0 = x0; b.y0 = y0; b.x1 = x1; b.y1 = y1;
+    bounds3D = b;
+    const double radius = 0.5 * std::sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0) + b.H * b.H) + 0.5;
+    const auto sceneName = proc.getSceneName();
+    if (sceneName != camSceneName) { camSceneName = sceneName; cam.followScene = true; cam.zoom = 1.0; }  // a new room: look at it as a whole
+    cam.setScene({0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * b.H}, radius);
     const auto area = canvas.reduced(10).toFloat();
-    const double sc0 = std::min(area.getWidth(), area.getHeight()) / (2.2 * radius) * camZoom;
-    const double cyw = std::cos(camYaw), syw = std::sin(camYaw), cp = std::cos(camPitch), sp = std::sin(camPitch);
-    const double D = 3.2 * radius;
+    cam.setViewport(area.getCentreX(), area.getCentreY(), area.getWidth(), area.getHeight());
+    return b;
+}
+
+std::vector<verbp::Cam3D::Vec> VerbEditor::sceneCorners3D() const {
+    const auto& b = bounds3D;
+    std::vector<verbp::Cam3D::Vec> c;
+    for (double x : {b.x0, b.x1}) for (double y : {b.y0, b.y1}) for (double z : {0.0, b.H}) c.push_back({x, y, z});
+    return c;
+}
+
+void VerbEditor::frameAll3D() { cam.frameAll(sceneCorners3D()); }
+
+// Fits the selected object (a cube of 3 m around it) or the selected surfaces; nothing selected: the whole scene.
+void VerbEditor::frameSelection3D() {
+    const auto sc = proc.getDisplayScene();
+    std::vector<verbp::Cam3D::Vec> pts;
+    if (selKind == SelKind::Object) {
+        const double x = paramValue(selected, 0), y = paramValue(selected, 1), z = paramValue(selected, 2), h = 1.5;
+        for (double dx : {-h, h}) for (double dy : {-h, h}) for (double dz : {-h, h}) pts.push_back({x + dx, y + dy, z + dz});
+    } else {
+        const auto& b = bounds3D;
+        for (auto ref : currentSurfaceSelection()) {
+            if (ref.kind == 1 && ref.index >= 0 && ref.index < (int)sc.walls.size()) {
+                const auto& w = sc.walls[(size_t)ref.index];
+                const double zb = std::max(0.0, w.z0), zt = std::min(w.z1, sc.height);
+                for (double z : {zb, zt}) { pts.push_back({w.ax, w.ay, z}); pts.push_back({w.bx, w.by, z}); }
+            } else if (ref.kind == 2 || ref.kind == 3) {
+                const double z = ref.kind == 2 ? 0.0 : sc.height;
+                for (double x : {b.x0, b.x1}) for (double y : {b.y0, b.y1}) pts.push_back({x, y, z});
+            } else if (ref.kind == 4 || ref.kind == 5) {
+                const auto& zl = ref.kind == 5 ? sc.ceilZones : sc.floorZones;
+                if (ref.index < 0 || ref.index >= (int)zl.size()) continue;
+                const double z = zl[(size_t)ref.index].z >= 0 ? zl[(size_t)ref.index].z : (ref.kind == 5 ? sc.height : 0.0);
+                for (auto& p : zl[(size_t)ref.index].poly) pts.push_back({p.first, p.second, z});
+            }
+        }
+    }
+    if (pts.empty()) { frameAll3D(); return; }
+    cam.frame(pts);
+}
+
+// What is under the pointer in the 3D view: a source / the listener (nearest within 12 px), else the nearest wall or zone
+// polygon. `point` is its centre in world coordinates (the new orbit centre).
+VerbEditor::Pick3D VerbEditor::pick3D(const verb::Scene& sc, juce::Point<float> pos) {
+    Pick3D r;
+    auto screen = [&](double x, double y, double z) { const auto q = cam.project({x, y, z}); return juce::Point<float>((float)q.x, (float)q.y); };
+    double best = 12.0;
+    for (int obj = 0; obj <= (int)cfgCache.size(); ++obj) {
+        const int o = obj == (int)cfgCache.size() ? verbp::kListener : obj;
+        const double x = paramValue(o, 0), y = paramValue(o, 1), z = paramValue(o, 2);
+        const double d = screen(x, y, z).getDistanceFrom(pos);
+        if (d < best) { best = d; r.hit = true; r.point = {x, y, z}; }
+    }
+    if (r.hit) return r;
+    auto inside = [&](const std::vector<juce::Point<float>>& poly) {  // even-odd rule on the screen
+        bool in = false;
+        for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+            if ((poly[i].y > pos.y) != (poly[j].y > pos.y) && pos.x < (poly[j].x - poly[i].x) * (pos.y - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x) in = !in;
+        return in;
+    };
+    double nearest = 1e18;
+    auto consider = [&](const std::vector<verbp::Cam3D::Vec>& pts, verbp::Cam3D::Vec centre) {
+        std::vector<juce::Point<float>> poly;
+        for (auto& p : pts) poly.push_back(screen(p.x, p.y, p.z));
+        if (poly.size() < 3 || !inside(poly)) return;
+        const double depth = cam.project(centre).depth;
+        if (depth < nearest) { nearest = depth; r.hit = true; r.point = centre; }
+    };
+    const double H = sc.height;
+    if (layerMode[LayerWalls] != 2)
+        for (auto& w : sc.walls) {
+            if (w.editor.hidden) continue;
+            const double zb = std::max(0.0, w.z0), zt = std::min(w.z1, H);
+            consider({{w.ax, w.ay, zb}, {w.bx, w.by, zb}, {w.bx, w.by, zt}, {w.ax, w.ay, zt}}, {0.5 * (w.ax + w.bx), 0.5 * (w.ay + w.by), 0.5 * (zb + zt)});
+        }
+    for (int c = 0; c < 2; ++c)
+        for (auto& z : c ? sc.ceilZones : sc.floorZones) {
+            if (z.poly.size() < 3 || z.editor.hidden || layerMode[zoneLayer(z, c == 1)] == 2) continue;
+            const double zz = z.z >= 0 ? z.z : (c ? H : 0.0);
+            std::vector<verbp::Cam3D::Vec> pts;
+            verbp::Cam3D::Vec mid{0, 0, zz};
+            for (auto& p : z.poly) { pts.push_back({p.first, p.second, zz}); mid.x += p.first / (double)z.poly.size(); mid.y += p.second / (double)z.poly.size(); }
+            consider(pts, mid);
+        }
+    return r;
+}
+
+void VerbEditor::mouseDown3D(const juce::MouseEvent& e) {
+    if (e.mods.isRightButtonDown()) return;  // turning a source / the listener towards the pointer is a plan gesture
+    const auto sc = proc.getDisplayScene();
+    setup3D(sc);
+    if (e.mods.isMiddleButtonDown() || (e.mods.isLeftButtonDown() && e.mods.isShiftDown())) {  // pan; respects Lock pan, orbit and zoom stay free
+        if (proc.navigationLocked()) return;
+        panning3D = true;
+        pan3DLast = e.position;
+        const auto hit = pick3D(sc, e.position);
+        pan3DDepth = hit.hit ? cam.project(hit.point).depth : 0.0;  // what was grabbed follows the pointer exactly
+        return;
+    }
+    orbiting = true;
+    orbitStart = e.position;
+    orbitYaw0 = cam.yaw;
+    orbitPitch0 = cam.pitch;
+}
+
+void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double* lis) {
+    (void)lis;
+    const double H = sc.height;
+    const Bounds3D bb = setup3D(sc);
+    const double x0 = bb.x0, y0 = bb.y0, x1 = bb.x1, y1 = bb.y1;
+    const auto area = canvas.reduced(10).toFloat();
     struct P2 { float x, y; double depth; };
     auto proj = [&](double x, double y, double z) {
-        const double px = x - cx, py = y - cy, pz = z - cz;
-        const double x1r = cyw * px - syw * py, y1r = syw * px + cyw * py;
-        const double y2 = cp * y1r - sp * pz, z2 = sp * y1r + cp * pz;
-        const double f = D / (D + y2);
-        return P2{(float)(area.getCentreX() + x1r * sc0 * f), (float)(area.getCentreY() - z2 * sc0 * f), y2};
+        const auto q = cam.project({x, y, z});
+        return P2{(float)q.x, (float)q.y, q.depth};
     };
     const auto classColour = [&](int mat) {
         return mat >= 0 && mat < (int)sc.mats.size() ? juce::Colour(verb::surfaceClasses()[(size_t)std::min(std::max(sc.mats[(size_t)mat].cls, 0), (int)verb::SC_Custom)].argb) : skin::textMid;
@@ -2583,9 +2762,6 @@ void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double*
     };
     for (int s = 0; s < (int)cfgCache.size(); ++s) drawObj(s, srcColour(s), juce::String(cfgCache[(size_t)s].name));
     drawObj(verbp::kListener, kLis, "Listener");
-    g.setColour(skin::textDim);
-    g.setFont(juce::Font(juce::FontOptions(11.5f)));
-    g.drawText("3D", (int)area.getX() + 6, (int)area.getY() + 2, 60, 14, juce::Justification::left);
 }
 
 void VerbEditor::setAutoView(bool on) {
@@ -2602,8 +2778,9 @@ void VerbEditor::zoomView(double factor) {
 
 void VerbEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) {
     if (!canvas.contains(e.getPosition())) return;
-    if (plane == Plane::Iso) {
-        camZoom = std::min(8.0, std::max(0.25, camZoom * std::pow(1.2, wheel.deltaY * 10.0)));
+    if (plane == Plane::Iso) {  // zoom towards the pointer: the point under it stays under it
+        setup3D(proc.getDisplayScene());
+        cam.zoomAt(std::pow(1.2, wheel.deltaY * 10.0), e.position.x, e.position.y);
         repaint();
         return;
     }
@@ -2617,15 +2794,32 @@ void VerbEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWhee
 }
 
 void VerbEditor::mouseDoubleClick(const juce::MouseEvent& e) {
-    if (plane == Plane::Iso) { camYaw = -0.75; camPitch = 0.5; camZoom = 1.0; repaint(); return; }
+    if (plane == Plane::Iso) {  // on an object: orbit around it from now on; on empty space: fit the whole scene
+        if (!canvas.contains(e.getPosition())) return;
+        const auto sc = proc.getDisplayScene();
+        setup3D(sc);
+        const auto hit = pick3D(sc, e.position);
+        if (hit.hit) cam.centreOn(hit.point); else frameAll3D();
+        repaint();
+        return;
+    }
     if (!zonePts.empty()) { finishZone(); return; }  // double-click closes the zone being drawn
     if (canvas.contains(e.getPosition()) && !e.mods.isAnyModifierKeyDown()) setAutoView(true);  // back to following the objects
 }
 
 void VerbEditor::mouseDrag(const juce::MouseEvent& e) {
+    if (panning3D) {
+        if (proc.navigationLocked()) { panning3D = false; return; }
+        setup3D(proc.getDisplayScene());
+        const auto d = e.position - pan3DLast;
+        pan3DLast = e.position;
+        cam.pan(d.x, d.y, pan3DDepth);
+        repaint();
+        return;
+    }
     if (orbiting) {
-        camYaw = orbitYaw0 - (e.position.x - orbitStart.x) * 0.008;
-        camPitch = std::min(1.5, std::max(-0.2, orbitPitch0 + (e.position.y - orbitStart.y) * 0.008));
+        cam.yaw = orbitYaw0 - (e.position.x - orbitStart.x) * 0.008;
+        cam.pitch = std::min(1.5, std::max(-0.2, orbitPitch0 + (e.position.y - orbitStart.y) * 0.008));
         repaint();
         return;
     }
@@ -2756,7 +2950,7 @@ void VerbEditor::mouseDrag(const juce::MouseEvent& e) {
 }
 
 void VerbEditor::mouseUp(const juce::MouseEvent& e) {
-    if (orbiting) { orbiting = false; return; }
+    if (orbiting || panning3D) { orbiting = panning3D = false; return; }
     if (dragMode == DragMode::Box) {  // select every wall the rectangle touches
         const auto rect = juce::Rectangle<float>(boxStart, boxEnd);
         const verb::Scene sc = proc.getDisplayScene();
@@ -2839,4 +3033,18 @@ void VerbEditor::mouseUp(const juce::MouseEvent& e) {
     dragEnds.clear();
     constructionSelection.clear();
     repaint();
+}
+
+void VerbEditor::refreshCreativeControls() {
+    const bool creative = proc.apvts.getRawParameterValue("mode")->load() >= .5f;
+    for (auto* c : std::initializer_list<juce::Component*>{&earlySlider,&earlyLabel,&tailSlider,&tailLabel,&dopplerSlider,&dopplerLabel}) c->setEnabled(creative);
+    for (int g=0;g<3;++g) {
+        decaySliders[g].setEnabled(creative); decayLabels[g].setEnabled(creative);
+        decaySliders[g].setTooltip("Creative only: scales the physical band RT60. Physical uses 1.0 and preserves this stored value.");
+    }
+    const int state = proc.getTargetRT60State();
+    targetApply.setEnabled(state != 1 && proc.getLoadState() == 2); targetCancel.setEnabled(state == 1);
+    const auto achieved = proc.getTargetRT60Achieved();
+    targetResult.setText(state == 1 ? "Tracing..." : state == 5 ? "Enter a positive RT60 in seconds" : state == 4 ? "Cancelled / no measurable decay" : state >= 2
+        ? (state == 3 ? "Unreachable; closest " : "Achieved ") + juce::String(achieved,2) + " s" : "Mid-band physical RT60",juce::dontSendNotification);
 }

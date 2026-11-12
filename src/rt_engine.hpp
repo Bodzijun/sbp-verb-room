@@ -14,6 +14,7 @@
 namespace verb {
 
 struct EngineConfig {
+    std::function<bool()> cancelled; // construction/control only, never called from process()
     int erOrder = 2;          // discrete reflection order (1..4); higher orders come from the tail
     int ctrlInterval = 128;   // path solve / glide period, samples
     int tailBlock = 512;      // convolver block (multiple of ctrlInterval)
@@ -30,6 +31,8 @@ struct EngineConfig {
     // Experimental: each output channel is the coherent average over `spatialTaps` (1, 2 or 4) points around the
     // microphone. Measured: it does NOT reduce the Rayleigh-like ripple of a diffuse field (only the comb of a
     // single dominant reflection) and costs spatialTaps x early-field CPU, so it is off by default.
+    double absorptionScale = 1.; // applied after seeded geometry generation, never to authored materials
+    std::array<double, 3> decayMultipliers{{1, 1, 1}}; // initial creative decay, worker updates below
     int spatialTaps = 1;
     double spatialRadius = 0.3;  // initial spread in metres, can be automated with setReceiverSpread
 };
@@ -47,10 +50,11 @@ public:
     double tailSeconds() const;  // length of the late tail the engine renders (at least the scene length, longer for a long decay)
 
     // Replaces walls, surface materials, floor/ceiling and height while the engine runs (sources, receivers and the
-    // IR length are kept). Early paths follow within one control period; the late field is re-traced in the
+    // topology are kept; IR length is recomputed). Early paths follow within one control period; the late field is re-traced in the
     // background and crossfaded in. Returns false (and changes nothing) if the scene does not fit the engine.
     // Any thread, lock-free for the audio thread.
-    bool setScene(const Scene& scene);
+    bool setScene(const Scene& scene); // retains the current absorption
+    bool setScene(const Scene& scene, double absorptionScale, const std::function<bool()>& cancelled = {});
 
     // Thread-safe; positions in metres, angles in degrees.
     void setSourcePosition(int src, double x, double y, double z);
@@ -69,6 +73,7 @@ public:
     // Retraces and crossfades the tail on its worker without resetting audio history.
     // With tailThread=false, later quality requests are not applied.
     void setTailQuality(int baseRays, bool adaptive);
+    void setDecayMultipliers(double low, double mid, double high); // atomics only; worker rebuild + crossfade
     void setDopplerStrength(double k);  // 0 = none, 1 = physical, up to 2 = exaggerated; live
     // 0..1: smears every early reflection (not the direct sound) in time with energy-preserving all-pass
     // diffusers, like rough real surfaces do. Turns the regular comb ("flanger/phaser") of mirror-like
@@ -84,11 +89,18 @@ public:
     // Diagnostics (audio thread safe).
     int activeTaps() const;
     int tailRefreshCount() const;
+    uint64_t diffractionCapacityMisses() const; // published by process(); zero with a correctly prepared wall budget
+    bool tailIsCurrent() const; // all audio convolvers have consumed the latest geometry/decay/quality revision
     // Message/control threads only. Immutable snapshot; never called by process().
     std::shared_ptr<const TailDiagnostics> tailDiagnostics() const;
     // Actual immutable modeled geometry, including the seeded roughness/clutter.
     // Control threads only; retaining it never involves the audio callback.
     std::shared_ptr<const Scene> sceneSnapshot() const;
+    // Control/offline only: destination must have tailThread=false and no concurrent
+    // process(). Copies the reference's audible IR and immutable modeled geometry,
+    // never its audio history.
+    // Only the reference worker is locked; its process() does not acquire this mutex.
+    bool copyTailForOffline(const Engine& reference);
 
 private:
     struct Impl;

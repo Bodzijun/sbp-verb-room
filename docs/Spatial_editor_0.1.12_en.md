@@ -34,3 +34,9 @@ Names, groups, visibility and locking are stored as `#@verbroom-editor-v1` scene
 New `.verbroom` files use **format 2**, requiring **Verb Room 0.1.12 or a later version supporting that format**. Format 1 presets from 0.1.10/0.1.11 continue to load. This prevents older plug-ins from silently discarding Positioned dry.
 
 Surface organization and the dry mode are saved in projects and complete presets. Lock pan and Outliner visibility are saved in projects but remain local preferences when importing another user's preset.
+
+## 3D view and layers (0.1.16)
+
+- **3D navigation:** drag to orbit; pan with middle-button drag or Shift + left-drag; the wheel zooms towards the cursor. **F** fits the whole scene, **Shift+F** fits the selection (also the Frame buttons), **Home** resets the camera. Double-click an object to centre the orbit on it, or double-click empty space to fit the scene. Right-drag still rotates the listener or source. The camera is not saved.
+- **Layer states:** the Walls / Floors / Ceilings / Plates states (shown, locked, hidden) are kept when the editor is closed and reopened, and are saved in projects, complete `.verbroom` presets and scene text as `#@verbroom-editor-v2 layers`. Library rooms and geometry-only `.txt` scenes reset them to shown.
+- **Scale room** scales zones together with the walls; with objects included it also scales plate heights.

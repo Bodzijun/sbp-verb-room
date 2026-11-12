@@ -1,0 +1,15 @@
+The original fixtures are unchanged.
+
+legacy-motion-direct-early.f32 and legacy-motion-tail.f32 were captured with
+tools/legacy_fixture_probe.cpp compiled against the untouched
+archive/pre-stage2-2026-11-10/src (0.1.15), MSVC Release AVX2.
+Before capture, that tool re-rendered the original full legacy-motion.f32:
+maximum absolute sample error was exactly 0 FS.
+
+All files are 48 kHz stereo, interleaved float32. The new isolated pair must sum
+to the original full fixture within the original 2e-6 FS tolerance. Moving
+Direct/Early retains that same sample tolerance. The approved tail transition
+fix intentionally changes the tail waveform. Static processor fixtures retain
+the original sample tolerance outside 10..680 ms, and separately check late
+octave energy within 0.2 dB and T20 within 3%. Direct/Early motion is checked
+sample by sample, including the old Doppler and diffusion settings.

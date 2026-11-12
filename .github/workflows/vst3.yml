@@ -34,7 +34,7 @@ jobs:
   build:
     name: ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -76,14 +76,16 @@ jobs:
             -DVERB_BUILD_PLUGIN=ON -DVERB_AVX2=OFF "${extra[@]}"
 
       - name: Build plug-in and tests
-        run: cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test --parallel 2
+        run: cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test stage2_test tail_transition_test --parallel 2
 
       - name: Test
+        # stage2_fixes is the exhaustive decay/tail regression (about 15 minutes on a fast
+        # desktop CPU); it is run locally before a release and is not built or run here.
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            xvfb-run -a ctest --test-dir build --output-on-failure --timeout 600
+            xvfb-run -a ctest --test-dir build --output-on-failure --timeout 600 -E '^stage2_fixes$'
           else
-            ctest --test-dir build --output-on-failure --timeout 600
+            ctest --test-dir build --output-on-failure --timeout 600 -E '^stage2_fixes$'
           fi
 
       - name: Verify and ad-hoc sign macOS Universal bundle

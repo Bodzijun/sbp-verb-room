@@ -71,8 +71,8 @@ verb::EnergyMapOptions EnergyMapView::options() const {
     verb::EnergyMapOptions opt; opt.height = height.getValue(); opt.duration = duration.getValue(); opt.resolution = grid.getSelectedId();
     const int budgets[] = {12000, 48000, 192000}; opt.rays = budgets[std::clamp(quality.getSelectedId() - 1, 0, 2)];
     opt.components = (direct.getToggleState() ? 1 : 0) | (early.getToggleState() ? 2 : 0) | (tail.getToggleState() ? 4 : 0);
-    opt.earlyDb = proc.apvts.getRawParameterValue("early")->load();
-    opt.tailDb = proc.apvts.getRawParameterValue("tail")->load();
+    opt.earlyDb = proc.apvts.getRawParameterValue("mode")->load() >= .5f ? proc.apvts.getRawParameterValue("early")->load() : 0.;
+    opt.tailDb = proc.apvts.getRawParameterValue("mode")->load() >= .5f ? proc.apvts.getRawParameterValue("tail")->load() : 0.;
     return opt;
 }
 

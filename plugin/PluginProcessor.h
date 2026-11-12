@@ -79,6 +79,11 @@ public:
     // interrupting the audio. Rejected edits (too many walls, bad indices) change nothing.
     void editScene(const std::function<void(verb::Scene&)>& fn);
     void editSceneMetadata(const std::function<void(verb::Scene&)>& fn);
+    // Plan layer masks of the editor (0 Walls, 1 Floors, 2 Ceilings, 3 Plates; 0 shown, 1 locked, 2 hidden). They live in the
+    // scene's editor metadata, so they survive closing the editor and are saved with the project, the scene text and `.verbroom`.
+    // A room or geometry text without them (library room, plain `.txt`) resets all layers to shown.
+    std::array<int, 4> getLayerModes() const;
+    void setLayerMode(int layer, int mode);
     uint64_t getLoadSerial() const { return loadSerial.load(); }  // increments when a new engine is built (a room is loaded, the output is changed)
     uint64_t getSceneSerial() const { return sceneSerial.load(); }  // increments on every change of the room or the setup
 
@@ -116,6 +121,14 @@ public:
     verbp::TailSettings getTailSettings() const;
     void setTailSettings(verbp::TailSettings);
     std::shared_ptr<const verb::TailDiagnostics> getTailDiagnostics() const;
+    bool isTailCurrent() const;
+    // Control/message thread API. Synchronous solver is cancellable from another thread.
+    double setTargetRT60(double seconds);
+    std::array<double, 3> getRT60Estimate() const;
+    void startTargetRT60(double seconds); // editor: owned worker, no message-thread tracing
+    void cancelTargetRT60() { targetCancel.store(true); }
+    int getTargetRT60State() const { return targetState.load(); } // 0 idle, 1 working, 2 reached, 3 unreachable, 4 cancelled/error, 5 invalid input
+    double getTargetRT60Achieved() const { return targetAchieved.load(); }
     int hostOutputChannels() const { return hostOutCh.load(); }
     int hostInputChannels() const { return hostInCh.load(); }
     // Peak of every input channel over the last host block (0-based channel, 0..1+): the editor shows them so the
@@ -152,12 +165,14 @@ private:
         std::vector<verbp::SourceCfg> setup;  // optional sources that come with the room (applied with the defaults)
         int micPattern = -1;                   // optional listener microphone pattern (-1 = keep)
         bool keepRouting = false;              // preserve source configuration and listener output settings
+        bool rebuild = false;                  // the same room again: edits made after `editsAtRequest` must survive the load
+        uint64_t editsAtRequest = 0, gen = 0;
     };
     std::vector<verbp::SourceCfg> nextSetup;   // guarded by reqLock: picked up by the next loadSceneText
     int nextMic = -1;
     // Everything the audio thread needs, swapped as one unit under engineLock.
     struct Bundle {
-        std::unique_ptr<verb::Engine> engine;
+        std::shared_ptr<verb::Engine> engine; // export retains ownership off the audio thread
         std::vector<verbp::SourceCfg> cfg;
         std::vector<verbp::PointMap> points;
         std::vector<int> pointStart, pointCount;  // points of each source (they are stored grouped by source)
@@ -167,7 +182,13 @@ private:
     };
     void run() override;
     void runExport(juce::File dir);
-    std::thread exportThread;
+    std::thread exportThread, targetThread;
+    std::atomic<bool> targetCancel{false};
+    std::atomic<int> targetState{0};
+    std::atomic<bool> offlineRender{false}; // private static export instance; no tail worker
+    std::atomic<double> targetAchieved{-1.};
+    verb::Scene targetScene() const;
+    double solveTargetRT60(double seconds, verb::Scene scene, uint64_t serial);
     std::atomic<int> exportState{0};
     std::atomic<bool> exportCancel{false};
     juce::String exportMsg;  // guarded by dispLock
@@ -175,6 +196,7 @@ private:
     void updateBounds(const verb::Scene&);
     void setParamValue(const juce::String& id, double v);
     void rebuild();
+    void queueScene(const juce::String& text, const juce::String& name, bool applyDefaults, bool keepPendingDefaults, bool isRebuild, uint64_t editsAtRequest);
 
     std::unique_ptr<Bundle> bundle;
     mutable juce::SpinLock engineLock;
@@ -185,6 +207,7 @@ private:
 
     mutable juce::CriticalSection dispLock;
     verb::Scene display;
+    uint64_t displayEdits = 0, roomGen = 0, displayGen = 0;  // edits of `display`; room loads requested / completed
     double displayHome[4] = {0, 0, 0, 0};
     juce::String status = "No scene";
     juce::String sceneText, sceneName;
@@ -203,6 +226,8 @@ private:
     std::atomic<double> bounds[4] = {};
     std::atomic<bool> hasBounds{false}, ceilOpen{false};
     std::atomic<bool> geomDirty{false};
+    std::atomic<uint64_t> geometryEpoch{0}, appliedGeometryEpoch{0};
+    std::atomic<double> engineAbsorption{-1.};
     std::atomic<bool> qualityDirty{false};
     std::atomic<uint64_t> sceneSerial{0}, loadSerial{0}, reqSerial{0};
     std::atomic<bool> defaultsOwed{false};
@@ -210,6 +235,9 @@ private:
 
     std::atomic<float>* pv[verbp::kMaxSources + 1][5] = {};
     std::atomic<float>* gainParam = nullptr;
+    std::atomic<float>* modeParam = nullptr;
+    std::atomic<float>* absorptionParam = nullptr;
+    std::atomic<float>* decayParam[3] = {};
     std::atomic<float>* earlyParam = nullptr;
     std::atomic<float>* diffusionParam = nullptr;
     std::atomic<float>* dopplerParam = nullptr;

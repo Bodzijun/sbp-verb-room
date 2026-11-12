@@ -12,11 +12,13 @@
 #include "layouts.hpp"
 #include "render.hpp"
 #include "rt_engine.hpp"
+#include <thread>
 #include "tail.hpp"
 
 using namespace verb;
 
 static int fails = 0;
+static double processCpuSeconds();
 static void check(bool ok, const char* what) {
     std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
     if (!ok) ++fails;
@@ -149,7 +151,7 @@ static void testPerf(const std::string& dir) {
     for (int r = 0; r < R; ++r) op[r] = out[r].data();
     double worst = 0, total = 0;
     bool ok = true;
-    const std::clock_t cpu0 = std::clock();
+    const double cpu0 = processCpuSeconds();
     for (size_t pos = 0; pos < N; pos += blk) {
         double t = pos / sc.sr;
         if (!std::getenv("VERB_STATIC")) {
@@ -167,7 +169,7 @@ static void testPerf(const std::string& dir) {
     }
     double budget = blk / sc.sr;
     std::printf("  process-wide CPU time %.1f %% of real time (all threads, excludes waiting/preemption)\n",
-                100.0 * (double)(std::clock() - cpu0) / CLOCKS_PER_SEC / (N / sc.sr));
+                100.0 * (processCpuSeconds() - cpu0) / (N / sc.sr));
     std::printf("  mean load %.1f %% of one core, worst block %.2f ms (budget %.2f ms), taps %d, tail refreshes %d\n",
                 100 * total / (N / sc.sr), worst * 1000, budget * 1000, eng.activeTaps(), eng.tailRefreshCount());
     check(ok, "output finite");
@@ -239,7 +241,26 @@ static void testRecovery(const std::string& dir) {
     std::vector<float*> op(R);
     for (int r = 0; r < R; ++r) op[r] = out[r].data();
     bool fin = true;
+    bool firstPhase = true;
+    double longestRefresh=0;
     auto phase = [&](double secs, double x, double y, double z, double yaw) {
+        // Offline audio can run many times faster than wall time. Wait for the
+        // asynchronous tail worker at each teleport before measuring recovery.
+        const auto before = eng.tailRefreshCount();
+        eng.setListener(x,y,z,yaw);
+        if (!firstPhase) {
+            const auto waitStart=std::chrono::steady_clock::now();
+            const auto until = std::chrono::steady_clock::now()+std::chrono::seconds(10);
+            std::fill(in.begin(),in.end(),0.f);const float* silence[] = {in.data()};
+            while(eng.tailRefreshCount()==before && std::chrono::steady_clock::now()<until) {
+                eng.process(silence,op.data(),blk);std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            eng.process(silence,op.data(),blk); // consume the pending IR crossfade
+            const double waitSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-waitStart).count();
+            longestRefresh=std::max(longestRefresh,waitSeconds);
+            check(eng.tailRefreshCount()>before&&waitSeconds<2.,"teleported listener tail recovers within 2 seconds of wall time");
+        }
+        firstPhase = false;
         double sum = 0, cnt = 0;
         const int blocks = (int)(secs * sc.sr / blk);
         for (int b = 0; b < blocks; ++b) {
@@ -263,6 +284,16 @@ static void testRecovery(const std::string& dir) {
                 a, b1, b2, c, 20 * std::log10(c / a));
     check(fin, "output finite throughout");
     check(std::fabs(20 * std::log10(c / a)) < 1.0, "level returns to within 1 dB after coming back");
+    std::printf("  longest asynchronous listener refresh %.6f s\n",longestRefresh);
+    // Direct sound must follow a returning listener before the tail worker runs.
+    eng.setSoloMask(1);std::fill(in.begin(),in.end(),0.f);
+    const float* silence[]={in.data()};for(int k=0;k<400;++k)eng.process(silence,op.data(),blk);
+    eng.setListener(-59.2,-57.9,12.4,78);
+    eng.process(silence,op.data(),blk);
+    eng.setListener(6,3,1.5,0);
+    double directEnergy=0;
+    for(int k=0;k<16;++k){in.assign(blk,0.f);if(k==0)in[0]=1.f;const float* ip[]={in.data()};eng.process(ip,op.data(),blk);for(auto& ch:out)for(float x:ch)directEnergy+=x*x;}
+    check(directEnergy>1e-5,"direct sound reacts within 85 ms of returning, without waiting for tail worker");
 }
 
 // Exploration (VERB_EXPLORE=1): comb strength at a given listener pose vs early level and wall scatter. Not pass/fail.
@@ -552,8 +583,21 @@ static double workingSetMB() {
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return (double)pmc.WorkingSetSize / (1024.0 * 1024.0);
     return -1;
 }
+static double privateMemoryMB() {
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    if(K32GetProcessMemoryInfo(GetCurrentProcess(),(PROCESS_MEMORY_COUNTERS*)&pmc,sizeof(pmc)))return pmc.PrivateUsage/1048576.;
+    return -1.;
+}
+static double processCpuSeconds() {
+    FILETIME created,exited,kernel,user;
+    if(!GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user))return 0.;
+    ULARGE_INTEGER k{},u{};k.LowPart=kernel.dwLowDateTime;k.HighPart=kernel.dwHighDateTime;
+    u.LowPart=user.dwLowDateTime;u.HighPart=user.dwHighDateTime;return (k.QuadPart+u.QuadPart)*1e-7;
+}
 #else
 static double workingSetMB() { return -1; }
+static double privateMemoryMB() { return -1; }
+static double processCpuSeconds() { return (double)std::clock()/CLOCKS_PER_SEC; }
 #endif
 
 // Demo room with `n` mono sources on a grid and a virtual-microphone array for `layout` at the listener spot.
@@ -607,19 +651,22 @@ static void testSharedTail(const std::string& dir) {
     check(ok, "shared late field carries the same tail energy per source and channel (within 2 dB)");
 }
 
-static void testManySources(const std::string& dir) {
-    std::printf("Test 12: scale target: 16 sources, 7.1.4 output (12 channels), 4 sources moving, shared late field\n");
+static void testManySources(const std::string& dir, double decay=1.,bool shared=true) {
+    std::printf("Test 12: scale target: 16 sources, 7.1.4 output (12 channels), 4 sources moving, %s late field, decay x%.1f\n",shared?"shared":"independent",decay);
     Scene sc = manySources(dir, 16, verb::Layout::Surround714);
     sc.length = 2.0;
     if (std::getenv("VERB_NO_DIFF")) sc.diffraction = false;  // for comparing the cost of diffraction
     EngineConfig cfg;
-    cfg.erOrder = 1; cfg.sharedTail = true; cfg.maxEarlyDelaySec = 0.4;
+    cfg.erOrder = 1; cfg.sharedTail = shared; cfg.maxEarlyDelaySec = 0.4;
+    cfg.decayMultipliers={{decay,decay,decay}};
     cfg.tailRays = 48000; cfg.tailThread = !std::getenv("VERB_NO_TAIL_THREAD");
     const double mem0 = workingSetMB();
+    const double private0=privateMemoryMB();
     auto t0 = std::chrono::steady_clock::now();
     Engine eng(sc, cfg);
     const double ctor = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const double mem1 = workingSetMB();
+    const double private1=privateMemoryMB();
     const int S = eng.numSources(), R = eng.numReceivers(), blk = 256;
     std::mt19937 rng(11);
     std::normal_distribution<float> nd(0, 0.05f);
@@ -629,7 +676,7 @@ static void testManySources(const std::string& dir) {
     for (int s = 0; s < S; ++s) ip[s] = in[s].data();
     for (int r = 0; r < R; ++r) op[r] = out[r].data();
     const size_t N = (size_t)(8 * sc.sr);
-    const std::clock_t cpu0 = std::clock();
+    const double cpu0 = processCpuSeconds();
     double total = 0, worst = 0;
     bool fin = true;
     for (size_t pos = 0; pos < N; pos += blk) {
@@ -647,8 +694,17 @@ static void testManySources(const std::string& dir) {
     const double load = 100 * total / (N / sc.sr);
     std::printf("  build %.1f s | memory +%.0f MB (total %.0f MB) | mean load %.1f %% of one core, worst block %.2f ms (budget %.2f ms), taps %d, tail refreshes %d\n",
                 ctor, mem1 - mem0, mem1, load, worst * 1000, 1000.0 * blk / sc.sr, eng.activeTaps(), eng.tailRefreshCount());
-    std::printf("  process-wide CPU time %.1f %% (all threads)\n", 100.0 * (double)(std::clock() - cpu0) / CLOCKS_PER_SEC / (N / sc.sr));
+    std::printf("  process-wide CPU time %.1f %% (all threads)\n",100.0*(processCpuSeconds()-cpu0)/(N/sc.sr));
+    std::printf("  private commit +%.1f MB (total %.1f MB)\n",private1-private0,private1);
     check(fin, "output finite");
+    if(!shared) {
+        // Diagnostic for a configuration the plugin deliberately does not use
+        // (>4 points selects sharedTail). Keep every original shared budget below.
+        check(std::isfinite(load)&&std::isfinite(mem1)&&mem1>mem0,"independent 16x12 decay x3 CPU/memory measurements are finite");
+        if(mem1-mem0>=600||load>=70||worst>=2.0*blk/sc.sr)
+            std::printf("  PROPOSAL: use shared late field for many sources, or explicitly cap independently traced source count; no automatic mitigation added.\n");
+        return;
+    }
     check(mem1 - mem0 < 600, "memory growth below 600 MB");
     check(load < 70, "mean audio-thread load below 70 % of one core");
     // single outliers under foreign CPU load (a DAW running next to the test) are tolerated: 2x the budget at most
@@ -1518,6 +1574,8 @@ static void testSwirlDefaults(const std::string& dir) {
 
 int main(int argc, char** argv) {
     std::string dir = argc > 1 ? argv[1] : "scenes";
+    if(std::getenv("VERB_DECAY_PERF_ONLY")) {testManySources(dir,3.);testManySources(dir,3.,false);return fails?1:0;}
+    if (std::getenv("VERB_RECOVERY_ONLY")) { testRecovery(dir); return fails ? 1 : 0; }
     if (std::getenv("VERB_SWIRL")) {
         try { exploreSwirl(dir); } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 1; }
         return 0;
@@ -1552,6 +1610,7 @@ int main(int argc, char** argv) {
         testTransmission();
         testSharedTail(dir);
         testManySources(dir);
+        testManySources(dir,3.);
         testInputModes(dir);
         testSwirlDefaults(dir);
         testReflectionSpectrum(dir);

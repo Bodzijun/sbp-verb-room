@@ -213,14 +213,31 @@ struct DiffPath {
     float amp[NB] = {};
 };
 
+// Audio callers reserve once for the scene's wall budget; offline callers may use
+// the local fallback. Reusing these buffers does not change path order or gains.
+struct DiffractionScratch {
+    uint64_t capacityMisses=0; // owner may inspect; never silently discard a path
+    struct Node { Vec3 p; int wall; };
+    std::vector<Node> nodes;
+    std::vector<int> a, b;
+    std::vector<float> ampA, ampB;
+    void prepare(size_t walls) {
+        const auto n=walls*2;
+        nodes.reserve(n);a.reserve(n);b.reserve(n);
+        ampA.resize(n*NB);ampB.resize(n*NB);
+    }
+};
+
 // The direct path is blocked: find the way round the wall ends that the sound takes best. One end first (both legs
 // clear); if none works (a closed building: the sound has to go round two corners), two, then three ends in a row.
 // Every bend attenuates by its own knife-edge loss, so the level falls smoothly while the source goes behind a
 // building and never switches on or off.
-inline bool diffractedPath(const Geo& g, Vec3 S, Vec3 R, double c, DiffPath& out, bool needClear = false) {
-    struct Node { Vec3 p; int wall; };
-    std::vector<Node> nodes;
-    nodes.reserve((size_t)g.W * 2);
+inline bool diffractedPath(const Geo& g, Vec3 S, Vec3 R, double c, DiffPath& out, bool needClear = false, DiffractionScratch* scratch = nullptr) {
+    if(!scratch){DiffractionScratch local;local.prepare((size_t)g.W);return diffractedPath(g,S,R,c,out,needClear,&local);}
+    auto& work=*scratch;
+    using Node=DiffractionScratch::Node;
+    auto& nodes=work.nodes;nodes.clear();
+    if(nodes.capacity()<(size_t)g.W*2) {++work.capacityMisses;return false;}
     const double dist3 = norm(R - S);
     const double rx = R.x - S.x, ry = R.y - S.y, len2 = std::max(1e-12, rx * rx + ry * ry);
     for (int i = 0; i < g.W; ++i) {
@@ -277,8 +294,9 @@ inline bool diffractedPath(const Geo& g, Vec3 S, Vec3 R, double c, DiffPath& out
     }
     if (N > 160) return false;  // a scene this busy: keep the cost bounded
     // 2. round several ends: which ends does the source see, which does the receiver see
-    std::vector<int> A, B;
-    std::vector<float> ampA((size_t)N * NB), ampB((size_t)N * NB);
+    auto& A=work.a;auto& B=work.b;A.clear();B.clear();
+    auto& ampA=work.ampA;auto& ampB=work.ampB;
+    if(A.capacity()<(size_t)N || B.capacity()<(size_t)N || ampA.size()<(size_t)N*NB || ampB.size()<(size_t)N*NB) {++work.capacityMisses;return false;}
     for (int j = 0; j < N; ++j) {
         float a[NB], bb[NB];
         for (int b = 0; b < NB; ++b) a[b] = bb[b] = 1.f;

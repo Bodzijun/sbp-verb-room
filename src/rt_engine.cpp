@@ -7,10 +7,14 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <map>
 #include <random>
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#if VERB_REQUIRE_AVX2
+#include <immintrin.h>
+#endif
 
 #include "dsp.hpp"
 #include "geometry.hpp"
@@ -39,24 +43,58 @@ public:
             twr_[k] = (float)std::cos(a);
             twi_[k] = (float)std::sin(a);
         }
+       #if VERB_REQUIRE_AVX2
+        // Duplicate each scalar twiddle for interleaved real/imag lanes once,
+        // rather than rebuilding SIMD vectors in every audio FFT butterfly.
+        stageRe_.resize(2 * (n - 1)); stageIm_.resize(2 * (n - 1));
+        for (int half = 1; half < n; half <<= 1) {
+            const int step = n / (2 * half), offset = 2 * (half - 1);
+            for (int k = 0; k < half; ++k) {
+                stageRe_[offset + 2*k] = stageRe_[offset + 2*k + 1] = twr_[k*step];
+                stageIm_[offset + 2*k] = stageIm_[offset + 2*k + 1] = twi_[k*step];
+            }
+        }
+       #endif
     }
     void run(cf* a, bool inv) const {
+       #if VERB_REQUIRE_AVX2
+        const auto imaginarySign = _mm256_set1_ps(inv ? -0.f : 0.f);
+       #endif
         for (int i = 0; i < n_; ++i)
             if (i < rev_[i]) std::swap(a[i], a[rev_[i]]);
         for (int len = 2; len <= n_; len <<= 1) {
             int half = len / 2, step = n_ / len;
-            for (int i = 0; i < n_; i += len)
-                for (int k = 0; k < half; ++k) {
+            for (int i = 0; i < n_; i += len) {
+                int k = 0;
+               #if VERB_REQUIRE_AVX2
+                for (; k + 4 <= half; k += 4) {
+                    const int offset = 2 * (half - 1 + k);
+                    const auto wr = _mm256_loadu_ps(stageRe_.data() + offset);
+                    const auto wi = _mm256_xor_ps(_mm256_loadu_ps(stageIm_.data() + offset), imaginarySign);
+                    const auto u=_mm256_loadu_ps(&a[i+k].re), x=_mm256_loadu_ps(&a[i+k+half].re);
+                    const auto swapped=_mm256_permute_ps(x,0xb1); // [im,re] within each complex pair
+                    const auto v=_mm256_addsub_ps(_mm256_mul_ps(x,wr),_mm256_mul_ps(swapped,wi));
+                    _mm256_storeu_ps(&a[i+k].re,_mm256_add_ps(u,v));
+                    _mm256_storeu_ps(&a[i+k+half].re,_mm256_sub_ps(u,v));
+                }
+               #endif
+                for (; k < half; ++k) {
                     float wr = twr_[k * step], wi = inv ? -twi_[k * step] : twi_[k * step];
                     cf u = a[i + k], x = a[i + k + half];
                     float vr = x.re * wr - x.im * wi, vi = x.re * wi + x.im * wr;
                     a[i + k] = {u.re + vr, u.im + vi};
                     a[i + k + half] = {u.re - vr, u.im - vi};
                 }
+            }
         }
         if (inv) {
             float s = 1.f / n_;
-            for (int i = 0; i < n_; ++i) { a[i].re *= s; a[i].im *= s; }
+            int i = 0;
+           #if VERB_REQUIRE_AVX2
+            const auto scale=_mm256_set1_ps(s);
+            for (; i+4<=n_; i+=4) _mm256_storeu_ps(&a[i].re,_mm256_mul_ps(_mm256_loadu_ps(&a[i].re),scale));
+           #endif
+            for (; i < n_; ++i) { a[i].re *= s; a[i].im *= s; }
         }
     }
     int size() const { return n_; }
@@ -65,6 +103,9 @@ private:
     int n_;
     std::vector<int> rev_;
     std::vector<float> twr_, twi_;
+   #if VERB_REQUIRE_AVX2
+    std::vector<float> stageRe_, stageIm_;
+   #endif
 };
 
 struct Biquad {
@@ -127,6 +168,9 @@ struct Node {
 };
 
 struct Slot {
+    uint64_t revision = 0, sceneRevision = 0;
+    size_t samples = 0;
+    int partitions = 0; // immutable while published; worker may resize only an inactive slot
     std::vector<float> re, im;  // [receiver][partition][bin]
 };
 
@@ -137,7 +181,9 @@ struct TailConv {
     std::vector<float> prevIn, inAcc;
     Slot slot[3];
     std::atomic<int> pending{-1};
+    std::atomic<bool> workerBusy{false};
     std::atomic<int> curAtomic{0};
+    std::atomic<uint64_t> appliedRevision{0}, appliedScene{0};
     int cur = 0;
     int prev = -1;
 };
@@ -151,7 +197,11 @@ struct World {
     double c = 343.2;                         // speed of sound for this temperature
     std::array<double, NB> airAmp{};          // per-metre amplitude factor of the air (temperature, humidity)
     // `sc` is the scene including its seeded clutter (capped so the total fits the engine)
-    World(const Scene& s, int maxWalls) : sc(withClutter(withRoughness(s), maxWalls)), geo(sc) {
+    World(const Scene& s, int maxWalls, double absorption = 1.) : sc(withClutter(withRoughness(s), maxWalls)), geo(sc) {
+        // Scale AFTER geometry generation: automation must not relocate clutter or change roughness.
+        absorption = clampTo(absorption,.3,3.,1.);
+        if (absorption != 1.) for (auto& m : sc.mats) for (int b=0;b<NB;++b)
+            m.alpha[b] = std::clamp(m.alpha[b]*absorption,0.,std::max(0.,1.-m.tau[b]));
         c = speedOfSound(sc.tempC);
         for (int b = 0; b < NB; ++b) airAmp[(size_t)b] = std::pow(10.0, -airAbsDbPerM(kBandHz[b], sc.tempC, sc.humidity) / 20.0);
         refl.resize((size_t)geo.nSurf());
@@ -189,9 +239,29 @@ struct World {
 
 }  // namespace
 
+static_assert(std::atomic<double>::is_always_lock_free, "RT decay automation requires lock-free double atomics");
+
+// Length probes deliberately use the authored geometry at EVERY scale. This retains
+// the legacy unity probe and avoids a discontinuity from expanding clutter only at !=1.
+// Cache only completed probes; cancellation never commits a partial estimate.
+static double cachedTailSeconds(Scene s, int order, double absorption, const std::function<bool()>& cancelled) {
+    if(cancelled && cancelled())throw std::runtime_error("Scene superseded");
+    absorption=clampTo(absorption,.3,3.,1.);
+    for(auto& m:s.mats)for(int b=0;b<NB;++b)m.alpha[b]=std::clamp(m.alpha[b]*absorption,0.,std::max(0.,1.-m.tau[b]));
+    const auto key=std::to_string(order)+serializeScene(s);
+    static std::mutex mx;static std::map<std::string,double> cache;
+    {std::lock_guard<std::mutex> lock(mx);auto it=cache.find(key);if(it!=cache.end())return it->second;}
+    const double length=effectiveTailSeconds(s,order,cancelled);
+    {std::lock_guard<std::mutex> lock(mx);if(cache.size()>=64)cache.erase(cache.begin());cache[key]=length;}
+    return length;
+}
+
 struct Engine::Impl {
+    std::mutex irSnapshotMx; // worker/control only; never acquired by process()
+    std::atomic<uint64_t> publishedDiffractionMisses{0};
     Scene sc;
     EngineConfig cfg;
+    std::atomic<double> currentAbsorption{1.};
     int S, R;
     double sr, c;
     // geometry: audio thread uses `wd`; setScene() publishes through `pendingWorld`; the worker frees old worlds
@@ -204,6 +274,7 @@ struct Engine::Impl {
     std::atomic<World*> pendingWorld{nullptr};
     std::atomic<uint64_t> ackSerial{0}, geomSerial{0};
     int maxWalls = 128;
+    DiffractionScratch diffractionScratch; // process-only, reserved before audio starts
     const Geo& G() const { return wd->geo; }
     std::array<double, NB> airAmp;                   // per-metre amplitude factor
     std::vector<Transducer> rcvLocal;                 // receivers relative to the listener (position rotated into listener frame)
@@ -237,6 +308,7 @@ struct Engine::Impl {
     std::vector<Vec3> offs;           // pickup point offsets, M entries
     // shared late field (cfg.sharedTail): one convolver per receiver, fed with per-source/per-band weighted sums
     bool shared = false;
+    std::atomic<bool> sharedBusy{false};
     std::vector<std::unique_ptr<TailConv>> sconv;  // [R], each a single-channel convolver
     std::array<std::vector<float>, 2> lateGbuf;    // [r][s][8] target gains, double-buffered by the worker
     std::atomic<int> lateGcur{0};
@@ -245,6 +317,8 @@ struct Engine::Impl {
     const float* lateGtarget = nullptr;
     std::vector<float> lateGuse;                   // gains actually applied (eased towards the target)
     std::vector<float> lateY;                      // [R][ctrl] scratch
+    std::vector<TailHist> shapedHist;
+    std::vector<double> sourceSeconds;
     std::vector<TailHist> srcHist;                 // worker: cached late-field histogram per source
     std::vector<int> histRays;
     std::vector<bool> histSparse;
@@ -262,6 +336,8 @@ struct Engine::Impl {
     std::atomic<int> requestedRays{20000};
     std::atomic<bool> requestedAdaptive{false};
     std::atomic<uint64_t> qualitySerial{0};
+    std::array<std::atomic<double>, 3> requestedDecay{{1., 1., 1.}};
+    std::atomic<double> renderedSeconds{0.};
     int M = 1, RM = 0;
     double lastSpread = -1;
     double earlyG = 1.0, lastEarlyDb = 1e30;
@@ -295,13 +371,16 @@ struct Engine::Impl {
         : sc(scene), cfg(c_), S((int)scene.sources.size()), R((int)scene.receivers.size()), sr(scene.sr),
           c(speedOfSound(scene.tempC)), fft(c_.tailBlock * 2) {
         if (cfg.erOrder < 1 || cfg.erOrder > 4) throw std::runtime_error("erOrder must be 1..4");
+        currentAbsorption=cfg.absorptionScale;
         requestedRays = cfg.tailRays; requestedAdaptive = cfg.adaptiveTail;
-        sc.length = effectiveTailSeconds(sc, cfg.erOrder);  // never shorter than the scene says, long enough that the tail is not cut
+        for (int g=0;g<3;++g) requestedDecay[g] = cfg.decayMultipliers[g];
+        sc.length = cachedTailSeconds(sc, cfg.erOrder, cfg.absorptionScale, cfg.cancelled);  // never shorter than the scene says, long enough that the tail is not cut
         if (cfg.tailBlock % cfg.ctrlInterval) throw std::runtime_error("tailBlock must be a multiple of ctrlInterval");
         maxWalls = cfg.erOrder <= 1 ? 128 : cfg.erOrder == 2 ? 64 : cfg.erOrder == 3 ? 24 : 12;
+        diffractionScratch.prepare((size_t)maxWalls);
         if ((int)scene.walls.size() > maxWalls) throw std::runtime_error("too many walls for this reflection order (max " + std::to_string(maxWalls) + ")");
         B = cfg.tailBlock;
-        latest = std::make_shared<World>(sc, maxWalls);
+        latest = std::make_shared<World>(sc, maxWalls, cfg.absorptionScale);
         analysisScene = std::shared_ptr<const Scene>(latest, &latest->sc);
         latest->serial = ++serialCounter;
         worlds.push_back(latest);
@@ -371,12 +450,13 @@ struct Engine::Impl {
         shared = cfg.sharedTail;
         size_t N = (size_t)std::ceil(sc.length * sr);
         if (N <= (size_t)B * 2) throw std::runtime_error("scene length too short for the tail block size");
-        int P = (int)((N - B + B - 1) / B);
+        const int initialP = (int)((N - 1) / B);
+        const int P = (int)std::ceil(20. * sr / B); // retain input history for later longer worker IRs
         auto initConv = [&](TailConv& t, int channels) {
             t.B = B; t.P = P; t.R = channels; t.bins = B + 1;
             t.fdlRe.assign((size_t)P * t.bins, 0.f); t.fdlIm.assign((size_t)P * t.bins, 0.f);
             t.prevIn.assign(B, 0.f); t.inAcc.assign(B, 0.f);
-            for (auto& sl : t.slot) { sl.re.assign((size_t)channels * P * t.bins, 0.f); sl.im.assign((size_t)channels * P * t.bins, 0.f); }
+            for (auto& sl : t.slot) { sl.partitions = initialP; sl.re.assign((size_t)channels * initialP * t.bins, 0.f); sl.im.assign((size_t)channels * initialP * t.bins, 0.f); }
         };
         for (int s = 0; s < S; ++s) {
             auto sp = std::make_unique<Src>();
@@ -393,7 +473,7 @@ struct Engine::Impl {
             lateGuse.assign((size_t)R * S * 8, 0.f);
             lateY.assign((size_t)R * cfg.ctrlInterval, 0.f);
         }
-        srcHist.resize((size_t)S);
+        srcHist.resize((size_t)S); shapedHist.resize((size_t)S); sourceSeconds.assign((size_t)S,0.);
         histRays.assign((size_t)S, 0);
         histSparse.assign((size_t)S, false);
         size_t tr = nextPow2((size_t)B * 4);
@@ -424,12 +504,15 @@ struct Engine::Impl {
             if (!shared) {
                 Transducer st = srcs[s]->t;
                 std::vector<Transducer> rc = sc.receivers;
-                buildTail(s, latest->sc, st, rc, 0);
+                buildTail(s, latest->sc, st, rc, 0, latest->serial);
                 srcs[s]->tail.cur = 0;
                 srcs[s]->tail.curAtomic = 0;
             }
         }
         if (shared) sharedRebuild(true);
+        if (shared) for (auto& c : sconv) c->appliedScene = c->slot[0].sceneRevision;
+        else for (auto& s : srcs) s->tail.appliedScene = s->tail.slot[0].sceneRevision;
+        cfg.cancelled = {};
         if (cfg.tailThread) worker = std::thread([this] { if (shared) workerLoopShared(); else workerLoop(); });
     }
 
@@ -445,11 +528,32 @@ struct Engine::Impl {
         const auto serial = qualitySerial.load(std::memory_order_acquire);
         if (serial == workerQuality) return;
         cfg.tailRays = requestedRays.load(); cfg.adaptiveTail = requestedAdaptive.load();
+        for (int g=0;g<3;++g) cfg.decayMultipliers[g] = requestedDecay[g].load();
         workerQuality = serial;
     }
 
-    void publishDiagnostics(const TailHist& h, int used, int limit, bool sparse) {
-        auto d = std::make_shared<TailDiagnostics>(analyzeTail(h));
+    void publishDiagnostics(const TailHist& h, int used, int limit, bool sparse, const TailHist* result = nullptr, const std::vector<TailHist>* sourceResults = nullptr) {
+        auto adjusted = result ? *result : h;
+        if (!result) reshapeTailDecay(adjusted, cfg.decayMultipliers);
+        auto d = std::make_shared<TailDiagnostics>(analyzeTail(adjusted));
+        const auto physical = analyzeTail(h); d->physicalRT60 = physical.rt60;
+        if(sourceResults) {
+            for(const auto& source:*sourceResults) {
+                d->sourceEffectiveMultipliers.push_back(source.effectiveMultipliers);
+                d->sourceReshapeStatus.push_back(source.reshapeStatus);
+                for(int b=0;b<NB;++b)d->reshapeStatus[b]=std::max(d->reshapeStatus[b],source.reshapeStatus[b]);
+            }
+            for(int b=0;b<NB;++b) {
+                bool mixed=false;
+                for(const auto& source:*sourceResults)mixed|=source.reshapeStatus[b]!=sourceResults->front().reshapeStatus[b]
+                    ||std::abs(source.effectiveMultipliers[b]-sourceResults->front().effectiveMultipliers[b])>1e-9;
+                if(mixed)d->effectiveMultipliers[b]=physical.rt60[b]>0&&d->rt60[b]>0?d->rt60[b]/physical.rt60[b]:1.;
+            }
+        }
+        auto padded = h; padded.nBins = adjusted.nBins;
+        for (auto& r : padded.h) for (auto& b : r) b.resize(padded.nBins, 0.);
+        d->physicalDecayDb = analyzeTail(padded).decayDb;
+        d->multipliers = cfg.decayMultipliers;
         d->raysUsed = used; d->rayLimit = limit; d->shared = shared;
         d->baseRays = cfg.tailRays;
         d->adaptive = cfg.adaptiveTail; d->needsMoreRays = sparse;
@@ -459,33 +563,43 @@ struct Engine::Impl {
 
     void publishSourceDiagnostics() {
         for (int s = 0; s < S; ++s) if (srcHist[s].h.empty() || srcs[s]->lastQuality != workerQuality) return;
-        TailHist avg;
-        avg.nBins = srcHist[0].nBins; avg.binDur = srcHist[0].binDur;
-        avg.h.resize(R); avg.reliableEnd.resize(R);
-        for (int r = 0; r < R; ++r) {
-            avg.reliableEnd[r].fill(avg.nBins);
-            for (int b = 0; b < NB; ++b) {
-                avg.h[r][b].assign(avg.nBins, 0.0);
-                for (const auto& h : srcHist) {
-                    double sum = 0;
-                    for (size_t k = 0; k < avg.nBins; ++k) { avg.h[r][b][k] += h.h[r][b][k] / S; sum += h.h[r][b][k]; }
-                    if (sum > 0) avg.reliableEnd[r][b] = std::min(avg.reliableEnd[r][b], h.reliableEnd[r][b]);
+        auto average = [&](const std::vector<TailHist>& cache) {
+            TailHist avg; avg.binDur = cache[0].binDur;
+            for (const auto& h : cache) avg.nBins = std::max(avg.nBins,h.nBins);
+            avg.h.resize(R); avg.reliableEnd.resize(R);
+            avg.effectiveMultipliers=cache[0].effectiveMultipliers;avg.reshapeStatus=cache[0].reshapeStatus;
+            for (int r=0;r<R;++r) {
+                avg.reliableEnd[r].fill(avg.nBins);
+                for (int b=0;b<NB;++b) {
+                    avg.h[r][b].assign(avg.nBins,0.);
+                    for (const auto& h : cache) {
+                        double sum=0;
+                        for(size_t k=0;k<h.nBins;++k){avg.h[r][b][k]+=h.h[r][b][k]/S;sum+=h.h[r][b][k];}
+                        if(sum>0) avg.reliableEnd[r][b]=std::min(avg.reliableEnd[r][b],h.reliableEnd[r][b]);
+                    }
                 }
             }
-        }
+            return avg;
+        };
+        const auto avg = average(srcHist), shaped = average(shapedHist);
         int used = 0; bool sparse = false;
         for (int s = 0; s < S; ++s) { used += histRays[s]; sparse |= histSparse[s]; }
-        publishDiagnostics(avg, used, S * rayLimit(cfg.tailRays), sparse);
+        publishDiagnostics(avg, used, S * rayLimit(cfg.tailRays), sparse, &shaped, &shapedHist);
     }
 
-    void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx) {
+    void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx, uint64_t sceneRevision) {
         TailConv& t = srcs[s]->tail;
-        size_t N = (size_t)std::ceil(scn.length * sr);
         bool sparse = false;
-        TailHist h = traceTailAdaptive(scn, st, rc, cfg.erOrder, cfg.tailRays, rayLimit(cfg.tailRays), scn.seed, histRays[s], &sparse);
+        const auto cancelled = [&]{return !running || geomSerial.load()!=sceneRevision || qualitySerial.load()!=workerQuality || (cfg.cancelled && cfg.cancelled());};
+        TailHist h = traceTailAdaptive(scn, st, rc, cfg.erOrder, cfg.tailRays, rayLimit(cfg.tailRays), scn.seed, histRays[s], &sparse, cancelled);
         histSparse[s] = sparse;
         srcHist[s] = h;
         srcs[s]->lastQuality = workerQuality;
+        reshapeTailDecay(h, cfg.decayMultipliers);
+        shapedHist[s] = h;
+        const size_t N = cfg.decayMultipliers == std::array<double,3>{{1,1,1}} ? (size_t)std::ceil(scn.length * sr) : (size_t)std::ceil(h.nBins*h.binDur*sr);
+        sourceSeconds[s] = N/sr;
+        renderedSeconds.store(*std::max_element(sourceSeconds.begin(),sourceSeconds.end()));
         BandBuf buf(R);
         for (auto& r : buf)
             for (auto& b : r) b.assign(N, 0.0);
@@ -495,15 +609,20 @@ struct Engine::Impl {
         FFTf wf(2 * B);
         std::vector<cf> tmp(2 * B);
         Slot& sl = t.slot[slotIdx];
+        std::lock_guard<std::mutex> snapshotLock(irSnapshotMx);
+        sl.samples=N;
+        sl.revision = workerQuality; sl.sceneRevision = sceneRevision;
+        sl.partitions = std::min(t.P, (int)((N-1)/B));
+        sl.re.resize((size_t)R*sl.partitions*t.bins); sl.im.resize(sl.re.size());
         for (int r = 0; r < R; ++r)
-            for (int k = 0; k < t.P; ++k) {
+            for (int k = 0; k < sl.partitions; ++k) {
                 for (int i = 0; i < 2 * B; ++i) tmp[i] = {0, 0};
                 for (int i = 0; i < B; ++i) {
                     size_t idx = (size_t)(k + 1) * B + i;  // drop the first B samples: latency compensation
                     if (idx < N) tmp[i].re = ir[r][idx];
                 }
                 wf.run(tmp.data(), false);
-                size_t o = ((size_t)r * t.P + k) * t.bins;
+                size_t o = ((size_t)r * sl.partitions + k) * t.bins;
                 for (int b = 0; b < t.bins; ++b) { sl.re[o + b] = tmp[b].re; sl.im[o + b] = tmp[b].im; }
             }
         publishSourceDiagnostics();
@@ -537,13 +656,14 @@ struct Engine::Impl {
             if (all || dp > 0.05 || std::fabs(p[3] - sp.lastPose[3]) > 2 || params[S * 4 + 8 + s].load() != sp.lastPattern) dirty.push_back(s);
         }
         if (dirty.empty()) return false;
+        sharedBusy.store(true,std::memory_order_release);
         // Retain raw moments in the cache; assess confidence only after pooling.
         auto traceSource = [&](int s, int count) {
             Transducer st = srcs[(size_t)s]->t;
             st.pos = {poses[(size_t)s][0], poses[(size_t)s][1], poses[(size_t)s][2]};
             st.azimuthDeg = poses[(size_t)s][3];
             st.pattern = std::min(std::max(params[S * 4 + 8 + s].load(), 0.0), 1.0);
-            srcHist[(size_t)s] = traceTail(scn, st, rc, cfg.erOrder, count, scn.seed + 131 * s, false);
+            srcHist[(size_t)s] = traceTail(scn, st, rc, cfg.erOrder, count, scn.seed + 131 * s, false, [&]{return !running || geomSerial.load()!=wsnap->serial || qualitySerial.load()!=workerQuality || (cfg.cancelled && cfg.cancelled());});
             histRays[s] = count;
             srcs[(size_t)s]->lastPattern = st.pattern;
             for (int i = 0; i < 4; ++i) srcs[(size_t)s]->lastPose[i] = poses[(size_t)s][(size_t)i];
@@ -590,6 +710,7 @@ struct Engine::Impl {
                 Eavg[(size_t)r * NB + b] = e;
             }
         const int inactive = 1 - lateGcur.load();
+        std::lock_guard<std::mutex> snapshotLock(irSnapshotMx);
         std::vector<float>& G = lateGbuf[(size_t)inactive];
         for (int r = 0; r < R; ++r)
             for (int s = 0; s < S; ++s)
@@ -597,8 +718,12 @@ struct Engine::Impl {
                     const double ea = b < NB ? Eavg[(size_t)r * NB + b] : 0.0;
                     G[((size_t)r * S + s) * 8 + b] = (b < NB && ea > 0) ? (float)std::sqrt(E[((size_t)s * R + r) * NB + b] / ea) : 0.f;
                 }
+        // Apply AFTER computing the physical source/average gain ratio. Renormalizing
+        // against a boosted tail would cancel its onset-preserving decay change.
+        reshapeTailDecay(avg, cfg.decayMultipliers);
+        const size_t N = cfg.decayMultipliers == std::array<double,3>{{1,1,1}} ? (size_t)std::ceil(scn.length * sr) : (size_t)std::ceil(avg.nBins*avg.binDur*sr);
+        renderedSeconds.store(N/sr);
         // common IRs
-        const size_t N = (size_t)std::ceil(scn.length * sr);
         BandBuf buf((size_t)R);
         for (auto& r : buf)
             for (auto& b : r) b.assign(N, 0.0);
@@ -613,7 +738,11 @@ struct Engine::Impl {
             const int w = initial ? 0 : (t.curAtomic.load() == 0 ? 1 : 0);
             wslot[(size_t)r] = w;
             Slot& sl = t.slot[w];
-            for (int k = 0; k < t.P; ++k) {
+            sl.samples=N;
+            sl.revision = workerQuality; sl.sceneRevision = wsnap->serial;
+            sl.partitions = std::min(t.P, (int)((N-1)/B));
+            sl.re.resize((size_t)sl.partitions*t.bins); sl.im.resize(sl.re.size());
+            for (int k = 0; k < sl.partitions; ++k) {
                 for (int i = 0; i < 2 * B; ++i) tmp[(size_t)i] = {0, 0};
                 for (int i = 0; i < B; ++i) {
                     const size_t idx = (size_t)(k + 1) * B + i;  // drop the first B samples: latency compensation
@@ -636,6 +765,7 @@ struct Engine::Impl {
         for (int i = 0; i < 4; ++i) sLastLst[i] = lst[i];
         sLastGeom = wsnap->serial;
         sLastQuality = workerQuality;
+        sharedBusy.store(false,std::memory_order_release);
         ++refreshCount;
         return true;
     }
@@ -655,7 +785,8 @@ struct Engine::Impl {
             if (busy) continue;
             const auto now = std::chrono::steady_clock::now();
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() < cfg.tailRefreshMs) continue;
-            if (sharedRebuild(false)) last = std::chrono::steady_clock::now();
+            try {if (sharedRebuild(false)) last = std::chrono::steady_clock::now();}
+            catch(const std::runtime_error&) {sharedBusy=false;sLastGeom=0;for(auto& sp:srcs)sp->lastGeom=0;}
         }
     }
 
@@ -699,19 +830,22 @@ struct Engine::Impl {
                     std::lock_guard<std::mutex> lk(worldMx);
                     wsnap = latest;
                 }
-                buildTail(s, wsnap->sc, st, rc, w);
+                sp.tail.workerBusy.store(true,std::memory_order_release);
+                try {buildTail(s, wsnap->sc, st, rc, w, wsnap->serial);}
+                catch(const std::runtime_error&) {sp.tail.workerBusy=false;sp.lastGeom=0;continue;}
                 for (int i = 0; i < 4; ++i) sp.lastPose[i] = pose[i];
                 for (int i = 0; i < 4; ++i) sp.lastLst[i] = lst[i];
                 sp.lastGeom = wsnap->serial;
                 last[s] = std::chrono::steady_clock::now();
                 sp.tail.pending.store(w);
+                sp.tail.workerBusy.store(false,std::memory_order_release);
                 rr = (s + 1) % S;
                 break;
             }
         }
     }
     // Publishes new walls/materials/floor/ceiling/height (sources, receivers and length stay). Any thread.
-    bool setScene(const Scene& ns) {
+    bool setScene(const Scene& ns, double absorption, const std::function<bool()>& cancelled) {
         if ((int)ns.walls.size() > maxWalls || ns.floorMat < 0 || ns.floorMat >= (int)ns.mats.size() || ns.ceilMat >= (int)ns.mats.size()) return false;
         for (auto& w : ns.walls)
             if (w.mat < 0 || w.mat >= (int)ns.mats.size()) return false;
@@ -727,12 +861,15 @@ struct Engine::Impl {
         n.tempC = ns.tempC; n.humidity = ns.humidity; n.clutter = ns.clutter;
         n.floorZones = ns.floorZones; n.ceilZones = ns.ceilZones;
         n.roughness = ns.roughness; n.roughSeed = ns.roughSeed; n.diffraction = ns.diffraction;
-        auto w = std::make_shared<World>(n, maxWalls);
+        n.length = ns.length;
+        n.length = cachedTailSeconds(n, cfg.erOrder, absorption, cancelled);
+        auto w = std::make_shared<World>(n, maxWalls, absorption);
         {
             std::lock_guard<std::mutex> lk(worldMx);
             w->serial = ++serialCounter;
             worlds.push_back(w);
             latest = w;
+            currentAbsorption = absorption;
             std::atomic_store(&analysisScene, std::shared_ptr<const Scene>(w, &w->sc));
         }
         pendingWorld.store(w.get(), std::memory_order_release);
@@ -846,7 +983,7 @@ struct Engine::Impl {
         // or only goes through walls that take a good part of it (doors, glass, body panels).
         auto addDiffracted = [&](bool needClear) {
             DiffPath dp;
-            if (!diffractedPath(G(), src.pos, rc.pos, c, dp, needClear)) return;
+            if (!diffractedPath(G(), src.pos, rc.pos, c, dp, needClear, &diffractionScratch)) return;
             double L = dp.length;
             for (int it = 0; it < 3; ++it) {  // retarded time, as for the direct path
                 const double u = L / c * sr / cfg.ctrlInterval;
@@ -962,9 +1099,19 @@ struct Engine::Impl {
         }
         tailGa = tailGb;
         tailGb += ((float)std::pow(10.0, std::min(std::max(params[S * 5 + 8].load(std::memory_order_relaxed), -60.0), 12.0) / 20.0) - tailGb) * 0.3f;
-        dopK = std::min(std::max(params[S * 4 + 7].load(std::memory_order_relaxed), 0.0), 2.0);
+        const double targetDoppler=std::min(std::max(params[S * 4 + 7].load(std::memory_order_relaxed), 0.0), 2.0);
+        // A mode change also changes the reference-delay mixture. Ease that
+        // coefficient in stream time, rather than adding a sudden phase slew.
+        dopK=firstSolve?targetDoppler:dopK+(targetDoppler-dopK)*(1.-std::exp(-cfg.ctrlInterval/(.02*sr)));
+        if(std::abs(dopK-targetDoppler)<1e-9)dopK=targetDoppler;
         dopA = 1.0 - std::exp(-(double)cfg.ctrlInterval / sr / 10.0);
-        if (earlyDb != lastEarlyDb) { earlyG = std::pow(10.0, earlyDb / 20.0); lastEarlyDb = earlyDb; }
+        const double targetEarly=std::pow(10.0,earlyDb/20.0);
+        if(earlyG!=targetEarly) {
+            earlyG=firstSolve?targetEarly:earlyG+(targetEarly-earlyG)*(1.-std::exp(-cfg.ctrlInterval/(.02*sr)));
+            if(std::abs(earlyG-targetEarly)<1e-9)earlyG=targetEarly;
+            lmoved=true;
+        }
+        lastEarlyDb=earlyDb;
         for (int i = 0; i < 4; ++i) lmoved |= lst[i] != lastListener[i];
         if (lmoved) {
             listenerReceivers(lst, rcvBase);
@@ -1048,6 +1195,20 @@ struct Engine::Impl {
         }
     }
 
+    static float foldFrame(const float* g, const float* fr) {
+        return g[0]*fr[0]+g[1]*fr[1]+g[2]*fr[2]+g[3]*fr[3]+g[4]*fr[4]+g[5]*fr[5]+g[6]*fr[6];
+    }
+
+    template<bool dual>
+    void foldFrames(const float* g0, const float* g1, const float* ring, int64_t begin, int count, float* s0, float* s1) const {
+        int u=0;
+        for(;u<count;++u) {
+            const float* fr=ring+(((size_t)(begin+u)&ringMask)*8);
+            s0[u]=foldFrame(g0,fr);
+            if constexpr(dual)s1[u]=foldFrame(g1,fr);
+        }
+    }
+
     // Direct-path taps (key 0) accumulate into `out`, reflections into `early`.
     void renderTaps(int s, int r, int ph, int m, float* out, float* early) {
         Src& sp = *srcs[s];
@@ -1063,9 +1224,6 @@ struct Engine::Impl {
             // The band gains do not depend on the interpolation phase, so each frame is first folded into ONE value
             // (7 products), and the 4-point interpolation then runs on those values: ~3x cheaper than weighting
             // all 7 bands of 4 frames per output sample.
-            auto fold = [](const float* g, const float* fr) {
-                return g[0] * fr[0] + g[1] * fr[1] + g[2] * fr[2] + g[3] * fr[3] + g[4] * fr[4] + g[5] * fr[5] + g[6] * fr[6];
-            };
             if (stat) {
                 // constant delay and gains for the whole period: fractional position and weights are constant
                 const double pos0 = (double)(int64_t)gcount - t.d1;
@@ -1073,7 +1231,7 @@ struct Engine::Impl {
                 const float f = (float)(pos0 - (double)i00), f2 = f * f, f3 = f2 * f;
                 const float w0 = -0.5f * f3 + f2 - 0.5f * f, w1 = 1.5f * f3 - 2.5f * f2 + 1.f, w2 = -1.5f * f3 + 2.f * f2 + 0.5f * f, w3 = 0.5f * f3 - 0.5f * f2;
                 float* sb = sbA.data();
-                for (int u = 0; u < m + 3; ++u) sb[u] = fold(t.g1, ring + (((size_t)(i00 - 1 + u)) & ringMask) * 8);
+                foldFrames<false>(t.g1,nullptr,ring,i00-1,m+3,sb,nullptr);
                 for (int j = 0; j < m; ++j) dst[j] += w0 * sb[j] + w1 * sb[j + 1] + w2 * sb[j + 2] + w3 * sb[j + 3];
                 continue;
             }
@@ -1087,12 +1245,37 @@ struct Engine::Impl {
                 if (cnt > (int)sbA.size()) continue;  // cannot happen (delay steps are limited), but never overrun
                 float* s0 = sbA.data();
                 float* s1 = sbB.data();
-                for (int u = 0; u < cnt; ++u) {
-                    const float* fr = ring + (((size_t)(iLo + u)) & ringMask) * 8;
-                    s0[u] = fold(t.g0, fr);
-                    s1[u] = fold(t.g1, fr);
+                foldFrames<true>(t.g0,t.g1,ring,iLo,cnt,s0,s1);
+                int j=0;
+               #if VERB_REQUIRE_AVX2
+                const auto d0=_mm256_set1_pd(t.d0), dd=_mm256_set1_pd(t.d1-t.d0);
+                const auto origin=_mm256_set1_pd((double)(iLo+1));
+                for(;j+4<=m;j+=4) {
+                    const auto tt=_mm_mul_ps(_mm_setr_ps((float)(ph+j+1),(float)(ph+j+2),(float)(ph+j+3),(float)(ph+j+4)),_mm_set1_ps(invCtrl));
+                    const auto time=_mm256_setr_pd((double)(int64_t)(gcount+j),(double)(int64_t)(gcount+j+1),(double)(int64_t)(gcount+j+2),(double)(int64_t)(gcount+j+3));
+                    const auto pos=_mm256_sub_pd(time,_mm256_add_pd(d0,_mm256_mul_pd(dd,_mm256_cvtps_pd(tt))));
+                    const auto whole=_mm256_floor_pd(pos);
+                    const auto indices=_mm256_cvtpd_epi32(_mm256_sub_pd(whole,origin));
+                    const auto f=_mm256_cvtpd_ps(_mm256_sub_pd(pos,whole));
+                    const auto f2=_mm_mul_ps(f,f),f3=_mm_mul_ps(f2,f);
+                    const auto w0=_mm_sub_ps(_mm_add_ps(_mm_mul_ps(_mm_set1_ps(-.5f),f3),f2),_mm_mul_ps(_mm_set1_ps(.5f),f));
+                    const auto w1=_mm_add_ps(_mm_sub_ps(_mm_mul_ps(_mm_set1_ps(1.5f),f3),_mm_mul_ps(_mm_set1_ps(2.5f),f2)),_mm_set1_ps(1.f));
+                    const auto w2=_mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_set1_ps(-1.5f),f3),_mm_mul_ps(_mm_set1_ps(2.f),f2)),_mm_mul_ps(_mm_set1_ps(.5f),f));
+                    const auto w3=_mm_sub_ps(_mm_mul_ps(_mm_set1_ps(.5f),f3),_mm_mul_ps(_mm_set1_ps(.5f),f2));
+                    const int index=_mm_cvtsi128_si32(indices);
+                    const bool contiguous=_mm_movemask_epi8(_mm_cmpeq_epi32(indices,_mm_add_epi32(_mm_set1_epi32(index),_mm_setr_epi32(0,1,2,3))))==0xffff;
+                    auto interpolate=[&](const float* values) {
+                        auto read=[&](int offset) {return contiguous?_mm_loadu_ps(values+index+offset):_mm_i32gather_ps(values+offset,indices,4);};
+                        auto a=_mm_add_ps(_mm_mul_ps(w0,read(0)),_mm_mul_ps(w1,read(1)));
+                        a=_mm_add_ps(a,_mm_mul_ps(w2,read(2)));
+                        return _mm_add_ps(a,_mm_mul_ps(w3,read(3)));
+                    };
+                    const auto a=interpolate(s0),b=interpolate(s1);
+                    const auto value=_mm_add_ps(a,_mm_mul_ps(tt,_mm_sub_ps(b,a)));
+                    _mm_storeu_ps(dst+j,_mm_add_ps(_mm_loadu_ps(dst+j),value));
                 }
-                for (int j = 0; j < m; ++j) {
+               #endif
+                for (; j < m; ++j) {
                     const float tt = (ph + j + 1) * invCtrl;
                     const double pos = (double)(int64_t)(gcount + j) - (t.d0 + (t.d1 - t.d0) * tt);
                     const int64_t i0 = (int64_t)std::floor(pos);
@@ -1111,15 +1294,28 @@ struct Engine::Impl {
     void accumulate(const TailConv& t, const Slot& sl, int r, float* ar, float* ai) const {
         std::fill(ar, ar + t.bins, 0.f);
         std::fill(ai, ai + t.bins, 0.f);
-        const size_t base = (size_t)r * t.P * t.bins;
-        for (int k = 0; k < t.P; ++k) {
+        const size_t base = (size_t)r * sl.partitions * t.bins;
+        for (int k = 0; k < sl.partitions; ++k) {
             int e = t.head - k;
             if (e < 0) e += t.P;
             const float* xr = &t.fdlRe[(size_t)e * t.bins];
             const float* xi = &t.fdlIm[(size_t)e * t.bins];
             const float* hr = &sl.re[base + (size_t)k * t.bins];
             const float* hi = &sl.im[base + (size_t)k * t.bins];
-            for (int b = 0; b < t.bins; ++b) {
+            int b = 0;
+           #if VERB_REQUIRE_AVX2
+            // Independent frequency bins; keep partition order and separate mul/add
+            // rounding exactly as in the scalar path (no FMA reassociation).
+            for (; b + 8 <= t.bins; b += 8) {
+                const auto xre=_mm256_loadu_ps(xr+b), xim=_mm256_loadu_ps(xi+b);
+                const auto hre=_mm256_loadu_ps(hr+b), him=_mm256_loadu_ps(hi+b);
+                const auto re=_mm256_sub_ps(_mm256_mul_ps(xre,hre),_mm256_mul_ps(xim,him));
+                const auto im=_mm256_add_ps(_mm256_mul_ps(xre,him),_mm256_mul_ps(xim,hre));
+                _mm256_storeu_ps(ar+b,_mm256_add_ps(_mm256_loadu_ps(ar+b),re));
+                _mm256_storeu_ps(ai+b,_mm256_add_ps(_mm256_loadu_ps(ai+b),im));
+            }
+           #endif
+            for (; b < t.bins; ++b) {
                 ar[b] += xr[b] * hr[b] - xi[b] * hi[b];
                 ai[b] += xr[b] * hi[b] + xi[b] * hr[b];
             }
@@ -1162,6 +1358,8 @@ struct Engine::Impl {
         }
         if (fade) {
             t.curAtomic.store(t.cur);
+            t.appliedRevision.store(t.slot[t.cur].revision,std::memory_order_release);
+            t.appliedScene.store(t.slot[t.cur].sceneRevision,std::memory_order_release);
             t.pending.store(-1);
         }
     }
@@ -1243,6 +1441,7 @@ struct Engine::Impl {
             if (ph + m == ctrl) endPeriod();
             if (gcount % B == 0) tailBlock();
         }
+        publishedDiffractionMisses.store(diffractionScratch.capacityMisses,std::memory_order_relaxed);
     }
 };
 
@@ -1251,11 +1450,12 @@ Engine::~Engine() = default;
 int Engine::numSources() const { return p_->S; }
 int Engine::numReceivers() const { return p_->R; }
 double Engine::sampleRate() const { return p_->sr; }
-double Engine::tailSeconds() const { return p_->sc.length; }
+double Engine::tailSeconds() const { return p_->renderedSeconds.load(); }
 void Engine::setSourcePosition(int s, double x, double y, double z) {
     p_->params[s * 4 + 0].store(x); p_->params[s * 4 + 1].store(y); p_->params[s * 4 + 2].store(z);
 }
-bool Engine::setScene(const Scene& s) { return p_->setScene(s); }
+bool Engine::setScene(const Scene& s) { return p_->setScene(s,p_->currentAbsorption.load(),{}); }
+bool Engine::setScene(const Scene& s, double absorption, const std::function<bool()>& cancelled) { return p_->setScene(s,absorption,cancelled); }
 void Engine::setReceiverSpread(double m) { p_->params[p_->S * 4 + 4].store(m); }
 void Engine::setEarlyLevel(double dB) { p_->params[p_->S * 4 + 5].store(dB); }
 void Engine::setEarlyDiffusion(double a) { p_->params[p_->S * 4 + 6].store(a); }
@@ -1267,6 +1467,14 @@ void Engine::setTailQuality(int rays, bool adaptive) {
     p_->requestedAdaptive.store(adaptive);
     p_->qualitySerial.fetch_add(1, std::memory_order_release);
 }
+void Engine::setDecayMultipliers(double low, double mid, double high) {
+    const double v[] = {low,mid,high}; bool changed = false;
+    for (int g=0;g<3;++g) {
+        const double x = clampTo(v[g],.3,3.,1.);
+        if (p_->requestedDecay[g].exchange(x, std::memory_order_relaxed) != x) changed = true;
+    }
+    if (changed) p_->qualitySerial.fetch_add(1,std::memory_order_release);
+}
 void Engine::setDopplerStrength(double k) { p_->params[p_->S * 4 + 7].store(k); }
 void Engine::setSourcePattern(int s, double p) { if (s >= 0 && s < p_->S) p_->params[p_->S * 4 + 8 + s].store(p); }
 void Engine::setSourceAzimuth(int s, double deg) { p_->params[s * 4 + 3].store(deg); }
@@ -1277,10 +1485,55 @@ void Engine::setListener(double x, double y, double z, double yaw) {
 void Engine::process(const float* const* in, float* const* out, int n) { p_->process(in, out, n); }
 int Engine::activeTaps() const { return p_->tapsActive; }
 int Engine::tailRefreshCount() const { return p_->refreshCount.load(); }
+uint64_t Engine::diffractionCapacityMisses() const { return p_->publishedDiffractionMisses.load(std::memory_order_relaxed); }
+bool Engine::tailIsCurrent() const {
+    const auto revision = p_->qualitySerial.load(std::memory_order_acquire);
+    const auto scene = p_->geomSerial.load(std::memory_order_acquire);
+    if (p_->shared) {
+        if (p_->sharedBusy.load(std::memory_order_acquire)) return false;
+        for (const auto& c : p_->sconv) if (c->pending.load()>=0 || c->appliedRevision.load(std::memory_order_acquire)!=revision || c->appliedScene.load(std::memory_order_acquire)!=scene) return false;
+    } else for (const auto& s : p_->srcs) if (s->tail.workerBusy.load(std::memory_order_acquire) || s->tail.pending.load()>=0 || s->tail.appliedRevision.load(std::memory_order_acquire)!=revision || s->tail.appliedScene.load(std::memory_order_acquire)!=scene) return false;
+    return true;
+}
 std::shared_ptr<const TailDiagnostics> Engine::tailDiagnostics() const {
     std::lock_guard<std::mutex> lock(p_->diagnosticsMx);
     return p_->diagnostics;
 }
 std::shared_ptr<const Scene> Engine::sceneSnapshot() const { return std::atomic_load(&p_->analysisScene); }
+bool Engine::copyTailForOffline(const Engine& reference) {
+    auto& dst=*p_;auto& src=*reference.p_;
+    if(&dst==&src||dst.cfg.tailThread||dst.S!=src.S||dst.R!=src.R||dst.sr!=src.sr||dst.B!=src.B||dst.shared!=src.shared)return false;
+    std::lock_guard<std::mutex> lock(src.irSnapshotMx);
+    // Retain the audible immutable world as well: reconstructing seeded furniture
+    // from rounded project coordinates must not move an obstacle in an export.
+    std::shared_ptr<World> audibleWorld;
+    {
+        std::lock_guard<std::mutex> worldLock(src.worldMx);
+        const auto audibleSerial=src.ackSerial.load(std::memory_order_acquire);
+        for(const auto& world:src.worlds)if(world->serial==audibleSerial){audibleWorld=world;break;}
+    }
+    if(!audibleWorld)return false;
+    dst.worlds.push_back(audibleWorld);dst.latest=audibleWorld;
+    dst.geomSerial=audibleWorld->serial;dst.serialCounter=std::max(dst.serialCounter,audibleWorld->serial);
+    std::atomic_store(&dst.analysisScene,std::shared_ptr<const Scene>(audibleWorld,&audibleWorld->sc));
+    dst.pendingWorld.store(audibleWorld.get(),std::memory_order_release);
+    size_t longest=0;
+    auto copy=[&](TailConv& to,const TailConv& from) {
+        const auto& active=from.slot[from.curAtomic.load(std::memory_order_acquire)];
+        auto& target=to.slot[to.cur];target=active;
+        target.revision=dst.qualitySerial.load();target.sceneRevision=dst.geomSerial.load();
+        to.pending=-1;to.appliedRevision=target.revision;to.appliedScene=target.sceneRevision;
+        longest=std::max(longest,target.samples);
+    };
+    if(dst.shared) {
+        for(int r=0;r<dst.R;++r)copy(*dst.sconv[r],*src.sconv[r]);
+        // Gain buffers are immutable to audio and protected from worker reuse here.
+        const auto& gain=src.lateGbuf[src.lateGcur.load(std::memory_order_acquire)];
+        dst.lateGbuf[0]=dst.lateGbuf[1]=dst.lateGuse=gain;
+        dst.lateGcur=0;dst.lateGtarget=dst.lateGbuf[0].data();dst.lateGseen=dst.lateGserial.load();
+    } else for(int s=0;s<dst.S;++s)copy(dst.srcs[s]->tail,src.srcs[s]->tail);
+    dst.renderedSeconds.store(longest/dst.sr);
+    return true;
+}
 
 }  // namespace verb

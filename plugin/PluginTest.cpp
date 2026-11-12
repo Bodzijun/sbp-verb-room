@@ -132,9 +132,17 @@ static void testTailControls() {
           "LFE is excluded from Tail Solo and included at unity in Direct Solo");
 }
 
+#include "Stage2Test.h"
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
+    if (std::getenv("VERB_STAGE2_ONLY")) return testStage2Processor();
+    if(std::getenv("VERB_EXPORT_LIVE_ONLY")) {
+        VerbProcessor p;p.setPlayConfigDetails(2,2,48000,256);p.prepareToPlay(48000,256);
+        check(waitReady(p,90),"export test processor loads");stage2ExportAndLoader(p);return fails?1:0;
+    }
+    if (std::getenv("VERB_STAGE2_CAPTURE")) return captureStage2Legacy();
     if (std::getenv("VERB_ENERGY_ONLY")) {
         VerbProcessor p; p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
         check(waitReady(p, 90), "energy test processor starts");
@@ -235,8 +243,7 @@ int main() {
     }
     if (std::getenv("VERB_SPATIAL_EDITOR_ONLY")) {
         VerbProcessor p; p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
-        check(waitReady(p, 90), "positioned dry test processor starts");
-        const auto originalRoom = p.getDisplayScene();
+        check(waitReady(p, 90), "positioned dry test processor starts");        const auto originalRoom = p.getDisplayScene();
         auto freeField = originalRoom;
         freeField.walls.clear(); freeField.floorZones.clear(); freeField.ceilZones.clear(); freeField.ceilMat = -1;
         freeField.mats[(size_t)freeField.floorMat].alpha.fill(1); freeField.clutter.count = 0; freeField.roughness = 0;
@@ -428,6 +435,179 @@ int main() {
                 if (out.openedOk()) { out.setPosition(0); out.truncate(); png.writeImageToStream(image, out); }
                 editor->showPage(1, -1);
             }
+            {   // 3D camera: unit maths (Camera3D.h) and the gestures of the editor's 3D view
+                using verbp::Cam3D;
+                auto mk = [](double yaw, double pitch) {
+                    Cam3D c; c.yaw = yaw; c.pitch = pitch; c.setScene({0, 0, 1.5}, 10.0); c.setViewport(500, 350, 1000, 700); return c; };
+                auto dist = [](const Cam3D::Pt& a, double x, double y) { return std::hypot(a.x - x, a.y - y); };
+                bool panOk = true, panDepthOk = true, zoomOk = true, fitOk = true, fitTight = true, selOk = true, centreOk = true;
+                for (double yaw : {-0.75, 0.3, 2.4, -3.0}) for (double pitch : {-0.2, 0.5, 1.2, 1.5}) {
+                    Cam3D c = mk(yaw, pitch);
+                    const auto r = c.right(), u = c.up(), f = c.forward();
+                    const Cam3D::Vec P{c.target.x + 3 * r.x + 2 * u.x, c.target.y + 3 * r.y + 2 * u.y, c.target.z + 3 * r.z + 2 * u.z};  // on the target plane
+                    const Cam3D::Vec Q{c.target.x + 4 * f.x + 2 * r.x, c.target.y + 4 * f.y + 2 * r.y, c.target.z + 4 * f.z + 2 * r.z};  // 4 m behind it
+                    const auto p0 = c.project(P), q0 = c.project(Q);
+                    Cam3D a = c; a.pan(120, -45, 0);
+                    panOk = panOk && dist(a.project(P), p0.x + 120, p0.y - 45) < 1e-6 && !a.followScene;
+                    Cam3D b = c; b.pan(-80, 33, q0.depth);
+                    panDepthOk = panDepthOk && dist(b.project(Q), q0.x - 80, q0.y + 33) < 1e-6;
+                    // zoom to the cursor: the target-plane point under the pointer stays under it
+                    Cam3D z = c; const double px = 740, py = 210;
+                    const auto W = z.unprojectTargetPlane(px, py);
+                    z.zoomAt(1.7, px, py);
+                    zoomOk = zoomOk && dist(z.project(W), px, py) < 1e-6 && std::abs(z.zoom - 1.7) < 1e-12;
+                    z.zoomAt(1.0 / 1.7, px, py);
+                    zoomOk = zoomOk && dist(z.project(W), px, py) < 1e-6 && std::abs(z.zoom - 1.0) < 1e-9;
+                    // frame all: long thin room and a cube, corners of the bounding box
+                    for (int shape = 0; shape < 2; ++shape) {
+                        const double sx = shape ? 60 : 12, sy = shape ? 8 : 12, sz = shape ? 4 : 12;
+                        Cam3D fa = mk(yaw, pitch); fa.setScene({0.5 * sx, 0.5 * sy, 0.5 * sz}, 0.5 * std::sqrt(sx * sx + sy * sy + sz * sz) + 0.5);
+                        fa.pan(300, 200); fa.zoom = 6.0;   // somewhere far away and zoomed in
+                        std::vector<Cam3D::Vec> corners;
+                        for (double x : {0.0, sx}) for (double y : {0.0, sy}) for (double zz : {0.0, sz}) corners.push_back({x, y, zz});
+                        fa.frameAll(corners);
+                        double worst = 0;
+                        for (auto& cpt : corners) {
+                            const auto q = fa.project(cpt);
+                            fitOk = fitOk && fa.inside(q, 0.01);
+                            worst = std::max({worst, std::abs(q.x - 500) / 500.0, std::abs(q.y - 350) / 350.0});
+                        }
+                        fitTight = fitTight && worst > 0.89 && worst < 0.93;   // fills the limiting dimension up to the 8 % margin
+                    }
+                    // frame a selection (a 3 m cube around an object)
+                    Cam3D fs = c; std::vector<Cam3D::Vec> cube;
+                    for (double dx : {-1.5, 1.5}) for (double dy : {-1.5, 1.5}) for (double dz : {-1.5, 1.5}) cube.push_back({8 + dx, -4 + dy, 2 + dz});
+                    fs.frame(cube);
+                    double mnx = 1e9, mxx = -1e9, mny = 1e9, mxy = -1e9;
+                    for (auto& cpt : cube) { const auto q = fs.project(cpt); selOk = selOk && fs.inside(q, 0.01); mnx = std::min(mnx, q.x); mxx = std::max(mxx, q.x); mny = std::min(mny, q.y); mxy = std::max(mxy, q.y); }
+                    selOk = selOk && std::abs(0.5 * (mnx + mxx) - 500) < 0.5 && std::abs(0.5 * (mny + mxy) - 350) < 0.5 && fs.zoom > 3.0;
+                    Cam3D cc = c; cc.centreOn({8, -4, 2});
+                    centreOk = centreOk && dist(cc.project({8, -4, 2}), 500, 350) < 1e-9;
+                }
+                check(panOk, "3D pan: a point on the target plane follows the pointer exactly (16 camera angles)");
+                check(panDepthOk, "3D pan: a grabbed point at another depth follows the pointer exactly too");
+                check(zoomOk, "3D zoom to the cursor keeps the point under the pointer; zoom in then out restores the scale");
+                check(fitOk && fitTight, "frame all fits the corners of a long hall and of a cube in the viewport, filling it to the margin");
+                check(selOk, "frame selection centres and fits the selected object's box");
+                check(centreOk, "centre-on puts the picked point in the middle of the view");
+                Cam3D lim = mk(-0.75, 0.5);
+                for (int i = 0; i < 30; ++i) lim.zoomAt(2.0, 700, 100);
+                const double hi = lim.zoom;
+                for (int i = 0; i < 60; ++i) lim.zoomAt(0.5, 700, 100);
+                check(hi == Cam3D::kMaxZoom && lim.zoom == Cam3D::kMinZoom, "3D zoom is limited to 0.25 ... 64 times the fitted scale");
+                Cam3D idle = mk(-0.75, 0.5); idle.zoomAt(1.3, 500, 350);
+                check(idle.followScene, "zooming at the centre keeps the camera following the scene");
+
+                // gestures in the editor's 3D view
+                const auto before3D = editor->testCamera();
+                p.setNavigationLocked(false);
+                editor->setSize(1160, 760); editor->showPlane(3); snapshot();
+                check(editor->testHasFrameButtons(), "the 3D view shows its Frame all / Frame sel. buttons");
+                const auto cam0 = editor->testCamera();
+                check(cam0.followScene && cam0.zoom == 1.0 && cam0.yaw == before3D.yaw && cam0.pitch == before3D.pitch, "a fresh 3D view starts at the default camera");
+                const auto centre = editor->testCanvas().getCentre().toFloat();
+                auto at = [&](juce::Point<float> pos, bool& hit) { verbp::Cam3D::Vec w{}; hit = editor->testPick3D(pos, w); if (!hit) w = editor->testCamera().target; return w; };
+                auto screenOf = [&](verbp::Cam3D::Vec w) { const auto q = editor->testCamera().project(w); return juce::Point<float>((float)q.x, (float)q.y); };
+                auto drag = [&](int mods, juce::Point<float> from, juce::Point<float> by) {
+                    editor->mouseDown(event(from, from, mods, false)); editor->mouseDrag(event(from + by, from, mods, true)); editor->mouseUp(event(from + by, from, 0, true)); snapshot(); };
+                for (int variant = 0; variant < 2; ++variant) {   // 0: middle button, 1: Shift + left button
+                    const int mods = variant == 0 ? juce::ModifierKeys::middleButtonModifier : (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier);
+                    bool hit = false; const auto grabbed = at(centre, hit); const auto s0 = screenOf(grabbed);
+                    const auto yaw0 = editor->testCamera().yaw, tx0 = editor->testCamera().target.x;
+                    drag(mods, centre, {70.f, -40.f});
+                    check(screenOf(grabbed).getDistanceFrom(s0 + juce::Point<float>(70.f, -40.f)) < 0.05f && editor->testCamera().target.x != tx0 && editor->testCamera().yaw == yaw0,
+                        variant == 0 ? "3D middle-button drag pans: the grabbed point follows the pointer, no orbit" : "3D Shift + left drag pans: the grabbed point follows the pointer, no orbit");
+                }
+                {   // zoomed in far, both ends of the scene can still be brought into view (the reported problem)
+                    editor->testFrameAll();
+                    for (int i = 0; i < 9; ++i) editor->mouseWheelMove(event(centre, centre, 0, false), juce::MouseWheelDetails{0.f, 0.1f, false, false, false});
+                    check(editor->testCamera().zoom > 2.5, "3D wheel zooms in");
+                    const auto sc = p.getDisplayScene(); double x0 = 1e9, x1 = -1e9;
+                    for (auto& w : sc.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); }
+                    for (double endX : {x0, x1}) {
+                        const verbp::Cam3D::Vec end{endX, 0.5 * (sc.walls[0].ay + sc.walls[0].by), 1.0};
+                        int tries = 0;
+                        while (tries++ < 8 && screenOf(end).getDistanceFrom(centre) > 25.f) {
+                            const auto off = centre - screenOf(end);
+                            const auto from = juce::Point<float>(centre.x, editor->testCanvas().getBottom() - 60.f);   // grab empty-ish space
+                            drag(juce::ModifierKeys::middleButtonModifier, from, off);
+                        }
+                        check(screenOf(end).getDistanceFrom(centre) <= 25.f, endX == x0 ? "zoomed in, the left end of the scene can be panned to the middle of the view" : "zoomed in, the right end of the scene can be panned to the middle of the view");
+                    }
+                }
+                {   // wheel: the point under the pointer stays under it
+                    editor->testFrameAll();
+                    const auto pointer = centre + juce::Point<float>(120.f, -50.f);
+                    verbp::Cam3D probe = editor->testCamera();
+                    const auto Wp = probe.unprojectTargetPlane(pointer.x, pointer.y);
+                    editor->mouseWheelMove(event(pointer, pointer, 0, false), juce::MouseWheelDetails{0.f, 0.1f, false, false, false});
+                    check(editor->testCamera().zoom > probe.zoom && screenOf({Wp.x, Wp.y, Wp.z}).getDistanceFrom(pointer) < 0.05f, "3D wheel zooms towards the cursor");
+                }
+                {   // orbit still works with the left button and is still allowed under Lock pan; pan and zoom rules
+                    const auto y0 = editor->testCamera().yaw;
+                    drag(juce::ModifierKeys::leftButtonModifier, centre, {50.f, 0.f});
+                    check(std::abs(editor->testCamera().yaw - (y0 - 50 * 0.008)) < 1e-9, "3D left drag still orbits (yaw -0.008 rad per pixel)");
+                    p.setNavigationLocked(true);
+                    const auto t1 = editor->testCamera().target; const double y1 = editor->testCamera().yaw;
+                    drag(juce::ModifierKeys::middleButtonModifier, centre, {60.f, 30.f});
+                    drag(juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier, centre, {60.f, 30.f});
+                    check(editor->testCamera().target.x == t1.x && editor->testCamera().target.y == t1.y && editor->testCamera().target.z == t1.z && editor->testCamera().yaw == y1,
+                        "Lock pan blocks the 3D pan (middle and Shift drag)");
+                    drag(juce::ModifierKeys::leftButtonModifier, centre, {20.f, 0.f});
+                    editor->mouseWheelMove(event(centre, centre, 0, false), juce::MouseWheelDetails{0.f, 0.1f, false, false, false});
+                    check(editor->testCamera().yaw != y1 && editor->testCamera().zoom > 1.0, "orbit and zoom stay available under Lock pan");
+                    p.setNavigationLocked(false);
+                }
+                {   // double-click: on an object it centres the orbit on it; on empty space it frames the whole scene
+                    editor->testFrameAll();
+                    const verbp::Cam3D::Vec src{(double)p.apvts.getRawParameterValue("s1x")->load(), (double)p.apvts.getRawParameterValue("s1y")->load(), (double)p.apvts.getRawParameterValue("s1z")->load()};
+                    const auto sp = screenOf(src);
+                    editor->mouseDoubleClick(event(sp, sp, juce::ModifierKeys::leftButtonModifier, false)); snapshot();
+                    const auto t = editor->testCamera().target;
+                    check(std::hypot(t.x - src.x, std::hypot(t.y - src.y, t.z - src.z)) < 1e-9 && !editor->testCamera().followScene, "double-click on a source centres the orbit on it");
+                    check(std::abs(editor->testCamera().project(src).x - editor->testCanvas().reduced(10).toFloat().getCentreX()) < 1e-3, "and that object sits in the middle of the view");
+                    const auto yawKeep = editor->testCamera().yaw;
+                    const auto emptyCorner = editor->testCanvas().getTopRight().toFloat() + juce::Point<float>(-14.f, 14.f);
+                    verbp::Cam3D::Vec none{}; check(!editor->testPick3D(emptyCorner, none), "the corner of the 3D view used for the empty-space click holds no object");
+                    editor->mouseDoubleClick(event(emptyCorner, emptyCorner, juce::ModifierKeys::leftButtonModifier, false)); snapshot();
+                    bool allIn = true;
+                    {   // all corners of the scene's bounding box inside the view after the double-click on empty space
+                        const auto sc = p.getDisplayScene(); double x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+                        for (auto& w : sc.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
+                        for (double x : {x0, x1}) for (double y : {y0, y1}) for (double z : {0.0, sc.height}) allIn = allIn && editor->testCamera().inside(editor->testCamera().project({x, y, z}), 0.5);
+                    }
+                    check(allIn && editor->testCamera().yaw == yawKeep, "double-click on empty space frames the whole scene (the view direction is kept)");
+                }
+                {   // keys: F frames all, Shift+F the selection
+                    editor->mouseDoubleClick(event(centre, centre, juce::ModifierKeys::leftButtonModifier, false));
+                    drag(juce::ModifierKeys::middleButtonModifier, centre, {200.f, 100.f});
+                                        const bool handledF = editor->keyPressed(juce::KeyPress('f', juce::ModifierKeys(), 'f'));
+                    const auto allCam = editor->testCamera();
+                    bool framedAll = true;
+                    {
+                        const auto sc = p.getDisplayScene(); double x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+                        for (auto& w : sc.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
+                        for (double x : {x0, x1}) for (double y : {y0, y1}) for (double z : {0.0, sc.height}) framedAll = framedAll && allCam.inside(allCam.project({x, y, z}), 0.5);
+                    }
+                    check(handledF && framedAll, "F frames the whole scene in the 3D view");
+                    editor->testSelectObject(0);
+                    check(editor->keyPressed(juce::KeyPress('F', juce::ModifierKeys(juce::ModifierKeys::shiftModifier), 'F')), "Shift+F is handled in the 3D view");
+                    const auto selCam = editor->testCamera();
+                    const verbp::Cam3D::Vec src{(double)p.apvts.getRawParameterValue("s1x")->load(), (double)p.apvts.getRawParameterValue("s1y")->load(), (double)p.apvts.getRawParameterValue("s1z")->load()};
+                    check(selCam.zoom > 1.5 * allCam.zoom && std::hypot(selCam.target.x - src.x, selCam.target.y - src.y) < 0.5, "Shift+F zooms in on the selected object");
+                    editor->selectSurfaceObjects({{1, 0}});
+                    editor->keyPressed(juce::KeyPress('F', juce::ModifierKeys(juce::ModifierKeys::shiftModifier), 'F'));
+                    const auto wall = p.getDisplayScene().walls[0]; const auto& wc = editor->testCamera();
+                    bool wallIn = true; for (double z : {0.0, p.getDisplayScene().height}) for (int end = 0; end < 2; ++end) wallIn = wallIn && wc.inside(wc.project({end ? wall.bx : wall.ax, end ? wall.by : wall.ay, z}), 0.5);
+                    check(wallIn, "Shift+F with a wall selected fits that wall");
+                    editor->keyPressed(juce::KeyPress('f', juce::ModifierKeys(), 'f'));
+                    editor->keyPressed(juce::KeyPress(juce::KeyPress::homeKey));
+                    check(editor->testCamera().yaw == Cam3D().yaw && editor->testCamera().pitch == Cam3D().pitch, "Home restores the default camera angles");
+                }
+                editor->showPlane(0); snapshot();
+                check(!editor->testHasFrameButtons(), "the Frame buttons are hidden outside the 3D view");
+                p.setNavigationLocked(true);   // as it was for the rest of this test
+            }
         }
         const auto text = p.getRoomText(); std::istringstream input(text.toStdString()); const auto parsed = verb::parseScene(input, "metadata roundtrip");
         check(parsed.walls[0].editor.name == "Left wall \"A\" #1" && parsed.walls[0].editor.hidden
@@ -452,6 +632,150 @@ int main() {
         check(waitReady(p, 90) && p.apvts.getRawParameterValue("spatialDry")->load() == 0,
             "older projects retain their original dry/wet behaviour");
         check(p.navigationLocked() && p.outlinerVisible(), "navigation lock and outliner visibility survive project state restore");
+        {   // plan layer masks (Walls / Floors / Ceilings / Plates) belong to the processor, not to the editor window
+            base.reset();
+            check(p.getLayerModes() == std::array<int, 4>{0, 0, 0, 0}, "layer masks start as shown / unlocked");
+            auto openEditor = [&] { std::unique_ptr<juce::AudioProcessorEditor> e(p.createEditor()); return e; };
+            auto layerButton = [&](juce::AudioProcessorEditor& e, const juce::String& prefix) -> juce::Button* {
+                for (int i = 0; i < e.getNumChildComponents(); ++i)
+                    if (auto* b = dynamic_cast<juce::Button*>(e.getChildComponent(i)))
+                        if (b->getButtonText().startsWith(prefix) && b->onClick && b->getTooltip().startsWith("Click: shown")) return b;
+                return nullptr;
+            };
+            auto first = openEditor(); auto* e1 = dynamic_cast<VerbEditor*>(first.get());
+            auto* wallsBtn = layerButton(*first, "Walls");
+            check(e1 && wallsBtn, "layer buttons exist");
+            if (e1 && wallsBtn) {
+                wallsBtn->onClick();  // shown -> locked
+                check(p.getLayerModes()[0] == 1 && e1->testLayerModes()[0] == 1, "the Walls button locks the layer in the processor");
+                wallsBtn->onClick();  // locked -> hidden
+                check(p.getLayerModes()[0] == 2, "the Walls button then hides the layer");
+                wallsBtn->onClick();  // hidden -> shown
+                check(p.getLayerModes()[0] == 0, "and a third click shows it again");
+                e1->testSetLayer(0, 1); e1->testSetLayer(1, 2); e1->testSetLayer(3, 1);
+            }
+            first.reset();  // the window is closed
+            const std::array<int, 4> want{1, 2, 0, 1};
+            check(p.getLayerModes() == want, "layer masks survive closing the editor window");
+            auto second = openEditor(); auto* e2 = dynamic_cast<VerbEditor*>(second.get());
+            check(e2 && e2->testLayerModes() == want, "a reopened editor shows the locked / hidden layers again");
+            auto* wallsBtn2 = second ? layerButton(*second, "Walls") : nullptr;
+            check(wallsBtn2 && wallsBtn2->getButtonText() == "Walls (locked)", "the reopened Walls button is labelled locked");
+            if (e2) e2->testSetLayer(2, 2);
+            second.reset();
+            const std::array<int, 4> want2{1, 2, 2, 1};
+            check(p.getLayerModes() == want2, "a change made in the second window is kept as well");
+            check(p.getRoomText().contains("#@verbroom-editor-v2 layers 1 2 2 1"), "the scene text carries the masks under the v2 editor prefix");
+            {
+                std::istringstream in(p.getRoomText().toStdString());
+                check(verb::parseScene(in, "layers").layerModes == want2, "serialize -> parse keeps the masks");
+            }
+            // project state round trip
+            juce::MemoryBlock project; p.getStateInformation(project);
+            VerbProcessor q; q.setPlayConfigDetails(64, 2, 48000, 256); q.prepareToPlay(48000, 256);
+            check(waitReady(q, 60), "receiving processor starts");
+            q.setStateInformation(project.getData(), (int)project.getSize());
+            check(waitReady(q, 90) && q.getLayerModes() == want2, "layer masks survive a project state round trip");
+            // .verbroom round trip into a processor that has other masks of its own
+            q.setLayerMode(0, 0); q.setLayerMode(3, 2);
+            check(q.loadRoomPresetText(p.getRoomPresetText(), error) && waitReady(q, 90) && q.getLayerModes() == want2,
+                "layer masks survive a .verbroom round trip");
+            // old files without the fields load as before: everything shown and unlocked
+            const auto fixtures = juce::File::getCurrentWorkingDirectory().getChildFile("plugin/fixtures/stage2");
+            juce::MemoryBlock legacyState;
+            check(fixtures.getChildFile("legacy.state").loadFileAsData(legacyState), "legacy project fixture is present");
+            q.setStateInformation(legacyState.getData(), (int)legacyState.getSize());
+            check(waitReady(q, 90) && q.getLayerModes() == std::array<int, 4>{0, 0, 0, 0}, "a legacy project state loads with every layer shown and unlocked");
+            q.setLayerMode(1, 1);
+            check(q.loadRoomPresetText(fixtures.getChildFile("legacy.verbroom").loadFileAsString(), error) && waitReady(q, 90)
+                && q.getLayerModes() == std::array<int, 4>{0, 0, 0, 0}, "a legacy .verbroom loads with every layer shown and unlocked");
+            // plain geometry text and library rooms carry no masks: loading them resets the layers to shown
+            q.setLayerMode(2, 2);
+            auto plain = p.getDisplayScene(); plain.layerModes = {};
+            q.loadSceneText(juce::String(verb::serializeScene(plain)), "plain.txt", true);
+            check(waitReady(q, 90) && q.getLayerModes() == std::array<int, 4>{0, 0, 0, 0}, "a geometry .txt without the fields resets the layers to shown");
+            q.setLayerMode(0, 1);
+            std::unique_ptr<juce::AudioProcessorEditor> libEd(q.createEditor());
+            if (auto* le = dynamic_cast<VerbEditor*>(libEd.get())) {
+                le->chooseBuiltinRoom(0);
+                check(waitReady(q, 90) && q.getLayerModes() == std::array<int, 4>{0, 0, 0, 0}, "loading a library room resets the layers to shown");
+                le->setSize(1160, 760);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(120);
+                check(le->testLayerModes() == std::array<int, 4>{0, 0, 0, 0}, "an open editor follows the processor after a room load");
+            } else check(false, "editor for the library-room check");
+        }
+        {   // Scale room: floor / ceiling zones, plates and partial-height walls follow the walls (they used to stay behind)
+            p.loadSceneText(verb::serializeScene(originalRoom), "Scale test", true); check(waitReady(p, 90), "scale test room loads");
+            p.editScene([](verb::Scene& s) {
+                verb::Zone patch; patch.mat = s.floorMat; patch.poly = {{1, 1}, {3, 1}, {3, 3}, {1, 3}};
+                verb::Zone plate; plate.mat = s.floorMat; plate.z = 2.0; plate.poly = {{2, 2}, {5, 2}, {5, 5}, {2, 5}};
+                verb::Zone raised; raised.mat = s.floorMat; raised.z = 0.4; raised.poly = {{1, 5}, {2, 5}, {2, 6}, {1, 6}};
+                s.floorZones.push_back(patch); s.ceilZones.push_back(plate); s.floorZones.push_back(raised);
+                s.walls[0].z0 = 0.4; s.walls[0].z1 = 1.8;
+            });
+            const auto A = p.getDisplayScene();
+            double x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+            for (auto& w : A.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
+            const double cx = 0.5 * (x0 + x1), cy = 0.5 * (y0 + y1);
+            auto param = [&](const juce::String& id) { return (double)p.apvts.getRawParameterValue(id)->load(); };
+            const double sx0 = param("s1x"), sy0 = param("s1y"), sz0 = param("s1z"), lx0 = param("lx"), lz0 = param("lz");
+            auto eqv = [](double a, double b) { return std::abs(a - b) < 1e-6; };
+            auto scaled = [&](const verb::Scene& B, double f, bool objects) {   // B must equal A scaled by f about (cx, cy)
+                bool ok = B.walls.size() == A.walls.size() && B.floorZones.size() == A.floorZones.size() && B.ceilZones.size() == A.ceilZones.size();
+                for (size_t i = 0; ok && i < A.walls.size(); ++i)
+                    ok = eqv(B.walls[i].ax, cx + (A.walls[i].ax - cx) * f) && eqv(B.walls[i].by, cy + (A.walls[i].by - cy) * f)
+                        && eqv(B.walls[i].z0, objects ? A.walls[i].z0 * f : A.walls[i].z0) && (A.walls[i].z1 > 1e8 || eqv(B.walls[i].z1, objects ? A.walls[i].z1 * f : A.walls[i].z1));
+                for (int c = 0; ok && c < 2; ++c) {
+                    const auto& za = c ? A.ceilZones : A.floorZones; const auto& zb = c ? B.ceilZones : B.floorZones;
+                    for (size_t i = 0; ok && i < za.size(); ++i) {
+                        ok = zb[i].poly.size() == za[i].poly.size() && eqv(zb[i].z, za[i].z < 0 ? za[i].z : (objects ? za[i].z * f : za[i].z));
+                        for (size_t k = 0; ok && k < za[i].poly.size(); ++k)
+                            ok = eqv(zb[i].poly[k].first, cx + (za[i].poly[k].first - cx) * f) && eqv(zb[i].poly[k].second, cy + (za[i].poly[k].second - cy) * f);
+                    }
+                }
+                return ok;
+            };
+            check(A.floorZones.size() == 2 && A.ceilZones.size() == 1 && A.ceilZones[0].z == 2.0, "scale test scene has a patch, a platform and a ceiling plate");
+            p.scaleRoom(1.5, true);
+            const auto B = p.getDisplayScene();
+            check(scaled(B, 1.5, true), "Scale room moves zone corners, plate and platform heights and partial-height walls with the walls");
+            check(eqv(B.height, A.height * 1.5) && std::abs(param("s1x") - (cx + (sx0 - cx) * 1.5)) < 1e-3 && std::abs(param("s1y") - (cy + (sy0 - cy) * 1.5)) < 1e-3
+                && std::abs(param("s1z") - sz0 * 1.5) < 1e-3 && std::abs(param("lx") - (cx + (lx0 - cx) * 1.5)) < 1e-3 && std::abs(param("lz") - lz0 * 1.5) < 1e-3,
+                "and the height, sources and listener scale about the same centre");
+            p.scaleRoom(1.0 / 1.5, true);
+            check(scaled(p.getDisplayScene(), 1.0, true) && std::abs(param("s1x") - sx0) < 1e-3 && std::abs(param("lz") - lz0) < 1e-3, "scaling x1.5 then x1/1.5 restores zones, plates, walls and objects");
+            p.scaleRoom(2.0, false);
+            const auto C = p.getDisplayScene();
+            check(scaled(C, 2.0, false) && eqv(C.height, A.height) && std::abs(param("s1x") - sx0) < 1e-3 && std::abs(param("lz") - lz0) < 1e-3,
+                "without 'also moves sources, listener, height' only the plan scales: heights of plates and walls stay, objects stay");
+            std::istringstream in(p.getRoomText().toStdString());
+            const auto reloaded = verb::parseScene(in, "scaled"); check(scaled(reloaded, 2.0, false), "the scaled room survives serialization");
+            check(waitReady(p, 90), "the scaled room is accepted by the engine");
+        }
+        {   // a surface / layer flag changed while the engine is rebuilding must not be overwritten by the loader
+            VerbProcessor r; r.setPlayConfigDetails(64, 2, 48000, 256); r.prepareToPlay(48000, 256);
+            check(waitReady(r, 60), "race test processor starts");
+            auto o = r.getOutputCfg();
+            for (int round = 0; round < 3; ++round) {
+                o.radius = 0.12 + 0.02 * round; r.setOutputCfg(o);   // queues a rebuild of the engine from the stored scene text
+                if (round == 1) juce::MessageManager::getInstance()->runDispatchLoopUntil(60);   // the loader is already working
+                if (round == 2) juce::Thread::sleep(15);
+                r.editSceneMetadata([round](verb::Scene& s) {
+                    s.walls[(size_t)round].editor.locked = true; s.walls[(size_t)round].editor.name = "kept" + std::to_string(round);
+                    s.layerModes[(size_t)round] = 1 + round % 2;
+                });
+                const bool pendingAtEdit = r.getLoadState() == 1;
+                check(waitReady(r, 90), "engine rebuild finishes");
+                const auto d = r.getDisplayScene();
+                bool all = true;
+                for (int k = 0; k <= round; ++k) all = all && d.walls[(size_t)k].editor.locked && d.walls[(size_t)k].editor.name == "kept" + std::to_string(k) && d.layerModes[(size_t)k] == 1 + k % 2;
+                check(pendingAtEdit && all, ("flags changed during a pending rebuild survive it, round " + std::to_string(round)).c_str());
+                std::istringstream in(r.getRoomText().toStdString());
+                const auto saved = verb::parseScene(in, "race");
+                check(saved.walls[(size_t)round].editor.locked && saved.layerModes[(size_t)round] == 1 + round % 2,
+                    ("and the saved scene text still has them, round " + std::to_string(round)).c_str());
+            }
+        }
         return fails ? 1 : 0;
     }
     if (std::getenv("VERB_PRESETS_ONLY")) {
@@ -502,7 +826,17 @@ int main() {
         broken->getChildByName("VerbState")->getChildByName("Sources")->getChildByName("Src")->setAttribute("firstIn", 63);
         check(!q.loadRoomPresetText(broken->toString(), error), "stereo input beyond channel 64 is rejected before state changes");
         broken = juce::parseXML(preset); auto* payload = broken->getChildByName("VerbState");
-        payload->removeChildElement(payload->getChildByName("PARAM"), true);
+        // New alphabetically-first PARAM absorption is intentionally optional for old presets.
+        // Exercise ALL legacy required parameters, including malformed value fields.
+        const auto legacy=juce::parseXML(juce::File::getCurrentWorkingDirectory().getChildFile("plugin/fixtures/stage2/legacy.verbroom").loadFileAsString());
+        for(auto* old=legacy->getChildByName("VerbState")->getFirstChildElement();old;old=old->getNextElement())if(old->hasTagName("PARAM")) {
+            auto missing=juce::parseXML(preset);auto* body=missing->getChildByName("VerbState");
+            body->removeChildElement(body->getChildByAttribute("id",old->getStringAttribute("id")),true);
+            check(!q.loadRoomPresetText(missing->toString(),error)&&q.getSceneSerial()==before&&value("mix")==72,"every required legacy PARAM is rejected when missing, without changing state");
+            auto invalid=juce::parseXML(preset);invalid->getChildByName("VerbState")->getChildByAttribute("id",old->getStringAttribute("id"))->removeAttribute("value");
+            check(!q.loadRoomPresetText(invalid->toString(),error)&&q.getSceneSerial()==before&&value("mix")==72,"every required legacy PARAM must carry a value, without changing state");
+        }
+        payload->removeChildElement(payload->getChildByAttribute("id", "mix"), true);
         check(!q.loadRoomPresetText(broken->toString(), error) && q.getSceneSerial() == before && value("mix") == 72,
               "incomplete preset leaves the current room and mix intact");
         auto local = cfg; local.resize(1); local[0].firstIn = 20; local[0].name = "Local routing";
@@ -736,7 +1070,7 @@ int main() {
         }
         return fails ? 1 : 0;
     }
-    testTailControls();
+    if (!std::getenv("VERB_CORE_ONLY")) testTailControls();
     if (std::getenv("VERB_QUALITY_ONLY")) return fails ? 1 : 0;
     if (std::getenv("VERB_MEMPROBE")) {  // exploration: does the plugin grow while a room is reloaded and a source is moved?
         const auto rooms = verbp::builtinRooms();
@@ -843,6 +1177,21 @@ int main() {
             return en;
         };
         auto settleBlocks = [&](int n) { for (int i = 0; i < n; ++i) { buf.clear(); p.processBlock(buf, midi); } };
+        // This occlusion threshold was authored for the legacy mix. Stage2 Physical
+        // deliberately exposes stronger first-order reflections; keep this test of
+        // transmission at its original explicit mix rather than depending on defaults.
+        setP(p, "mode", 1.); setP(p, "early", -9.);
+        // Retain the full output: the original 13 dB assertion also covers the
+        // onset of the statistical late field inside this 53 ms capture window.
+        auto waitTailCurrent = [&] {
+            const auto until=juce::Time::getMillisecondCounterHiRes()+90000;
+            while(juce::Time::getMillisecondCounterHiRes()<until) {
+                buf.clear();p.processBlock(buf,midi);
+                if(p.isTailCurrent())return true;
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
+            }
+            return false;
+        };
         setP(p, "s1x", 3.0);  // back to the scene position (the automation test above moved it)
         settleBlocks(400);
         const double eOpenRoom = early(10);
@@ -853,7 +1202,7 @@ int main() {
             s.walls.push_back(verb::Wall{0.0, 4.0, 6.0, 4.0, (int)s.mats.size() - 1});  // between the source (3, 6) and the listener (3, 2)
         });
         // early paths follow within a control period; the late field is re-traced on a worker thread (seconds)
-        juce::Thread::sleep(6000);
+        check(waitTailCurrent(),"room edit reaches the actual audio convolver");
         settleBlocks(400);
         const double eBlocked = early(10);
         std::printf("  early energy: open room %.3e, with a concrete partition %.3e (%.0f dB)\n", eOpenRoom, eBlocked, 10 * std::log10(eBlocked / eOpenRoom));
@@ -864,7 +1213,7 @@ int main() {
         p.editScene([](verb::Scene& s) {  // make that segment an opening (own surface: only this wall changes)
             s.mats[(size_t)s.walls.back().mat] = verb::presetByName("Open");
         });
-        juce::Thread::sleep(6000);
+        check(waitTailCurrent(),"room edit reaches the actual audio convolver");
         settleBlocks(400);
         const double eOpening = early(10);
         std::printf("  with the segment set to Open: %.3e (%.1f dB vs open room)\n", eOpening, 10 * std::log10(eOpening / eOpenRoom));
@@ -874,11 +1223,12 @@ int main() {
             s.mats[(size_t)s.walls.back().mat] = verb::presetByName("Concrete");
             s.walls.back().z1 = 1.0;
         });
-        juce::Thread::sleep(6000);
+        check(waitTailCurrent(),"room edit reaches the actual audio convolver");
         settleBlocks(400);
         const double eLow = early(10);
         std::printf("  concrete partition 1.0 m high (ears at 1.5 m): %.3e (%.1f dB vs open room)\n", eLow, 10 * std::log10(eLow / eOpenRoom));
         check(std::fabs(10 * std::log10(eLow / eOpenRoom)) < 3.0, "a low partition is passed over by sound at ear height");
+        setP(p,"soloDirect",0);setP(p,"soloEarly",0);
         {
             VerbProcessor q2;
             q2.setPlayConfigDetails(4, 2, 48000, 256);
@@ -960,6 +1310,7 @@ int main() {
             p.setInputMetersEnabled(true);
         }
     }
+    if (std::getenv("VERB_CORE_ONLY")) return fails ? 1 : 0;
     {   // orientation, scaling, free channel points, space (air, clutter)
         VerbProcessor r;
         r.setPlayConfigDetails(8, 2, 48000, 256);
@@ -1914,6 +2265,7 @@ receiver R 0 0 1.5 0 0
         p.setPlayConfigDetails(2, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "scene loads");
+        setP(p, "spatialDry", 0.); // explicitly test the original raw/equal-power bypass
         juce::AudioBuffer<float> buf(2, 256);
         juce::MidiBuffer midi;
         auto firstSample = [&](double mixPercent) {  // output of channel 0 at the sample of an input impulse
@@ -2012,7 +2364,7 @@ receiver R 0 0 1.5 0 0
         // export: back to the demo room, export, read the files back
         p.loadSceneText(juce::String(rooms[1].text), "Bedroom.txt", true);
         check(waitReady(p, 60), "bedroom loads");
-        auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("verb_ir_export_test");
+        auto dir = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile("ir-export-test");
         dir.deleteRecursively();
         p.startExportIR(dir);
         const auto t0 = juce::Time::getMillisecondCounterHiRes();

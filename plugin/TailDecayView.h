@@ -41,6 +41,17 @@ public:
         for (int b = 0; b < verb::NB; ++b) {
             g.setColour(colour(b).withAlpha(bands[b].getToggleState() ? 1.f : 0.35f));
             const auto text = data && data->active[b] && data->rt60[b] > 0 ? "RT60 " + juce::String(data->rt60[b], 2) + " s" : "RT60 --";
+            juce::String detail = "Result RT60 / Physical RT60: " + (data ? juce::String(data->rt60[b],2) + " / " + juce::String(data->physicalRT60[b],2) + " s" : "--");
+            if(data) {
+                static const char* status[]={"applied","unity: no measurable decay","unity: below bin resolution","limited to 20 s","unity: fit rejected"};
+                bool mixed=false;
+                for(size_t s=1;s<data->sourceReshapeStatus.size();++s)mixed|=data->sourceReshapeStatus[s][b]!=data->sourceReshapeStatus[0][b]
+                    ||std::abs(data->sourceEffectiveMultipliers[s][b]-data->sourceEffectiveMultipliers[0][b])>1e-9;
+                detail += "; effective decay x" + juce::String(data->effectiveMultipliers[b],3) + " (" + (mixed?"per-source limits vary":status[std::clamp(data->reshapeStatus[b],0,4)]) + ")";
+                for(size_t s=0;s<data->sourceReshapeStatus.size();++s)if(data->sourceReshapeStatus[s][b]!=0)
+                    detail += "; source " + juce::String((int)s+1) + ": " + status[std::clamp(data->sourceReshapeStatus[s][b],0,4)];
+            }
+            bands[b].setTooltip(detail);
             g.drawText(text, bands[b].getBounds().translated(4, 19), juce::Justification::centredLeft);
         }
         const int legendHeight = getWidth() >= 740 ? 78 : 118;
@@ -63,15 +74,18 @@ public:
             g.saveState(); g.reduceClipRegion(plot.toNearestInt());
             for (int b = 0; b < verb::NB; ++b) {
                 if (!data->active[b] || !bands[b].getToggleState()) continue;
-                juce::Path traced, estimated;
+                juce::Path traced, estimated, physical;
                 for (size_t i = 0; i < verb::TailDiagnostics::points; ++i) {
                     const float f = (float)i / (verb::TailDiagnostics::points - 1);
                     const float x = plot.getX() + f * plot.getWidth();
                     const float y = plot.getY() - data->decayDb[b][i] * plot.getHeight() / 80.f;
+                    const float py = plot.getY() - data->physicalDecayDb[b][i] * plot.getHeight() / 80.f;
+                    if (i==0) physical.startNewSubPath(x,py); else physical.lineTo(x,py);
                     if (i == 0) { traced.startNewSubPath(x, y); estimated.startNewSubPath(x, y); }
                     if (f * data->duration <= data->reliableSeconds[b]) { traced.lineTo(x, y); estimated.startNewSubPath(x, y); }
                     else estimated.lineTo(x, y);
                 }
+                g.setColour(colour(b).withAlpha(.25f)); g.strokePath(physical,juce::PathStrokeType(1.f));
                 g.setColour(colour(b)); g.strokePath(traced, juce::PathStrokeType(1.7f));
                 juce::Path dashed; const float pattern[] = {4.f, 3.f};
                 juce::PathStrokeType(1.5f).createDashedStroke(dashed, estimated, pattern, 2);
@@ -83,7 +97,7 @@ public:
             g.drawText("The decay graph appears when the room is ready.", plot.toNearestInt(), juce::Justification::centred);
         }
         g.setColour(skin::textDim);
-        g.drawText("Energy (dB) | Solid: traced; dashed: extrapolated. RT60 from T20.",
+        g.drawText("Energy (dB) | Solid: result; dashed: extrapolated; faint: physical. RT60: T20.",
                    14, getHeight() - 20, getWidth() - 28, 16, juce::Justification::centredLeft);
     }
 

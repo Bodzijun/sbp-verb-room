@@ -139,6 +139,8 @@ See the [editor guide](Spatial_editor_0.1.12_en.md). Surface names, flat groups,
 
 Fields: type (`wall`, `floor-zone`, `ceiling-zone`, `floor`, `ceiling`), zero-based index, quoted name, quoted group name, hidden (0/1), locked (0/1). The main floor/ceiling use index 0 and cannot be members of movable constructions. An empty group means unlinked. Escape quotes and backslashes inside strings; prefer the built-in serializer.
 
+The state of the plan layers (Walls / Floors / Ceilings / Plates: 0 shown, 1 locked, 2 hidden) is stored on its own line in a new namespace: `#@verbroom-editor-v2 layers 1 0 2 0` (written only when not all zeros). Older builds (0.1.15) read it as a plain comment. The current build ignores unknown or damaged `v2` records without an error. Add any new kind of metadata under `v2` only, because an unknown `kind` inside `v1` makes the older parser reject the whole scene. A scene without this line (a library room, a geometry-only `.txt`) resets the layers to "shown".
+
 These flags do not change acoustics: hidden does not mean an absent wall, and locked does not replace absorption. Do not remove geometry when hiding it. Surfaces retain their individual materials; Link only organizes them and enables joint movement. Use unique group names for independent constructions.
 
 `spatialDry` is a plug-in parameter, not a scene command. New instances enable it: the direct field stays positioned while Wet adds reflections/tail without duplicating direct sound. Older projects and format 1 presets retain the original bypass. Use format 2 for complete exchange of this mode, rather than partial XML.

@@ -86,7 +86,7 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
         for (const auto& r : rcv) { rz0 = std::min(rz0, r.pos.z - rd); rz1 = std::max(rz1, r.pos.z + rd); }
     }
     for (int i = 0; i < rays; ++i) {
-        if (integrated && i % 32 == 0) {
+        if (i % 32 == 0) {
             if (cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
             if (progress) progress((double)i / rays);
         }
@@ -100,7 +100,7 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
         int refl = 0;
         int steps = 0;
         while (true) {
-            if (integrated && ++steps % 32 == 0 && cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
+            if (++steps % 32 == 0 && cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
             double tBest = std::numeric_limits<double>::infinity();
             int surf = -1;
             for (int w = 0; w < g.W; ++w) {
@@ -223,8 +223,8 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
     return out;
 }
 
-TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize) {
-    return traceTailImpl(sc, src, rcv, order, rays, seed, finalize);
+TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize, const std::function<bool()>& cancelled) {
+    return traceTailImpl(sc, src, rcv, order, rays, seed, finalize, false, cancelled);
 }
 
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
@@ -236,7 +236,100 @@ std::vector<std::array<double, NB>> traceTailEnergy(const Scene& sc, const Trans
     return result;
 }
 
-void finalizeTail(TailHist& out) {
+static void smoothTailTransition(TailHist& out, const std::vector<std::array<std::vector<double>,NB>>& raw) {
+    if(out.h.empty()||out.h2.size()!=out.h.size())return;
+    const auto before=analyzeTail(out);
+    const auto original=out.h;
+    const size_t stop=std::min(out.nBins,(size_t)std::ceil(.65/out.binDur));
+    for(int b=0;b<NB;++b) {
+        const double rt=before.rt60[b];
+        if(rt<.12||!std::isfinite(rt))continue; // insufficient temporal support
+        const double rate=6.*std::log(10.)/rt;
+        std::vector<std::vector<double>> mixWeights(out.h.size());
+        std::vector<size_t> onsets(out.h.size());
+        for(size_t r=0;r<out.h.size();++r) {
+            const auto& src=original[r][b];const auto& moment=out.h2[r][b];
+            if(moment.size()!=out.nBins)continue;
+            size_t onset=0;while(onset<src.size()&&src[onset]<=0)++onset;
+            if(onset>=stop)continue;
+            std::vector<double> prefix(out.nBins+1),ess(out.nBins+1),candidate(stop),weights(stop);
+            std::vector<bool> protectedBin(stop,false);
+            for(size_t k=0;k<out.nBins;++k) {
+                prefix[k+1]=prefix[k]+src[k];
+                const double e=raw[r][b][k],e2=moment[k];
+                ess[k+1]=ess[k]+(e2>0?e*e/e2:0.);
+            }
+            // A distinct high-confidence reflection remains discrete. Low-ESS
+            // ray survivors cannot qualify merely by being loud in one bin.
+            for(size_t k=onset;k<stop;++k) {
+                const size_t lo=k>15?k-15:0,hi=std::min(out.nBins,k+16);
+                const double local=(prefix[hi]-prefix[lo])/(hi-lo);
+                const double e=raw[r][b][k],e2=moment[k];
+                if(e2>0&&e*e/e2>=32.&&e>6.*local)
+                    for(size_t j=k>3?k-3:0;j<std::min(stop,k+4);++j)protectedBin[j]=true;
+            }
+            double oldArea=0,newArea=0;
+            for(size_t k=onset;k<stop;++k) {
+                const size_t lo=k>5?k-5:0,hi=std::min(out.nBins,k+6);
+                const double density=(ess[hi]-ess[lo])/(hi-lo);
+                // About 100 effective contributions per kernel standard deviation;
+                // 16..80 ms sigma, wider where a few rays carry the envelope.
+                const double sigma=std::min(rt/(6.*out.binDur),std::clamp(.100/out.binDur/std::sqrt(std::max(1.,density)),.016/out.binDur,.080/out.binDur));
+                const size_t radius=(size_t)std::ceil(3.*sigma);
+                const size_t a=k>radius?std::max(onset,k-radius):onset,z=std::min(out.nBins,k+radius+1);
+                double sum=0,norm=0;
+                for(size_t j=a;j<z;++j) {
+                    const double delta=(double)j-(double)k;
+                    const double w=std::exp(-.5*delta*delta/(sigma*sigma));
+                    // Removing/restoring the physical slope makes an exponential
+                    // a fixed point of the smoother, even in a short studio tail.
+                    sum+=src[j]*std::exp(rate*delta*out.binDur)*w;norm+=w;
+                }
+                candidate[k]=norm>0?sum/norm:src[k];
+                const double t=k*out.binDur;
+                const double w=protectedBin[k]||src[k]<=0?0.:std::min(std::clamp(((k-onset)*out.binDur-.005)/.025,0.,1.),std::clamp((.65-t)/.15,0.,1.));
+                weights[k]=w;oldArea+=w*src[k];newArea+=w*candidate[k];
+            }
+            const double scale=newArea>0?oldArea/newArea:1.;
+            auto& dst=out.h[r][b];
+            for(size_t k=onset;k<stop;++k)dst[k]=(1.-weights[k])*src[k]+weights[k]*candidate[k]*scale;
+            mixWeights[r]=std::move(weights);onsets[r]=onset;
+        }
+        // Restore the measured physical slope by tilting only the redistributed
+        // component, renormalizing its area on every accepted trial. This keeps
+        // short high-frequency tails smooth instead of undoing the smoothing.
+        for(int iteration=0;iteration<8;++iteration) {
+            const double actual=analyzeTail(out).rt60[b];
+            if(actual<=0||std::abs(actual/rt-1.)<=.005)break;
+            const double correction=std::clamp(6.*std::log(10.)*(1./actual-1./rt),-3./rt,3./rt);
+            std::vector<std::vector<double>> prior(out.h.size());
+            for(size_t r=0;r<out.h.size();++r) {
+                prior[r]=out.h[r][b];const auto& weights=mixWeights[r];if(weights.empty())continue;
+                auto& dst=out.h[r][b];const auto& src=original[r][b];
+                std::vector<double> adjustable(stop);double oldArea=0,newArea=0;
+                for(size_t k=onsets[r];k<stop;++k)if(weights[k]>0) {
+                    adjustable[k]=std::max(0.,dst[k]-(1.-weights[k])*src[k])*std::exp(correction*(k-onsets[r])*out.binDur);
+                    oldArea+=weights[k]*src[k];newArea+=adjustable[k];
+                }
+                const double scale=newArea>0?oldArea/newArea:1.;
+                for(size_t k=onsets[r];k<stop;++k)if(weights[k]>0)dst[k]=(1.-weights[k])*src[k]+adjustable[k]*scale;
+            }
+            const double improved=analyzeTail(out).rt60[b];
+            if(improved<=0||std::abs(improved/rt-1.)>=std::abs(actual/rt-1.)) {
+                for(size_t r=0;r<out.h.size();++r)out.h[r][b]=std::move(prior[r]);break;
+            }
+        }
+        // Preserve T20 as well as exact area. A short non-exponential room can
+        // need a partial step; this guard never changes the original regression.
+        for(int iteration=0;iteration<8;++iteration) {
+            const double actual=analyzeTail(out).rt60[b];
+            if(actual>0&&std::abs(actual/rt-1.)<=.025)break;
+            for(size_t r=0;r<out.h.size();++r)for(size_t k=0;k<stop;++k)out.h[r][b][k]=.5*(out.h[r][b][k]+original[r][b][k]);
+        }
+    }
+}
+
+void finalizeTail(TailHist& out, bool smoothTransition) {
     const int R = (int)out.h.size();
     const auto measured = out.h;
     out.reliableEnd.resize(R);
@@ -337,6 +430,7 @@ void finalizeTail(TailHist& out) {
             }
         }
     }
+    if(smoothTransition)smoothTailTransition(out,measured);
 }
 
 bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized) {
@@ -361,11 +455,11 @@ bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized) {
 }
 
 TailHist traceTailAdaptive(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rc,
-                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore) {
+                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore, const std::function<bool()>& cancelled) {
     raysUsed = std::max(0, baseRays);
     maxRays = std::max(raysUsed, maxRays);
     for (;;) {
-        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false);
+        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false, cancelled);
         auto h = raw;
         finalizeTail(h);
         const bool sparse = tailNeedsMoreRays(raw, h);
@@ -408,10 +502,154 @@ TailDiagnostics analyzeTail(const TailHist& h) {
             if (slope < -1e-6) out.rt60[b] = -60.0 / slope;
         }
     }
+    out.effectiveMultipliers = h.effectiveMultipliers;
+    out.reshapeStatus = h.reshapeStatus;
+    out.physicalRT60 = out.rt60;
+    out.physicalDecayDb = out.decayDb;
     return out;
 }
 
-double effectiveTailSeconds(const Scene& sc, int erOrder) {
+void reshapeTailDecay(TailHist& h, const std::array<double, 3>& multipliers) {
+    if (multipliers == std::array<double, 3>{{1, 1, 1}} || h.h.empty()) return;
+    const auto original = h;
+    const auto physical = analyzeTail(original);
+    const double rate = 6. * std::log(10.);
+    constexpr double peakMargin = 1.1220184543; // +0.5 dB in energy, never +0.5 dB per iteration
+    const size_t limit = (size_t)std::floor(20. / h.binDur);
+    std::array<double, NB> targets{};
+    size_t bins = std::min(h.nBins, limit);
+    for (int b=0;b<NB;++b) {
+        const double m = clampTo(multipliers[b<2?0:b<5?1:2], .3, 3., 1.);
+        if (m==1.) continue;
+        const double rt=physical.rt60[b];
+        if (!(rt>0) || !std::isfinite(rt)) { h.reshapeStatus[b]=1; continue; }
+        size_t onset=original.nBins;
+        for (const auto& rc:original.h) for(size_t k=0;k<rc[b].size();++k)
+            if(rc[b][k]>0){onset=std::min(onset,k);break;}
+        const double target=std::min(rt*m, std::max(0.,20.-onset*h.binDur-.8)*.75);
+        if (target<12*h.binDur) { h.reshapeStatus[b]=2; continue; }
+        targets[b]=target;
+        h.effectiveMultipliers[b]=target/rt;
+        if(target<rt*m-1e-9)h.reshapeStatus[b]=3;
+        bins=std::max(bins,std::min(limit,(size_t)std::ceil((onset*h.binDur+target*80./60.+.8)/h.binDur)));
+    }
+    h.nBins=bins;
+    for(auto& rc:h.h)for(auto& band:rc)band.resize(bins,0.);
+    for(int b=0;b<NB;++b) {
+        if(targets[b]<=0)continue;
+        // Every trial is rebuilt from the physical data, never from a previously lifted residue.
+        auto trial=[&](double tilt) {
+            for(size_t r=0;r<h.h.size();++r) {
+                const auto& src=original.h[r][b];auto& dst=h.h[r][b];
+                const double peak=*std::max_element(src.begin(),src.end());
+                std::fill(dst.begin(),dst.end(),0.);
+                if(!(peak>0))continue;
+                size_t onset=0;while(onset<src.size()&&src[onset]<=0)++onset;
+                size_t anchor=onset;
+                // -85 dB in ENERGY relative to the band peak.
+                // Below it, use a fitted physical exponential; do not lift numerical noise.
+                for(size_t k=onset;k<src.size();++k)if(src[k]>=peak*3.1622776602e-9)anchor=k;
+                const double logPeak=std::log(peak*peakMargin), logAnchor=std::log(src[anchor]);
+                for(size_t k=onset;k<bins;++k) {
+                    const bool reliable=k<=anchor&&k<src.size()&&src[k]>=peak*3.1622776602e-9;
+                    const double base=reliable ? std::log(src[k])
+                        : k>anchor ? logAnchor-rate*(k-anchor)*h.binDur/physical.rt60[b]
+                        // Holes inside the measured region are never lifted from sub-floor residue.
+                        : k<src.size()&&src[k]>0 ? std::log(src[k])-std::max(0.,tilt)*(k-onset)*h.binDur : -INFINITY;
+                    const double logE=base+tilt*(k-onset)*h.binDur;
+                    dst[k]=std::exp(std::min(logPeak,logE));
+                }
+                dst[onset]=src[onset]; // exact onset level, including after a rejected refinement
+            }
+        };
+        const double initial=rate*(1./physical.rt60[b]-1./targets[b]);
+        double bestError=INFINITY;
+        std::vector<std::vector<double>> best(h.h.size());
+        auto assess=[&](double tilt) {
+            trial(tilt);const double actual=analyzeTail(h).rt60[b];
+            const double error=actual>0?std::abs(std::log(actual/targets[b])):INFINITY;
+            if(error<bestError) {bestError=error;for(size_t r=0;r<h.h.size();++r)best[r]=h.h[r][b];}
+            return actual;
+        };
+        double actual=assess(initial), lastTilt=initial;
+        // Bounded slope search. A step is retained only if it reduces T20 error.
+        // Peak clipping makes the response nonlinear, so also bracket the solution.
+        double lo=-rate/(12*h.binDur),hi=rate/physical.rt60[b];
+        for(int i=0;i<24&&bestError>std::log(1.005);++i) {
+            if(actual>0&&actual<targets[b])lo=std::max(lo,lastTilt);
+            else hi=std::min(hi,lastTilt);
+            double next=(lo+hi)*.5;
+            if(actual>0) {
+                const double correction=std::clamp(rate*(1./actual-1./targets[b]),-rate/targets[b],rate/targets[b]);
+                const double candidate=lastTilt+correction;
+                if(candidate>lo&&candidate<hi)next=candidate;
+            }
+            const double tested=next;
+            actual=assess(tested);lastTilt=tested;
+            if(actual>0&&actual<targets[b])lo=tested;else hi=tested;
+            // Subsequent brackets depend on the tested slope, not on the retained best slope.
+            if(hi-lo<1e-10)break;
+        }
+        if(!std::isfinite(bestError)||bestError>std::log(1.005)) {
+            h.reshapeStatus[b]=4;h.effectiveMultipliers[b]=1.;
+            for(size_t r=0;r<h.h.size();++r){h.h[r][b]=original.h[r][b];h.h[r][b].resize(bins,0.);}
+        } else {
+            for(size_t r=0;r<h.h.size();++r)h.h[r][b]=std::move(best[r]);
+            // Reliable time follows the modeled time scale instead of shrinking in the longer IR.
+            for(size_t r=0;r<h.reliableEnd.size();++r) {
+                size_t onset=0;const auto& band=original.h[r][b];while(onset<band.size()&&band[onset]<=0)++onset;
+                const size_t end=std::max(onset,original.reliableEnd[r][b]);
+                h.reliableEnd[r][b]=std::min(bins,onset+(size_t)std::ceil((end-onset)*h.effectiveMultipliers[b]));
+            }
+        }
+    }
+    h.h2.clear();
+}
+
+Scene withAbsorptionScale(const Scene& scene, double scale) {
+    if (scale == 1.) return scene; // preserve the exact legacy numerical path
+    Scene out = withClutter(withRoughness(scene), 128);
+    out.roughness = 0; out.clutter.count = 0;
+    scale = clampTo(scale, .3, 3., 1.);
+    for (auto& m : out.mats) for (int b = 0; b < NB; ++b)
+        m.alpha[b] = std::clamp(m.alpha[b] * scale, 0., std::max(0., 1. - m.tau[b]));
+    return out;
+}
+
+std::array<double, NB> estimateRoomRT60(const Scene& scene) {
+    const Scene s = withClutter(withRoughness(scene), 128);
+    // Even-odd scan integration handles concave outlines and overlapping material patches.
+    double x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
+    for (const auto& w : scene.walls) { x0 = std::min({x0,w.ax,w.bx}); x1 = std::max({x1,w.ax,w.bx}); y0 = std::min({y0,w.ay,w.by}); y1 = std::max({y1,w.ay,w.by}); }
+    double area = 0, surface = 0; std::array<double, NB> loss{};
+    auto add = [&](double a, int mat) {
+        surface += a;
+        for (int b = 0; b < NB; ++b) loss[b] += a * (mat < 0 ? 1. : 1. - reflEnergy(s.mats[(size_t)mat], b));
+    };
+    for (const auto& w : s.walls) add(std::hypot(w.bx-w.ax,w.by-w.ay) * std::max(0., std::min(w.z1,s.height)-w.z0), w.mat);
+    if (x1 > x0 && y1 > y0) for (int iy = 0; iy < 160; ++iy) for (int ix = 0; ix < 160; ++ix) {
+        const double x = x0+(ix+.5)*(x1-x0)/160, y = y0+(iy+.5)*(y1-y0)/160;
+        int hits = 0;
+        for (const auto& w : scene.walls) if ((w.ay > y) != (w.by > y) && w.ax+(y-w.ay)*(w.bx-w.ax)/(w.by-w.ay)>x) ++hits;
+        if (!(hits & 1)) continue;
+        const double a = (x1-x0)*(y1-y0)/25600.; area += a;
+        add(a, floorMatAt(s,x,y)); add(a,ceilMatAt(s,x,y));
+    }
+    for (const auto* zones : {&s.floorZones,&s.ceilZones}) for (const auto& z : *zones) if (z.z >= 0 && z.mat >= 0) {
+        double twice = 0; for (size_t i=0;i<z.poly.size();++i) { const auto a=z.poly[i], b=z.poly[(i+1)%z.poly.size()]; twice += a.first*b.second-b.first*a.second; }
+        add(std::abs(twice),z.mat); // both sides
+    }
+    std::array<double, NB> out{};
+    const double volume = area * s.height, c = speedOfSound(s.tempC);
+    for (int b=0;b<NB;++b) {
+        const double eyring = surface > 0 ? -surface * std::log(std::max(1e-8,1.-loss[b]/surface)) : 0;
+        const double air = 4.*volume*airAbsDbPerM(kBandHz[b],s.tempC,s.humidity)*std::log(10.)/10.;
+        out[b] = volume > 0 ? 24.*std::log(10.)*volume/(c*std::max(1e-8,eyring+air)) : -1.;
+    }
+    return out;
+}
+
+double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled) {
     double len = sc.length;
     if (!sc.sources.empty() && !sc.receivers.empty() && !sc.walls.empty()) {
         Scene t = sc;
@@ -420,7 +658,8 @@ double effectiveTailSeconds(const Scene& sc, int erOrder) {
         // A 6000-ray probe often loses confidence during the initial build-up in
         // absorbing halls, making a tiny slope error inflate the allocation to
         // several seconds. Use the same order of ray budget as the live tail.
-        const TailHist h = traceTail(t, t.sources[0], rc, erOrder, 48000, t.seed);
+        auto h = traceTail(t, t.sources[0], rc, erOrder, 48000, t.seed, false, cancelled);
+        finalizeTail(h,false); // preserve the legacy unity length probe exactly
         double need = 0;
         std::array<double, NB> totals{};
         double largest = 0;

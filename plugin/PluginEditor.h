@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 
+#include "Camera3D.h"
 #include "PluginLookAndFeel.h"
 #include "PluginProcessor.h"
 #include "RoomLibrary.h"
@@ -73,7 +74,14 @@ public:
     }
     double testViewPsi() const { return viewPsi; }
     int testPickCount(double wx, double wy) { const auto sc = proc.getDisplayScene(); return (int)pickCandidates(sc, view.toScreen(wx, wy)).size(); }  // surfaces under a world point
-    void testSetLayer(int layer, int mode) { layerMode[layer] = mode; updateLayerButtons(); }
+    void testSetLayer(int layer, int mode) { proc.setLayerMode(layer, mode); syncLayers(); }
+    std::array<int, 4> testLayerModes() const { return layerMode; }
+    const verbp::Cam3D& testCamera() const { return cam; }
+    void testFrameAll() { setup3D(proc.getDisplayScene()); frameAll3D(); }
+    void testFrameSelection() { setup3D(proc.getDisplayScene()); frameSelection3D(); }
+    bool testHasFrameButtons() const { return frameAllBtn.isVisible() && frameSelBtn.isVisible(); }
+    bool testPick3D(juce::Point<float> pos, verbp::Cam3D::Vec& at) { const auto sc = proc.getDisplayScene(); setup3D(sc); const auto r = pick3D(sc, pos); at = r.point; return r.hit; }
+    void testSelectObject(int obj) { selectObject(obj); }
     void showPage(int tabIndex, int object) {                            // 0 Objects, 1 Surfaces, 2 Mix, 3 Space, 4 Decay
         if (object >= 0) selectObject(object);
         showTab(tabIndex);
@@ -207,10 +215,25 @@ private:
     juce::Point<float> boxStart, boxEnd;
     bool wallSelected(int i) const { return selKind == SelKind::Wall && std::find(selWalls.begin(), selWalls.end(), i) != selWalls.end(); }
     // 3D view
-    double camYaw = -0.75, camPitch = 0.5, camZoom = 1.0;
+    // Session-only camera (not saved): orbit target, orbit angles and zoom; see Camera3D.h.
+    verbp::Cam3D cam;
     juce::Point<float> orbitStart;
     double orbitYaw0 = 0, orbitPitch0 = 0;
     bool orbiting = false;
+    bool panning3D = false;                    // 3D pan drag (middle button, or Shift + left button)
+    juce::Point<float> pan3DLast;
+    double pan3DDepth = 0;                     // depth of the point that was grabbed: it follows the pointer
+    juce::String camSceneName;                 // the camera follows a newly loaded room again
+    struct Bounds3D { double x0 = -5, y0 = -5, x1 = 5, y1 = 5, H = 3; };
+    Bounds3D bounds3D;
+    Bounds3D setup3D(const verb::Scene&);      // scene extents -> camera scene / viewport
+    std::vector<verbp::Cam3D::Vec> sceneCorners3D() const;
+    struct Pick3D { bool hit = false; verbp::Cam3D::Vec point; };
+    Pick3D pick3D(const verb::Scene&, juce::Point<float> pos);
+    void mouseDown3D(const juce::MouseEvent&);
+    void frameAll3D();
+    void frameSelection3D();
+    juce::TextButton frameAllBtn{"Frame all"}, frameSelBtn{"Frame sel."};
     void paint3D(juce::Graphics&, const verb::Scene&, const double* lis);
     Plane plane = Plane::Top;
     void setPlane(Plane p);
@@ -228,7 +251,8 @@ private:
     // Layers of the plan: walls, floor zones, ceiling zones and plates (zones with a height). Each is shown, locked
     // (drawn, but clicks pass through it) or hidden (not drawn, not picked).
     enum Layer { LayerWalls = 0, LayerFloors, LayerCeilings, LayerPlates };
-    int layerMode[4] = {0, 0, 0, 0};  // 0 shown, 1 locked, 2 hidden
+    std::array<int, 4> layerMode{};  // 0 shown, 1 locked, 2 hidden; cache of the processor's masks (VerbProcessor::getLayerModes)
+    void syncLayers();
     juce::TextButton layerBtn[4];
     static int zoneLayer(const verb::Zone& z, bool ceiling) { return z.z >= 0 ? (int)LayerPlates : (ceiling ? (int)LayerCeilings : (int)LayerFloors); }
     void updateLayerButtons();
@@ -310,6 +334,17 @@ private:
     std::array<Row, 3> tlRows;
     Row heightRow, passRow, roughRow;
     // mix tab
+    juce::ComboBox modeBox;
+    juce::Slider absorptionSlider;
+    juce::Label absorptionLabel, targetLabel, targetResult;
+    juce::TextEditor targetInput;
+    juce::TextButton targetApply{"Apply"}, targetCancel{"Cancel"};
+    std::array<juce::Slider, 3> decaySliders;
+    std::array<juce::Label, 3> decayLabels;
+    std::unique_ptr<juce::ComboBoxParameterAttachment> modeAttachment;
+    std::unique_ptr<juce::SliderParameterAttachment> absorptionAttachment;
+    std::array<std::unique_ptr<juce::SliderParameterAttachment>, 3> decayAttachments;
+    void refreshCreativeControls();
     juce::Slider gainSlider, earlySlider, diffSlider, dopplerSlider;
     juce::Label gainLabel, earlyLabel, diffLabel, dopplerLabel, inputModeLabel;
     juce::ComboBox inputModeBox;
