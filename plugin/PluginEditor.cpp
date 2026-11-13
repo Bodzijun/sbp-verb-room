@@ -1,5 +1,9 @@
 #include "PluginEditor.h"
 
+#if VERB_WEB_UI_ENABLED
+#include "VerbWebEditor.h"
+#endif
+
 #include <algorithm>
 #include <cmath>
 
@@ -684,8 +688,62 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     showTab(0);
     refreshOutputs();
     refreshSpace();
+#if VERB_WEB_UI_ENABLED
+    setupNewUi();
+#endif
     startTimerHz(10);
 }
+
+// ---- N2: way back to the web editor. Nothing here is compiled without the web editor.
+bool VerbEditor::newUiButtonShown() const {
+#if VERB_WEB_UI_ENABLED
+    return newUiBtn.isVisible();
+#else
+    return false;
+#endif
+}
+void VerbEditor::testClickNewUi() {
+#if VERB_WEB_UI_ENABLED
+    if (newUiBtn.isVisible()) newUiBtn.triggerClick();
+#endif
+}
+juce::String VerbEditor::newUiNoteText() const {
+#if VERB_WEB_UI_ENABLED
+    return newUiNote.isVisible() ? newUiNote.getText() : juce::String();
+#else
+    return {};
+#endif
+}
+#if VERB_WEB_UI_ENABLED
+void VerbEditor::setupNewUi() {
+    juce::String why;
+    if (!verbweb::webEditorAvailable(why)) { verbweb::recordDiagnostics("New UI button hidden: " + why); return; }
+    addAndMakeVisible(newUiBtn);
+    newUiBtn.getProperties().set("style", "ghost");
+    newUiBtn.setTooltip("Switch to the new (web) editor. It is remembered for the next time the window is opened.");
+    newUiBtn.onClick = [this] { requestNewUi(); };
+    addChildComponent(newUiNote);
+    newUiNote.setJustificationType(juce::Justification::centredLeft);
+    newUiNote.setColour(juce::Label::textColourId, juce::Colours::khaki);
+    newUiNote.setInterceptsMouseClicks(false, false);
+}
+void VerbEditor::requestNewUi() {
+    verbweb::setPreferredUi(verbweb::UiChoice::web);  // remembered in every case
+    // Inside the web shell (after "Classic UI") the swap happens in place; the classic editor must not be destroyed from
+    // its own button handler, so the shell does it asynchronously.
+    if (auto* shell = findParentComponentOfClass<verbweb::VerbWebEditor>()) {
+        juce::Component::SafePointer<verbweb::VerbWebEditor> target(shell);
+        juce::MessageManager::callAsync([target] { if (target != nullptr) target->switchToWeb("the classic UI asked for the new UI"); });
+        return;
+    }
+    // A plain classic editor is the host's top-level editor: it cannot be replaced inside the host window, so say so.
+    const auto env = juce::SystemStats::getEnvironmentVariable("VERB_UI", {}).trim().toLowerCase();
+    newUiNote.setText(env.isNotEmpty() && env != "web" ? "Saved, but VERB_UI forces the classic UI - remove it, then close and reopen the plugin window."
+                                                         : "New UI saved - close and reopen the plugin window.", juce::dontSendNotification);
+    newUiNote.setVisible(true);
+    newUiBtn.setEnabled(false);
+}
+#endif
 
 VerbEditor::~VerbEditor() {
     stopTimer();
@@ -1766,6 +1824,10 @@ void VerbEditor::resized() {
     viewBar.removeFromRight(8);
     outlinerBtn.setBounds(viewBar.removeFromRight(74));
     for (auto* t : {&viewTop, &viewFront, &viewSide, &viewIso}) { t->setBounds(viewBar.removeFromLeft(54)); viewBar.removeFromLeft(2); }
+#if VERB_WEB_UI_ENABLED
+    newUiBtn.setBounds(2, getHeight() - 32, 50, 22);  // bottom of the tool strip: below every tool at every window size
+    newUiNote.setBounds(viewBar.reduced(6, 0));        // the free middle of the view bar; never moves another control
+#endif
 
     {
         auto row = panel.removeFromTop(28);

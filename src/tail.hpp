@@ -31,6 +31,19 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene&, const Transducer&,
     const std::vector<Transducer>&, int order, int rays, int seed,
     const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {});
+// E4a: the cheap late-energy estimate that lets the late field follow a moving listener/source. Same physics as traceTail
+// (transmission, occlusion, detection-sphere clipping), integrated over time, but ray i uses its own random generator seeded
+// from (seed, i): the same ray set traced from two nearby poses gives strongly correlated results (common random numbers), so
+// the RATIO of two such estimates is far less noisy than either. stopDb < 0 ends a ray once its energy is that far below a
+// full-sphere start (what it would still add is below that fraction of its total). `work` returns deterministic work units.
+std::vector<std::array<double, NB>> traceTailEnergyCRN(const Scene&, const Transducer&, const std::vector<Transducer>&,
+    int order, int rays, int seed, double stopDb, const std::function<bool()>& cancelled = {}, long long* work = nullptr,
+    std::vector<std::array<double, NB>>* sumSq = nullptr);  // sumSq: per receiver/band sum of squared per-ray totals (variance)
+// E4a: the same late transfer, traced backwards from the listener (head centre `origin`) to every source at once; see
+// tail.cpp. Result [s * ears.size() + r][band]. The motion estimate is the ratio of two such traces (now / reference).
+std::vector<std::array<double, NB>> traceLateReciprocal(const Scene&, Vec3 origin, const std::vector<Transducer>& ears,
+    const std::vector<Transducer>& sources, int order, int rays, int seed, double stopDb, const std::function<bool()>& cancelled = {}, long long* work = nullptr,
+    std::vector<std::array<double, NB>>* sumSq = nullptr);
 // Length probes use the legacy envelope so scene duration remains compatible.
 // Production tails additionally regularize the diffuse transition using raw h2.
 void finalizeTail(TailHist& hist, bool smoothTransition = true);

@@ -2,12 +2,17 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <sstream>
 
+#include "EditorSession.h"
 #include "InputOrder.h"
 #include "tail.hpp"
 #include "PluginEditor.h"
+#if VERB_WEB_UI_ENABLED
+#include "VerbWebEditor.h"
+#endif
 
 namespace {
 
@@ -74,6 +79,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
         juce::NormalisableRange<float> range(.3f, 3.f, .001f); range.setSkewForCentre(1.f);
         p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{id, 1}, id, range, 1.f));
     }
+    add("size","Size",50,160,100,"%");
+    add("predelay","Predelay",0,250,0,"ms");
+    add("stereoWidth","Stereo width",0,200,100,"%");
+    p.push_back(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"freeze",1},"Freeze",false));
+    add("duck","Duck amount",0,24,0,"dB");
+    add("duckRelease","Duck release",50,2000,300,"ms");
+    add("makeup", "Makeup", 0.f, 36.f, 0.f, "dB");
     return {p.begin(), p.end()};
 }
 
@@ -87,7 +99,11 @@ VerbProcessor::VerbProcessor()
       apvts(*this, nullptr, "VerbState", makeLayout()) {
     for (int o = 0; o <= verbp::kMaxSources; ++o)
         for (int k = 0; k < (o == verbp::kListener ? 4 : 5); ++k) pv[o][k] = apvts.getRawParameterValue(verbp::paramId(o, k));
+    sizeParam=apvts.getRawParameterValue("size");predelayParam=apvts.getRawParameterValue("predelay");
+    widthParam=apvts.getRawParameterValue("stereoWidth");freezeParam=apvts.getRawParameterValue("freeze");
+    duckParam=apvts.getRawParameterValue("duck");duckReleaseParam=apvts.getRawParameterValue("duckRelease");
     gainParam = apvts.getRawParameterValue("gain");
+    makeupParam = apvts.getRawParameterValue("makeup");
     modeParam = apvts.getRawParameterValue("mode");
     absorptionParam = apvts.getRawParameterValue("absorption");
     const char* decayIds[] = {"decayLow","decayMid","decayHigh"};
@@ -105,6 +121,7 @@ VerbProcessor::VerbProcessor()
         sourceMute[s] = apvts.getRawParameterValue(verbp::sourceSwitchId(s, false));
         sourceSolo[s] = apvts.getRawParameterValue(verbp::sourceSwitchId(s, true));
     }
+    session = std::make_unique<verbp::EditorSession>(*this);
     sceneText = kDefaultScene;
     sceneName = "Built-in demo room";
     startThread();
@@ -128,6 +145,10 @@ bool VerbProcessor::isBusesLayoutSupported(const BusesLayout& l) const {
 void VerbProcessor::prepareToPlay(double sr, int block) {
     hostSr = sr;
     maxBlock = std::max(block, 128);
+    webLastBlockSize.store(std::max(1, block), std::memory_order_relaxed);
+    webCpuMean.store(0.f, std::memory_order_relaxed);
+    webCpuWorst.store(0.f, std::memory_order_relaxed);
+    webCpuOverrunHold.store(0.f, std::memory_order_relaxed);
     hostOutCh = std::max(1, getTotalNumOutputChannels());
     hostInCh = getTotalNumInputChannels();
     {   // channel n of the host's track is read from the buffer channel JUCE put it in
@@ -138,6 +159,8 @@ void VerbProcessor::prepareToPlay(double sr, int block) {
         }
     }
     serialSeen = ~0ull;
+    haveLastProcessWall = false;
+    havePlayHead = false;
     lfeSoloGain.reset(sr, 0.01);
     bool needRebuild;
     {
@@ -152,10 +175,52 @@ void VerbProcessor::prepareToPlay(double sr, int block) {
 }
 
 void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer&) {
+    const auto blockStart = std::chrono::steady_clock::now();
     juce::ScopedNoDenormals noDenormals;
+    static_assert(std::atomic<uint64_t>::is_always_lock_free, "Web processing observation must be lock-free");
+    static_assert(std::atomic<int>::is_always_lock_free, "Web block size observation must be lock-free");
+    webProcessedBlocks.fetch_add(1, std::memory_order_relaxed);
     const int n = buf.getNumSamples(), nIn = getTotalNumInputChannels(), nOut = getTotalNumOutputChannels();
-    for (int ch = 0; ch < verbp::kMaxInputChannels; ++ch)
-        inPeaks[(size_t)ch].store(ch < nIn && inMap[(size_t)ch] < buf.getNumChannels() ? buf.getMagnitude(inMap[(size_t)ch], 0, n) : 0.f, std::memory_order_relaxed);
+    static_assert(std::atomic<float>::is_always_lock_free, "Web peaks must remain lock-free");
+    struct BlockLoadGuard {
+        VerbProcessor& self;
+        std::chrono::steady_clock::time_point start;
+        int samples;
+        ~BlockLoadGuard() noexcept {
+            if (samples <= 0) return;
+            const double sr = self.builtSr.load(std::memory_order_relaxed) > 0.0 ? self.builtSr.load(std::memory_order_relaxed) : self.hostSr;
+            if (!(sr > 0.0)) return;
+            const double blockSec = (double)samples / sr;
+            const double elapsedSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            const float overrideRatio = self.webCpuTestOverride.load(std::memory_order_relaxed);
+            const float ratio = overrideRatio >= 0.f ? overrideRatio : (float)std::max(0.0, elapsedSec / blockSec);
+            const float dt = (float)blockSec;
+            const float alpha = 1.f - std::exp(-dt / 0.6f);
+            const float prevMean = self.webCpuMean.load(std::memory_order_relaxed);
+            self.webCpuMean.store(prevMean + alpha * (ratio - prevMean), std::memory_order_relaxed);
+            const float decay = std::exp(-dt / 2.5f);
+            const float prevWorst = self.webCpuWorst.load(std::memory_order_relaxed);
+            self.webCpuWorst.store(std::max(ratio, prevWorst * decay), std::memory_order_relaxed);
+            float hold = self.webCpuOverrunHold.load(std::memory_order_relaxed);
+            if (ratio >= 1.0f) {
+                self.webCpuOverruns.fetch_add(1, std::memory_order_relaxed);
+                hold = 3.5f;
+            } else {
+                hold = std::max(0.f, hold - dt);
+            }
+            self.webCpuOverrunHold.store(hold, std::memory_order_relaxed);
+            self.webLastBlockSize.store(samples, std::memory_order_relaxed);
+        }
+    } blockLoadGuard{*this, blockStart, n};
+    const bool accumulateWeb = webMetersActive.load(std::memory_order_relaxed);
+    for (int ch = 0; ch < verbp::kMaxInputChannels; ++ch) {
+        const float peak = ch < nIn && inMap[(size_t)ch] < buf.getNumChannels() ? buf.getMagnitude(inMap[(size_t)ch], 0, n) : 0.f;
+        inPeaks[(size_t)ch].store(peak, std::memory_order_relaxed);
+        if (accumulateWeb) {
+            auto& target = webInPeaks[(size_t)ch]; auto previous = target.load(std::memory_order_relaxed);
+            while (previous < peak && !target.compare_exchange_weak(previous, peak, std::memory_order_relaxed)) {}
+        }
+    }
     juce::SpinLock::ScopedTryLockType lk(engineLock);
     if (!lk.isLocked() || !bundle) {
         buf.clear();
@@ -183,12 +248,93 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     for (int k = 0; k < 4; ++k) cur[verbp::kListener][k] = pv[verbp::kListener][k]->load(std::memory_order_relaxed);
     cur[verbp::kListener][2] = std::min(std::max(cur[verbp::kListener][2], 0.0), zTop);
     const uint64_t ser = loadSerial.load();
-    if (ser != serialSeen) {  // new engine: start from the current values, no glide
+    const bool newEngine = (ser != serialSeen);
+    const double appliedSize=engineSize.load();
+    const double sizeScale=appliedSize*.01;
+    const double sampleRate = std::max(8000.0, builtSr.load(std::memory_order_relaxed) > 0.0 ? builtSr.load(std::memory_order_relaxed) : hostSr);
+    const double blockSec = (double)std::max(1, n) / sampleRate;
+    double curPtOff[verbp::kMaxPoints][3] = {};
+    for (int p = 0; p < P; ++p)
+        for (int k = 0; k < 3; ++k) curPtOff[p][k] = ptOff[p][k].load(std::memory_order_relaxed);
+    if (newEngine) {  // new engine: start from the current values, no glide
         prevAnySourceSolo = anySourceSolo;
-        for (int i = 0; i < NS; ++i) { std::memcpy(prev[i], cur[i], sizeof prev[i]); prevGain[i] = curGain[i]; prevSourceGate[i] = sourceGate[i]; }
+        for (int i = 0; i < NS; ++i) {
+            std::memcpy(prev[i], cur[i], sizeof prev[i]);
+            std::memcpy(prevRaw[i], cur[i], sizeof prevRaw[i]);
+            samplesSinceMove[i] = 0;
+            prevGain[i] = curGain[i]; prevSourceGate[i] = sourceGate[i];
+        }
         std::memcpy(prev[verbp::kListener], cur[verbp::kListener], sizeof prev[verbp::kListener]);
+        std::memcpy(prevRaw[verbp::kListener], cur[verbp::kListener], sizeof prevRaw[verbp::kListener]);
+        samplesSinceMove[verbp::kListener] = 0;
+        for (int p = 0; p < P; ++p) std::memcpy(prevPtOff[p], curPtOff[p], sizeof prevPtOff[p]);
+        havePlayHead = false;
+        haveLastProcessWall = false;
         serialSeen = ser;
     }
+    const double wallGap = haveLastProcessWall ? std::chrono::duration<double>(blockStart - lastProcessWall).count() : 0.0;
+    const bool gapJump = !newEngine && haveLastProcessWall && wallGap > std::max(0.25, 8.0 * blockSec);
+    lastProcessWall = blockStart;
+    haveLastProcessWall = true;
+    bool transportJump = false;
+    if (auto* ph = getPlayHead()) {
+        if (const auto posInfo = ph->getPosition()) {
+            const bool isPlaying = posInfo->getIsPlaying();
+            if (const auto ts = posInfo->getTimeInSamples()) {
+                const int64_t curTs = *ts;
+                if (!newEngine && havePlayHead) {
+                    const int64_t expected = prevPlayHeadSample + (prevPlaying ? (int64_t)prevBlockSamples : 0);
+                    const int64_t tol = std::max<int64_t>(n / 2 + 64, (int64_t)std::llround(0.02 * sampleRate));
+                    if (isPlaying && !prevPlaying) {
+                        if (std::llabs(curTs - prevPlayHeadSample) > tol) transportJump = true;
+                    } else if (isPlaying && prevPlaying) {
+                        if (std::llabs(curTs - expected) > tol) transportJump = true;
+                    }
+                }
+                prevPlayHeadSample = curTs;
+                prevPlaying = isPlaying;
+                prevBlockSamples = n;
+                havePlayHead = true;
+            }
+        }
+    }
+    bool objJumped[verbp::kMaxSources + 1] = {};
+    bool anyJumped = false;
+    bool anyMoved = false;
+    if (!newEngine && n > 0) {
+        auto checkObj = [&](int o) {
+            const double dPos = std::hypot(std::hypot(cur[o][0] - prevRaw[o][0], cur[o][1] - prevRaw[o][1]), cur[o][2] - prevRaw[o][2]) * sizeScale;
+            const double dAng = std::fabs(std::remainder(cur[o][3] - prevRaw[o][3], 360.0));
+            const double dtSinceMove = (double)(samplesSinceMove[o] + (uint64_t)n) / sampleRate;
+            const bool largeStep = dPos > std::max(0.75, 90.0 * blockSec);
+            const bool fastStep = (dtSinceMove <= 1.5 * blockSec) && dPos > std::max(0.45, 90.0 * blockSec);
+            const bool angJump = dAng > std::max(45.0, 1440.0 * blockSec);
+            if (largeStep || fastStep || angJump) { objJumped[o] = true; anyJumped = true; }
+            if (dPos > 0.02 || dAng > 2.0) anyMoved = true;
+            if (dPos > 1e-6 || dAng > 1e-4) samplesSinceMove[o] = 0;
+            else samplesSinceMove[o] += (uint64_t)n;
+            std::memcpy(prevRaw[o], cur[o], sizeof prevRaw[o]);
+        };
+        for (int i = 0; i < NS; ++i) checkObj(i);
+        checkObj(verbp::kListener);
+        for (int p = 0; p < P; ++p) {
+            const int o = b.points[(size_t)p].source;
+            const double dPt = std::hypot(std::hypot(curPtOff[p][0] - prevPtOff[p][0], curPtOff[p][1] - prevPtOff[p][1]), curPtOff[p][2] - prevPtOff[p][2]) * sizeScale;
+            const double dtSinceMove = (double)(samplesSinceMove[o] + (uint64_t)n) / sampleRate;
+            const bool largePt = dPt > std::max(0.75, 90.0 * blockSec);
+            const bool fastPt = (dtSinceMove <= 1.5 * blockSec) && dPt > std::max(0.45, 90.0 * blockSec);
+            if (largePt || fastPt) { objJumped[o] = true; anyJumped = true; }
+            if (dPt > 0.02) anyMoved = true;
+            std::memcpy(prevPtOff[p], curPtOff[p], sizeof prevPtOff[p]);
+        }
+        if ((gapJump || transportJump) && anyMoved) {
+            anyJumped = true;
+            for (int i = 0; i < NS; ++i) objJumped[i] = true;
+            objJumped[verbp::kListener] = true;
+        }
+        if (anyJumped) e.notifyJump();
+    }
+    const float makeupGain = juce::Decibels::decibelsToGain(makeupParam->load(std::memory_order_relaxed));
     const float outGain = juce::Decibels::decibelsToGain(gainParam->load(std::memory_order_relaxed));
     const bool creative = modeParam->load(std::memory_order_relaxed) >= .5f;
     e.setDecayMultipliers(creative ? decayParam[0]->load() : 1., creative ? decayParam[1]->load() : 1., creative ? decayParam[2]->load() : 1.);
@@ -196,6 +342,9 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     e.setEarlyDiffusion(diffusionParam->load(std::memory_order_relaxed));
     e.setDopplerStrength(creative ? dopplerParam->load(std::memory_order_relaxed) : 1.);
     e.setTailLevel(creative ? tailParam->load(std::memory_order_relaxed) : 0.);
+    e.setFreezeAvailable(creative);
+    e.setCreativeWet(creative?predelayParam->load():0,creative&&b.R>1?widthParam->load():100,
+        creative&&freezeParam->load()>=.5f,creative?duckParam->load():0,creative?duckReleaseParam->load():300);
     int solo = 0;
     for (int k = 0; k < 3; ++k) if (soloParam[k]->load(std::memory_order_relaxed) >= 0.5f) solo |= 1 << k;
     e.setSoloMask(solo);
@@ -217,17 +366,18 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     // blocks: no extra latency, the old scheme lagged the automation by a whole block).
     struct HermSeg { double p0, p1, m0, m1; };
     HermSeg hs[verbp::kMaxSources + 1][3];
-    {
+    if (n > 0) {
         // An alpha-beta tracker follows position and velocity of each coordinate. The measurement is the automation value
         // at the block start; it may arrive irregularly (a mouse drag writes ~60 times a second whatever the block size, a
         // sparse envelope less often): blocks without a new value must not read as "stopped", so the gains are set by a
         // time constant, not by the block, and the velocity is a smoothed estimate.
-        const double sampleRate = std::max(8000.0, builtSr.load() > 0 ? builtSr.load() : hostSr);
         const double alpha = 1.0 - std::exp(-(double)n / (0.020 * sampleRate)), beta = alpha * alpha / (2.0 - alpha);
         auto build = [&](int o) {
+            const bool snapObj = (ser != hSeen || gapJump || transportJump || objJumped[o]);
+            if (snapObj) prev[o][3] = cur[o][3];
             for (int k = 0; k < 3; ++k) {
                 const double c0 = cur[o][k];
-                if (ser != hSeen || std::fabs(c0 - hPEnd[o][k]) > 20.0) {  // a new engine or a jump of the automation: start afresh here
+                if (snapObj || std::fabs(c0 - hPEnd[o][k]) > 20.0) {  // a new engine or a jump of the automation: start afresh here
                     hPEnd[o][k] = c0;
                     hVel[o][k] = 0.0;
                 }
@@ -258,6 +408,13 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     int done = 0;
     while (done < n) {
         const int m = std::min(n - done, b.maxBlock);
+        // Detector: power sum of every host dry input, before routes, gains or reverb.
+        std::fill_n(b.detector.data(),m,0.f);
+        for(int ch=0;ch<nIn;++ch) {
+            const float* dry=buf.getReadPointer(inMap[(size_t)ch])+done;
+            for(int i=0;i<m;++i)if(std::abs(dry[i])<1e6f)b.detector[i]+=dry[i]*dry[i];
+        }
+        for(int i=0;i<m;++i)b.detector[i]=std::sqrt(b.detector[i]);
         // ---- inputs -> one signal per engine point (read before any output is written: in/out share the buffer) ----
         if (b.lfeOut >= 0) std::fill(b.lfe.begin(), b.lfe.begin() + m, 0.f);
         for (int p = 0; p < P; ++p) {
@@ -311,7 +468,10 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             // positions follow a cubic Hermite curve between the automation values (continuous velocity: a straight line
             // per block makes the velocity jump at every block boundary, which is heard as steps in the Doppler pitch)
             auto mix = [&](int o, int k) {
-                if (k >= 3) return prev[o][k] + (cur[o][k] - prev[o][k]) * t;  // azimuth/yaw: plain glide
+                if (k >= 3) {
+                    if (objJumped[o]) return cur[o][k];
+                    return prev[o][k] + std::remainder(cur[o][k] - prev[o][k], 360.0) * t;
+                }
                 const HermSeg& sg = hs[o][k];
                 return h00 * sg.p0 + h10 * sg.m0 + h01 * sg.p1 + h11 * sg.m1;
             };
@@ -320,16 +480,18 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 const double ca = std::cos(az * verb::kPi / 180.0), sa = std::sin(az * verb::kPi / 180.0);
                 for (int p = b.pointStart[(size_t)s]; p < b.pointStart[(size_t)s] + b.pointCount[(size_t)s]; ++p) {
                     // live offset in the source's frame (x forward along the azimuth, y left, z up)
-                    const double ox = ptOff[p][0].load(std::memory_order_relaxed), oy = ptOff[p][1].load(std::memory_order_relaxed), oz = ptOff[p][2].load(std::memory_order_relaxed);
-                    e.setSourcePosition(p, x + ca * ox - sa * oy, y + sa * ox + ca * oy, std::min(std::max(z + oz, 0.0), zTop));
+                    const double ox = curPtOff[p][0], oy = curPtOff[p][1], oz = curPtOff[p][2];
+                    e.setSourcePosition(p, (x + ca * ox - sa * oy)*sizeScale, (y + sa * ox + ca * oy)*sizeScale, std::min(std::max(z + oz, 0.0), zTop)*sizeScale);
                     e.setSourceAzimuth(p, az);
                     e.setSourcePattern(p, srcPattern[s].load(std::memory_order_relaxed));
                 }
             }
-            e.setListener(mix(verbp::kListener, 0), mix(verbp::kListener, 1), mix(verbp::kListener, 2), mix(verbp::kListener, 3));
+            e.setListener(mix(verbp::kListener, 0)*sizeScale, mix(verbp::kListener, 1)*sizeScale, mix(verbp::kListener, 2)*sizeScale, mix(verbp::kListener, 3));
             for (int p = 0; p < P; ++p) ip[p] = b.in[(size_t)p].data() + off;
             for (int r = 0; r < R; ++r) op[r] = b.out[(size_t)r].data() + off;
-            e.process(ip, op, len);
+            e.acknowledgePoseScale(appliedSize/b.constructionSize);
+            e.process(ip, op, len, b.detector.data()+off);
+            duckReduction.store(e.duckReductionDb(),std::memory_order_relaxed);
         }
         for (int ch = 0; ch < nOut; ++ch) {
             float* d = buf.getWritePointer(ch) + done;
@@ -366,6 +528,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 }
             }
         }
+        for(int ch=0;ch<nOut;++ch) juce::FloatVectorOperations::multiply(buf.getWritePointer(ch)+done,makeupGain,m);
         done += m;
     }
     prevWet = wetG1;
@@ -375,11 +538,18 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     std::memcpy(prev[verbp::kListener], cur[verbp::kListener], sizeof prev[verbp::kListener]);
 }
 
+#if VERB_WEB_UI_ENABLED
+// Opt-in WebView editor (VERB_UI=web or the stored preference); the native editor otherwise, and on any failure.
+juce::AudioProcessorEditor* VerbProcessor::createEditor() { return verbweb::createEditorFor(*this); }
+#else
 juce::AudioProcessorEditor* VerbProcessor::createEditor() { return new VerbEditor(*this); }
+#endif
 
 // ---------- state ----------
 void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
     auto st = apvts.copyState();
+    // A held sound is ephemeral and its audio history is intentionally not serialized.
+    auto freezeState=st.getChildWithProperty("id","freeze");if(freezeState.isValid())freezeState.setProperty("value",0.f,nullptr);
     {
         juce::ScopedLock l(dispLock);
         st.setProperty("sceneText", sceneText, nullptr);
@@ -496,6 +666,11 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
             p.setProperty("value", 1.f, nullptr); st.appendChild(p, nullptr); // legacy => Creative; neutral scale/decays
         }
     }
+    for(const auto& entry:std::initializer_list<std::pair<const char*,float>>{{"size",100},{"predelay",0},{"stereoWidth",100},{"freeze",0},{"duck",0},{"duckRelease",300},{"makeup",0}}) {
+        auto p=st.getChildWithProperty("id",entry.first);
+        if(!p.isValid()){p=juce::ValueTree("PARAM");p.setProperty("id",entry.first,nullptr);st.appendChild(p,nullptr);p.setProperty("value",entry.second,nullptr);}
+        if(juce::String(entry.first)=="freeze")p.setProperty("value",0.f,nullptr);
+    }
     // Invalidate a finishing geometry request BEFORE replacing parameter state.
     // Geometry imports never write mode; only this state migration selects legacy Creative.
     { juce::ScopedLock l(reqLock); hasReq=false; defaultsOwed=false; reqSerial.fetch_add(1); }
@@ -525,9 +700,10 @@ void VerbProcessor::queueScene(const juce::String& text, const juce::String& nam
     uint64_t gen;
     {
         juce::ScopedLock l(dispLock);
-        if (!isRebuild) ++roomGen;
+        if (!isRebuild) { ++roomGen; ++structRevision; }  // a new room: the undo history belongs to the old one
         gen = roomGen;
     }
+    if (!isRebuild && session) session->notifyDocumentReplaced();
     {
         juce::ScopedLock l(reqLock);
         req.rebuild = isRebuild;
@@ -600,37 +776,46 @@ void VerbProcessor::updateBounds(const verb::Scene& sc) {
     }
 }
 
-void VerbProcessor::editScene(const std::function<void(verb::Scene&)>& fn) {
+bool VerbProcessor::isRoomLoadPending() const {
+    juce::ScopedLock l(dispLock);
+    return roomLoadPendingLocked();
+}
+
+bool VerbProcessor::editScene(const std::function<void(verb::Scene&)>& fn) {
     {
         juce::ScopedLock l(dispLock);
+        if (roomLoadPendingLocked()) return false;  // the pending room wins; `display` is about to be replaced
         verb::Scene tmp = display;
         fn(tmp);
         verb::sanitizeScene(tmp);  // e.g. an endpoint dragged onto the other one would leave a zero-length wall
         verb::compactMaterials(tmp);
-        if ((int)tmp.walls.size() > 128 || tmp.floorMat < 0 || tmp.floorMat >= (int)tmp.mats.size() || tmp.ceilMat >= (int)tmp.mats.size()) return;
+        if ((int)tmp.walls.size() > 128 || tmp.floorMat < 0 || tmp.floorMat >= (int)tmp.mats.size() || tmp.ceilMat >= (int)tmp.mats.size()) return false;
         for (auto& w : tmp.walls)
-            if (w.mat < 0 || w.mat >= (int)tmp.mats.size()) return;
+            if (w.mat < 0 || w.mat >= (int)tmp.mats.size()) return false;
         tmp.height = std::min(std::max(tmp.height, 1.0), 30.0);
         display = tmp;
         ++displayEdits;
         sceneText = verb::serializeScene(display);  // the project state keeps the edited room
         updateBounds(display);
-        ++sceneSerial; ++geometryEpoch;
+        ++sceneSerial; ++geometryEpoch; ++structRevision;
     }
     geomDirty = true;
     wake.signal();
+    return true;
 }
 
 // ---------- sources / outputs ----------
-void VerbProcessor::editSceneMetadata(const std::function<void(verb::Scene&)>& fn) {
+bool VerbProcessor::editSceneMetadata(const std::function<void(verb::Scene&)>& fn) {
     {
         juce::ScopedLock lock(dispLock);
+        if (roomLoadPendingLocked()) return false;  // see editScene
         fn(display);
         ++displayEdits;
         sceneText = verb::serializeScene(display);
-        ++sceneSerial;
+        ++sceneSerial; ++structRevision;
     }
     updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
+    return true;
 }
 
 std::array<int, 4> VerbProcessor::getLayerModes() const {
@@ -661,7 +846,7 @@ void VerbProcessor::setSources(const std::vector<verbp::SourceCfg>& cfg) {
             c.pattern = std::min(std::max(c.pattern, 0.0), 1.0);
         }
         syncPatterns();
-        ++sceneSerial;
+        ++sceneSerial; ++structRevision;
     }
     rebuild();
 }
@@ -717,6 +902,7 @@ void VerbProcessor::setSourcePattern(int index, double pattern) {
     if (index < 0 || index >= (int)srcCfg.size()) return;
     srcCfg[(size_t)index].pattern = pattern;
     srcPattern[index].store((float)pattern);
+    ++structRevision;  // not part of sceneSerial; the command revision must cover it
 }
 
 void VerbProcessor::setSourceSpread(int index, double radius) {
@@ -724,6 +910,7 @@ void VerbProcessor::setSourceSpread(int index, double radius) {
     juce::ScopedLock l(dispLock);
     if (index < 0 || index >= (int)srcCfg.size()) return;
     srcCfg[(size_t)index].spread = radius;
+    ++structRevision;
     if (srcCfg[(size_t)index].freePoints) return;  // free points keep their own offsets
     for (size_t p = 0; p < livePoints.size(); ++p)
         if (livePoints[p].source == index && livePoints[p].radius > 0) {
@@ -762,22 +949,10 @@ void VerbProcessor::scaleRoom(double f, bool includeObjects) {
         cx = 0.5 * (x0 + x1); cy = 0.5 * (y0 + y1);
     }
     editScene([f, cx, cy, includeObjects](verb::Scene& s) {
-        for (auto& w : s.walls) {
-            w.ax = cx + (w.ax - cx) * f; w.ay = cy + (w.ay - cy) * f;
-            w.bx = cx + (w.bx - cx) * f; w.by = cy + (w.by - cy) * f;
-        }
-        for (auto* zones : {&s.floorZones, &s.ceilZones})  // floor / ceiling patches, plates and openings follow the walls in the plan
-            for (auto& z : *zones)
-                for (auto& p : z.poly) { p.first = cx + (p.first - cx) * f; p.second = cy + (p.second - cy) * f; }
-        if (includeObjects) {
-            s.height = std::min(std::max(s.height * f, 1.0), 30.0);
-            for (auto& w : s.walls) {  // partial-height walls scale with the room
-                w.z0 *= f;
-                if (w.z1 < 1e8) w.z1 *= f;
-            }
-            for (auto* zones : {&s.floorZones, &s.ceilZones})  // plates (zones with a height) scale like partial-height walls
-                for (auto& z : *zones)
-                    if (z.z >= 0) z.z = std::min(z.z * f, s.height);
+        verb::scaleRoomGeometry(s,f,cx,cy,includeObjects);
+        if(includeObjects){
+            s.height=std::clamp(s.height,1.,30.);
+            for(auto* zones:{&s.floorZones,&s.ceilZones})for(auto& z:*zones)if(z.z>=0)z.z=std::min(z.z,s.height);
         }
         // Not scaled on purpose: clutter objects (their lengths, heights and clearance are physical sizes of furniture; their
         // positions are drawn from the seeded generator inside the scaled walls), the scene's own source / receiver / listener
@@ -802,6 +977,7 @@ void VerbProcessor::setPointOffset(int source, int channel, float ox, float oy, 
     if (c.ox.size() != n || c.oy.size() != n || c.oz.size() != n) verbp::freezeLayout(c);
     if (channel < 0 || channel >= (int)n) return;
     c.ox[(size_t)channel] = ox; c.oy[(size_t)channel] = oy; c.oz[(size_t)channel] = oz;
+    ++structRevision;
     for (size_t p = 0; p < livePoints.size(); ++p)
         if (livePoints[p].source == source && livePoints[p].channel == channel) { ptOff[p][0] = ox; ptOff[p][1] = oy; ptOff[p][2] = oz; }
 }
@@ -823,7 +999,7 @@ void VerbProcessor::setOutputCfg(const verbp::OutputCfg& o) {
         outCfg.layout = std::min(std::max(outCfg.layout, -1), (int)verb::Layout::Ring);
         outCfg.radius = verb::clampTo(outCfg.radius, 0.0, 1.0, 0.1);
         outCfg.micPattern = std::min(std::max(outCfg.micPattern, 0), (int)verb::MicPattern::HumanEars);
-        ++sceneSerial;
+        ++sceneSerial; ++structRevision;
     }
     rebuild();
 }
@@ -839,7 +1015,7 @@ void VerbProcessor::setTailSettings(verbp::TailSettings settings) {
         juce::ScopedLock l(dispLock);
         if (settings.rays == tailSettings.rays && settings.adaptive == tailSettings.adaptive) return;
         tailSettings = settings;
-        ++sceneSerial;
+        ++sceneSerial; ++structRevision;
     }
     qualityDirty = true;
     wake.signal();
@@ -854,7 +1030,7 @@ std::shared_ptr<const verb::TailDiagnostics> VerbProcessor::getTailDiagnostics()
 bool VerbProcessor::isTailCurrent() const {
     juce::SpinLock::ScopedLockType lock(engineLock);
     return state.load()==2 && !geomDirty.load() && !qualityDirty.load() && geometryEpoch.load()==appliedGeometryEpoch.load()
-        && engineAbsorption.load()==absorptionParam->load() && bundle && bundle->engine->tailIsCurrent();
+        && engineAbsorption.load()==absorptionParam->load() && engineSize.load()==sizeParam->load() && bundle && bundle->engine->tailIsCurrent();
 }
 
 verb::Scene VerbProcessor::targetScene() const {
@@ -864,6 +1040,8 @@ verb::Scene VerbProcessor::targetScene() const {
     // Reproduce the engine's ORIGINAL seeded placement anchors before substituting live
     // excitation. Moving a source must not regenerate a different set of furniture for
     // the assistant. Reconstruct unscaled roughened materials to avoid undoing a clamp.
+    const double sf=engineSize.load()*.01;
+    verb::scaleRoomGeometry(s,sf);
     if (modeled) {s.sources=modeled->sources;s.receivers=modeled->receivers;}
     s=verb::withClutter(verb::withRoughness(s),128);s.clutter.count=0;s.roughness=0;
     if (!s.sources.empty()) {
@@ -872,11 +1050,13 @@ verb::Scene VerbProcessor::targetScene() const {
         const double ox=ptOff[0][0].load(),oy=ptOff[0][1].load(),oz=ptOff[0][2].load();
         s.sources[0].pos={pv[0][0]->load()+std::cos(az)*ox-std::sin(az)*oy,
             pv[0][1]->load()+std::sin(az)*ox+std::cos(az)*oy,
-            std::clamp((double)pv[0][2]->load()+oz,0.,s.ceilMat<0?30.:s.height)};
+            std::clamp((double)pv[0][2]->load()+oz,0.,s.ceilMat<0?30.:s.height/sf)};
+        s.sources[0].pos=s.sources[0].pos*sf;
         s.sources[0].pattern=srcPattern[0].load();s.sources[0].azimuthDeg=pv[0][3]->load();
     }
     verb::Transducer receiver;
     receiver.pos={pv[verbp::kListener][0]->load(),pv[verbp::kListener][1]->load(),pv[verbp::kListener][2]->load()};
+    receiver.pos=receiver.pos*sf;
     s.receivers={receiver};return s;
 }
 
@@ -948,26 +1128,51 @@ void VerbProcessor::startTargetRT60(double seconds) {
     });
 }
 
+// Web UI publications are immutable and produced off the audio thread. The page never holds engineLock.
+bool VerbProcessor::isWebTailCurrent() const {
+    if (!webTailCurrent.load() || !isWebSceneCurrent() || qualityDirty.load()) return false;
+    const auto d = getWebTailDiagnostics();
+    if (!d) return false;
+    // The worker publication can predate an APVTS change. Compare the real
+    // requested decay and quality with the immutable applied diagnostics too.
+    for (int i = 0; i < 3; ++i)
+        if (std::abs(d->multipliers[(size_t)i] - (modeParam->load() >= .5f ? decayParam[i]->load() : 1.)) > 1e-6) return false;
+    const auto quality = getTailSettings(); // short dispLock, never engineLock
+    return d->baseRays == quality.rays && d->adaptive == quality.adaptive;
+}
+
+void VerbProcessor::publishWebDiagnostics() {
+    if (!bundle) { webTailCurrent = false; return; }
+    const auto modeled = bundle->engine->sceneSnapshot();
+    if (std::atomic_load(&webModeledScene) != modeled) { std::atomic_store(&webModeledScene, modeled); ++webGeometrySerial; }
+    std::atomic_store(&webTailDiagnostics, bundle->engine->tailDiagnostics());
+    webTailCurrent = state.load() == 2 && !geomDirty.load() && !qualityDirty.load()
+        && geometryEpoch.load() == appliedGeometryEpoch.load() && engineAbsorption.load() == absorptionParam->load() && engineSize.load()==sizeParam->load()
+        && bundle->engine->tailIsCurrent();
+}
+
 // ---------- loader thread ----------
 void VerbProcessor::run() {
     double appliedAbsorption = -1.;
-    double observedScale = -1.;
+    double observedScale = -1., observedSize=-1.;
     uint64_t observedEpoch = 0;
     auto stableSince = std::chrono::steady_clock::now();
     while (!threadShouldExit()) {
         wake.wait(250);
         if (threadShouldExit()) break;
+        publishWebDiagnostics();
         if (qualityDirty.exchange(false) && bundle) {
             const auto settings = getTailSettings();
             bundle->engine->setTailQuality(settings.rays, settings.adaptive);
         }
         const double scale = absorptionParam->load();
-        const bool scaleChanged = scale != appliedAbsorption;
+        const double size=sizeParam->load();
+        const bool scaleChanged = scale != appliedAbsorption || size!=engineSize.load();
 
         const auto epochNow=geometryEpoch.load();
         const auto now=std::chrono::steady_clock::now();
-        if(scale!=observedScale || epochNow!=observedEpoch) {
-            observedScale=scale;observedEpoch=epochNow;stableSince=now;
+        if(scale!=observedScale || size!=observedSize || epochNow!=observedEpoch) {
+            observedSize=size;observedScale=scale;observedEpoch=epochNow;stableSince=now;
         }
         bool scenePending;
         {juce::ScopedLock l(reqLock);scenePending=hasReq;}
@@ -980,10 +1185,11 @@ void VerbProcessor::run() {
                 juce::ScopedLock l(dispLock);
                 s = display; epoch = geometryEpoch.load();
             }
+            verb::scaleRoomGeometry(s,size*.01);
             const auto serial=reqSerial.load();
             try {
-                if (bundle && bundle->engine->setScene(s, scale, [&]{return threadShouldExit() || reqSerial.load()!=serial || geometryEpoch.load()!=epoch || absorptionParam->load()!=scale;})) {
-                    engineAbsorption=scale;appliedAbsorption=scale;appliedGeometryEpoch=epoch;
+                if (bundle && bundle->engine->setScene(s, scale, [&]{return threadShouldExit() || reqSerial.load()!=serial || geometryEpoch.load()!=epoch || absorptionParam->load()!=scale || sizeParam->load()!=size;},size/bundle->constructionSize)) {
+                    engineSize=size;engineAbsorption=scale;appliedAbsorption=scale;appliedGeometryEpoch=epoch; publishWebDiagnostics();
                 } else if(bundle) geomDirty=true;
             } catch(...) {geomDirty=true;}
         }
@@ -1053,7 +1259,11 @@ void VerbProcessor::run() {
 
             const int hostCh = std::max(1, hostOutCh.load());
             const verb::Layout lay = ocfg.layout < 0 ? verb::layoutForChannels(hostCh) : (verb::Layout)ocfg.layout;
+            const double requestedSize=sizeParam->load();
+            const double sizeFactor=requestedSize*.01;
+            center=center*sizeFactor;
             verb::Scene es = sc;
+            verb::scaleRoomGeometry(es,sizeFactor);
             es.sources.clear();
             for (const auto& pm : points) {
                 verb::Transducer t;
@@ -1062,6 +1272,7 @@ void VerbProcessor::run() {
                 t.pos = {srcState(pm.source, 0) + pm.radius * std::cos(a), srcState(pm.source, 1) + pm.radius * std::sin(a), srcState(pm.source, 2)};
                 t.azimuthDeg = az;
                 t.pattern = cfg[(size_t)pm.source].pattern;
+                t.pos=t.pos*sizeFactor;
                 es.sources.push_back(t);
             }
             es.receivers = verb::makeReceiverArray(lay, center, ocfg.radius, std::min(hostCh, verbp::kMaxReceivers));
@@ -1091,6 +1302,7 @@ void VerbProcessor::run() {
             nb->engine = std::make_shared<verb::Engine>(es, ec);
             if(ec.cancelled())continue;
             appliedAbsorption=ec.absorptionScale;
+            nb->constructionSize=requestedSize;
             nb->cfg = cfg;
             nb->points = points;
             nb->pointStart.assign(cfg.size(), 0);
@@ -1103,6 +1315,7 @@ void VerbProcessor::run() {
             nb->maxBlock = std::max(maxBlock, 128);
             nb->in.assign(points.size(), std::vector<float>((size_t)nb->maxBlock, 0.f));
             nb->out.assign((size_t)nb->R, std::vector<float>((size_t)nb->maxBlock, 0.f));
+            nb->detector.assign((size_t)nb->maxBlock,0.f);
             nb->lfe.assign((size_t)nb->maxBlock, 0.f);
             const auto spk = verb::speakersFor(lay, hostCh);
             for (size_t i = 0; i < spk.size() && i < (size_t)nb->R; ++i)
@@ -1136,10 +1349,11 @@ void VerbProcessor::run() {
             {
                 juce::SpinLock::ScopedLockType l(engineLock);
                 bundle.swap(nb);
-                engineAbsorption=ec.absorptionScale; appliedGeometryEpoch=geometryEpoch.load();
+                engineSize=requestedSize;engineAbsorption=ec.absorptionScale; appliedGeometryEpoch=geometryEpoch.load();
                 updateBounds(sc);
                 ++loadSerial;
             }
+            publishWebDiagnostics();
             nb.reset();  // old engine destroyed here, off the audio thread
             builtSr = r.sr;
             numPts = (int)points.size();
@@ -1159,6 +1373,7 @@ void VerbProcessor::run() {
                 }
                 displayGen = r.gen;
                 ++sceneSerial;
+                if (!r.rebuild) ++structRevision;  // a new room is now displayed (a same-room rebuild changes no document state)
                 for (int k = 0; k < 4; ++k) displayHome[k] = home[k];
                 const auto& ld = verb::layoutDefs();
                 juce::String ln = "?";
@@ -1192,12 +1407,13 @@ verb::Scene VerbProcessor::getDisplayScene(double* home) const {
     return display;
 }
 
-verb::Scene VerbProcessor::getEnergyScene(int source) const {
+verb::Scene VerbProcessor::getEnergyScene(int source, bool webSnapshot) const {
     verb::Scene sc;
     std::vector<verbp::SourceCfg> cfg;
     { juce::ScopedLock l(dispLock); sc = display; cfg = srcCfg; }
     std::shared_ptr<const verb::Scene> modeled;
-    { juce::SpinLock::ScopedLockType lock(engineLock); if (bundle) modeled = bundle->engine->sceneSnapshot(); }
+    if (webSnapshot) modeled = std::atomic_load(&webModeledScene);
+    else { juce::SpinLock::ScopedLockType lock(engineLock); if (bundle) modeled = bundle->engine->sceneSnapshot(); }
     if (modeled) {
         sc = *modeled; // copy after releasing the processor's short pointer lock
         sc.clutter.count = 0; sc.roughness = 0; // already present in modeled geometry
@@ -1205,7 +1421,9 @@ verb::Scene VerbProcessor::getEnergyScene(int source) const {
     sc.sources.clear(); sc.receivers.clear();
     bool anySolo = false;
     for (size_t s = 0; s < cfg.size(); ++s) anySolo |= sourceSolo[s]->load() >= .5f;
-    const double top = sc.ceilMat < 0 ? 30. : sc.height;
+    const double sf=modeled?engineSize.load()*.01:sizeParam->load()*.01;
+    if(!modeled)verb::scaleRoomGeometry(sc,sf);
+    const double top = (sc.ceilMat < 0 ? 30.*sf : sc.height)/sf;
     for (const auto& pm : verbp::buildPoints(cfg)) {
         const int s = pm.source; const auto& conf = cfg[(size_t)s];
         if ((source >= 0 && source != s) || sourceMute[s]->load() >= .5f
@@ -1221,6 +1439,7 @@ verb::Scene VerbProcessor::getEnergyScene(int source) const {
         const double a = t.azimuthDeg * verb::kPi / 180., ca = std::cos(a), sa = std::sin(a);
         t.pos = {pv[s][0]->load() + ca * ox - sa * oy, pv[s][1]->load() + sa * ox + ca * oy,
             std::clamp((double)pv[s][2]->load() + oz, 0., top)};
+        t.pos=t.pos*sf;
         sc.sources.push_back(t);
     }
     // Omni coverage probes have no dependency on the host's receiver layout.
@@ -1230,6 +1449,30 @@ verb::Scene VerbProcessor::getEnergyScene(int source) const {
     for (auto& z : sc.floorZones) z.editor = {};
     for (auto& z : sc.ceilZones) z.editor = {};
     return sc;
+}
+
+bool VerbProcessor::autoMakeupDb(float& value) const {
+    std::shared_ptr<const verb::AutoLevelEnergy> energy;
+    { juce::SpinLock::ScopedLockType lock(engineLock); if(bundle) { if(bundle->engine->autoLevelMoving())return false; energy=bundle->engine->autoLevelEnergy(); } }
+    if(!energy) return false;
+    const auto cfg=getSources(); const auto points=verbp::buildPoints(cfg);
+    if(energy->points.size()!=points.size()) return false;
+    bool solo=false; for(size_t s=0;s<cfg.size();++s) solo |= sourceSolo[s]->load()>=.5f;
+    double sum=0; int count=0;
+    std::vector<double> perSource(cfg.size(),0.); std::vector<int> perSourceCount(cfg.size(),0);
+    const bool creative=modeParam->load()>=.5f;
+    const double eg=creative?std::pow(10.,earlyParam->load()/10.):1., tg=creative?std::pow(10.,tailParam->load()/10.):1.;
+    for(size_t i=0;i<points.size();++i) {
+        const int s=points[i].source;
+        if(sourceMute[s]->load()>=.5f || (solo&&sourceSolo[s]->load()<.5f)) continue;
+        const auto& p=energy->points[i]; double e=0;
+        for(int b=0;b<verb::NB;++b)e+=p.direct[b]+eg*p.early[b]+tg*p.late[b];
+        perSource[s]+=e/verb::NB*std::pow(10.,pv[s][4]->load()/10.); ++perSourceCount[s];
+    }
+    for(size_t s=0;s<cfg.size();++s)if(perSourceCount[s]) {sum+=perSource[s]/perSourceCount[s];++count;}
+    if(!count) return false;
+    value=(float)std::clamp(-10.*std::log10(std::max(sum/count,1e-30)),0.,36.);
+    return true;
 }
 
 // ---------- room library / IR export ----------
@@ -1332,7 +1575,7 @@ bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& e
         if (id.isVoid()) continue;
         auto saved = st.getChildWithProperty("id", id);
         const auto name = id.toString();
-        if (!saved.isValid() && (name == "mode" || name == "absorption" || name == "decayLow" || name == "decayMid" || name == "decayHigh")) continue;
+        if (!saved.isValid() && (name == "mode" || name == "absorption" || name == "decayLow" || name == "decayMid" || name == "decayHigh" || name == "size" || name == "predelay" || name == "stereoWidth" || name == "freeze" || name == "duck" || name == "duckRelease" || name == "makeup")) continue;
         if (!saved.isValid() || !saved.hasProperty("value") || !std::isfinite((double)saved.getProperty("value"))) {
             error = "The preset is missing a valid parameter: " + id.toString();
             return false;
@@ -1422,7 +1665,7 @@ void VerbProcessor::runExport(juce::File dir) {
         std::vector<const float*> ip;for(const auto& ch:pointInput)ip.push_back(ch.data());
         std::vector<std::vector<float>> block((size_t)R,std::vector<float>(512));
         std::vector<float*> op;for(auto& ch:block)op.push_back(ch.data());
-        const double master=juce::Decibels::decibelsToGain(offline.gainParam->load());
+        const double master=juce::Decibels::decibelsToGain(offline.gainParam->load()+offline.makeupParam->load());
         int solo=0;for(int k=0;k<3;++k)if(offline.soloParam[k]->load()>=.5f)solo|=1<<k;
         const bool positioned=offline.spatialDryParam->load()>=.5f;
         const double mix=solo?1.:std::clamp(offline.mixParam->load()*.01,0.,1.);

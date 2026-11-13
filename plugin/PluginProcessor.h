@@ -2,6 +2,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -13,6 +15,7 @@
 #include "scene.hpp"
 
 namespace verbp {
+class EditorSession;  // plugin/EditorSession.h: command model + undo history, owned by the processor
 constexpr int kMaxReceivers = 16;
 constexpr int kListener = kMaxSources;  // object index of the listener (sources are 0..kMaxSources-1)
 
@@ -63,6 +66,7 @@ public:
     void changeProgramName(int, const juce::String&) override {}
     void getStateInformation(juce::MemoryBlock&) override;
     void setStateInformation(const void*, int) override;
+    bool autoMakeupDb(float& value) const;
 
     // ---- room (scene) ----
     void loadSceneText(const juce::String& text, const juce::String& name, bool applyDefaults, bool keepPendingDefaults = false);
@@ -73,12 +77,24 @@ public:
     juce::String getStatus() const;
     juce::String getSceneName() const;
     verb::Scene getDisplayScene(double* home /*[4]: x y z yaw of the listener anchor*/ = nullptr) const;
-    verb::Scene getEnergyScene(int source = -1) const; // message-thread snapshot, live poses/gains and audible spatial points
+    verb::Scene getEnergyScene(int source = -1, bool webSnapshot = false) const; // message-thread snapshot, live poses/gains and audible spatial points
     // Edit the live room (message thread): `fn` changes a copy of the scene (walls, surface materials, floor,
     // ceiling, height); the result is validated, kept in the saved state and pushed to the running engine without
-    // interrupting the audio. Rejected edits (too many walls, bad indices) change nothing.
-    void editScene(const std::function<void(verb::Scene&)>& fn);
-    void editSceneMetadata(const std::function<void(verb::Scene&)>& fn);
+    // interrupting the audio. Rejected edits (too many walls, bad indices) change nothing and return false.
+    // While a DIFFERENT room is pending (loadSceneText / a preset / a project state was requested and has not been
+    // displayed yet) every edit is rejected too: the pending room wins and the edit of the old room is discarded, so the
+    // saved scene text can never hold the serialisation of the old room under the name of the new one. The editor sees
+    // the new room through `getSceneSerial()` when the load completes.
+    bool editScene(const std::function<void(verb::Scene&)>& fn);
+    bool editSceneMetadata(const std::function<void(verb::Scene&)>& fn);
+    bool isRoomLoadPending() const;  // a requested room has not been displayed yet (and did not fail)
+    // Monotonic revision of the structural state (T3): +1 on every accepted structural change, including the live
+    // setters setSourcePattern / setSourceSpread / setPointOffset that do not change getSceneSerial(), and on every
+    // room / preset / project-state load (request and completion). Same-room engine rebuilds do not bump it.
+    uint64_t getRevision() const { return structRevision.load(); }
+    void bumpRevision() { ++structRevision; }  // for changes made through parameters (the command session)
+    // The command model and its undo history. Owned here so that they survive closing and reopening the editor.
+    verbp::EditorSession& getEditorSession() { return *session; }
     // Plan layer masks of the editor (0 Walls, 1 Floors, 2 Ceilings, 3 Plates; 0 shown, 1 locked, 2 hidden). They live in the
     // scene's editor metadata, so they survive closing the editor and are saved with the project, the scene text and `.verbroom`.
     // A room or geometry text without them (library room, plain `.txt`) resets all layers to shown.
@@ -122,6 +138,43 @@ public:
     void setTailSettings(verbp::TailSettings);
     std::shared_ptr<const verb::TailDiagnostics> getTailDiagnostics() const;
     bool isTailCurrent() const;
+    // Immutable web snapshots published by the scene worker; none acquires engineLock.
+    std::shared_ptr<const verb::TailDiagnostics> getWebTailDiagnostics() const { return std::atomic_load(&webTailDiagnostics); }
+    double webAppliedSize() const {return engineSize.load();}
+    float webDuckReductionDb() const {return duckReduction.load();}
+    double webAppliedAbsorption() const { return engineAbsorption.load(); }
+    double webMaximumZ() const { return ceilOpen.load() ? 30. : sceneHeight.load(); }
+    bool isWebTailCurrent() const;
+    uint64_t webAudioBlockCount() const { return webProcessedBlocks.load(std::memory_order_relaxed); }
+    struct WebCpuTelemetry {
+        float meanRatio = 0.f;
+        float worstRatio = 0.f;
+        uint64_t overruns = 0;
+        bool recentOverrun = false;
+        int blockSize = 0;
+        double sampleRate = 0.0;
+    };
+    WebCpuTelemetry webCpuTelemetry() const noexcept {
+        const double sr = builtSr.load(std::memory_order_relaxed);
+        return {
+            webCpuMean.load(std::memory_order_relaxed),
+            webCpuWorst.load(std::memory_order_relaxed),
+            webCpuOverruns.load(std::memory_order_relaxed),
+            webCpuOverrunHold.load(std::memory_order_relaxed) > 0.f,
+            webLastBlockSize.load(std::memory_order_relaxed),
+            sr > 0.0 ? sr : hostSr
+        };
+    }
+    void setTestCpuLoadOverride(float ratio) noexcept {
+        webCpuTestOverride.store(ratio, std::memory_order_relaxed);
+        const float r = ratio >= 0.f ? ratio : 0.f;
+        webCpuMean.store(r, std::memory_order_relaxed);
+        webCpuWorst.store(r, std::memory_order_relaxed);
+        if (r < 1.0f) webCpuOverrunHold.store(0.f, std::memory_order_relaxed);
+    }
+    bool isWebSceneCurrent() const { return state.load() == 2 && !geomDirty.load() && geometryEpoch.load() == appliedGeometryEpoch.load() && engineAbsorption.load() == absorptionParam->load() && engineSize.load()==sizeParam->load(); }
+    uint64_t getWebGeometrySerial() const { return webGeometrySerial.load(); }
+    std::shared_ptr<const verb::Scene> getWebModeledScene() const { return std::atomic_load(&webModeledScene); } // immutable engine scene incl. seeded clutter; message thread, no engineLock
     // Control/message thread API. Synchronous solver is cancellable from another thread.
     double setTargetRT60(double seconds);
     std::array<double, 3> getRT60Estimate() const;
@@ -144,6 +197,9 @@ public:
     bool outlinerVisible() const { return showOutliner.load(); }
     void setOutlinerVisible(bool on) { showOutliner = on; }
     float inputPeak(int ch) const { return ch >= 0 && ch < verbp::kMaxInputChannels ? inPeaks[(size_t)ch].load(std::memory_order_relaxed) : 0.f; }
+    // Web meters accumulate between polls; native last-block metering is unchanged.
+    void setWebMetersActive(bool on) { webMetersActive.store(on, std::memory_order_relaxed); }
+    float takeWebInputPeak(int ch) { return ch >= 0 && ch < verbp::kMaxInputChannels ? webInPeaks[(size_t)ch].exchange(0.f, std::memory_order_relaxed) : 0.f; }
     int numPoints() const { return numPts.load(); }
     int numOutputChannels() const { return builtOutCh.load(); }  // channels the engine renders (the layout's)
     int effectiveLayout() const { return builtLayout.load(); }   // verb::Layout used by the running engine
@@ -177,7 +233,9 @@ private:
         std::vector<verbp::PointMap> points;
         std::vector<int> pointStart, pointCount;  // points of each source (they are stored grouped by source)
         std::vector<std::vector<float>> in, out;  // scratch: one per point / per output channel
+        std::vector<float> detector;
         std::vector<float> lfe;                   // summed LFE inputs for the block
+        double constructionSize=100.;
         int R = 0, lfeOut = -1, maxBlock = 512;
     };
     void run() override;
@@ -198,6 +256,18 @@ private:
     void rebuild();
     void queueScene(const juce::String& text, const juce::String& name, bool applyDefaults, bool keepPendingDefaults, bool isRebuild, uint64_t editsAtRequest);
 
+    void publishWebDiagnostics(); // scene worker only, never the audio thread
+    std::shared_ptr<const verb::Scene> webModeledScene;
+    std::shared_ptr<const verb::TailDiagnostics> webTailDiagnostics;
+    std::atomic<bool> webTailCurrent{false};
+    std::atomic<uint64_t> webProcessedBlocks{0};
+    std::atomic<float> webCpuMean{0.f};
+    std::atomic<float> webCpuWorst{0.f};
+    std::atomic<float> webCpuOverrunHold{0.f};
+    std::atomic<float> webCpuTestOverride{-1.f};
+    std::atomic<uint64_t> webCpuOverruns{0};
+    std::atomic<int> webLastBlockSize{256};
+    std::atomic<uint64_t> webGeometrySerial{0};
     std::unique_ptr<Bundle> bundle;
     mutable juce::SpinLock engineLock;
     juce::CriticalSection reqLock;
@@ -220,6 +290,8 @@ private:
     std::atomic<bool> mixerCompact{true};
     std::atomic<bool> navLocked{false}, showOutliner{false};
     std::array<std::atomic<float>, verbp::kMaxInputChannels> inPeaks{};
+    std::array<std::atomic<float>, verbp::kMaxInputChannels> webInPeaks{};
+    std::atomic<bool> webMetersActive{false};
     std::array<int, verbp::kMaxInputChannels> inMap{};  // host input channel -> buffer channel (see InputOrder.h)
     std::atomic<int> numPts{0}, builtOutCh{0}, builtLayout{0}, hostOutCh{2}, hostInCh{2}, builtForHostCh{0};
     std::atomic<double> sceneHeight{3.0}, builtSr{0.0};
@@ -227,14 +299,20 @@ private:
     std::atomic<bool> hasBounds{false}, ceilOpen{false};
     std::atomic<bool> geomDirty{false};
     std::atomic<uint64_t> geometryEpoch{0}, appliedGeometryEpoch{0};
-    std::atomic<double> engineAbsorption{-1.};
+    std::atomic<double> engineAbsorption{-1.}, engineSize{100.};
+    std::atomic<float> duckReduction{0};
     std::atomic<bool> qualityDirty{false};
     std::atomic<uint64_t> sceneSerial{0}, loadSerial{0}, reqSerial{0};
+    std::atomic<uint64_t> structRevision{1};
+    bool roomLoadPendingLocked() const { return roomGen != displayGen && state.load() != 3; }  // dispLock must be held
+    std::unique_ptr<verbp::EditorSession> session;
     std::atomic<bool> defaultsOwed{false};
     uint64_t serialSeen = ~0ull;
 
     std::atomic<float>* pv[verbp::kMaxSources + 1][5] = {};
+    std::atomic<float> *sizeParam=nullptr,*predelayParam=nullptr,*widthParam=nullptr,*freezeParam=nullptr,*duckParam=nullptr,*duckReleaseParam=nullptr;
     std::atomic<float>* gainParam = nullptr;
+    std::atomic<float>* makeupParam = nullptr;
     std::atomic<float>* modeParam = nullptr;
     std::atomic<float>* absorptionParam = nullptr;
     std::atomic<float>* decayParam[3] = {};
@@ -254,6 +332,14 @@ private:
     std::atomic<float> ptOff[verbp::kMaxPoints][3] = {};  // live offset of every engine point from its source centre
     std::vector<verbp::PointMap> livePoints;                // guarded by dispLock
     double prev[verbp::kMaxSources + 1][4] = {};
+    double prevRaw[verbp::kMaxSources + 1][4] = {};
+    double prevPtOff[verbp::kMaxPoints][3] = {};
+    uint64_t samplesSinceMove[verbp::kMaxSources + 1] = {};
+    std::chrono::steady_clock::time_point lastProcessWall{};
+    bool haveLastProcessWall = false;
+    bool havePlayHead = false, prevPlaying = false;
+    int64_t prevPlayHeadSample = 0;
+    int prevBlockSamples = 0;
     // Trajectory smoothing of the automated positions (x, y, z): velocity at the end of the last block and the block's
     // average velocity (units per sample), so that consecutive host blocks join with a continuous velocity.
     double hVel[verbp::kMaxSources + 1][3] = {}, hPEnd[verbp::kMaxSources + 1][3] = {};

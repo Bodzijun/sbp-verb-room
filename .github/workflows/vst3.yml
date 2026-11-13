@@ -3,7 +3,7 @@ name: VST3 builds
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, next]
     tags: ['v*']
     paths:
       - '.github/workflows/vst3.yml'
@@ -78,20 +78,6 @@ jobs:
       - name: Build plug-in and tests
         run: cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test stage2_test tail_transition_test --parallel 2
 
-      - name: Test
-        # stage2_fixes is the exhaustive decay/tail regression (about 15 minutes on a fast
-        # desktop CPU); it is run locally before a release and is not built or run here.
-        run: |
-          if [[ "$RUNNER_OS" == "Linux" ]]; then
-            xvfb-run -a ctest --test-dir build --output-on-failure --timeout 600 -E '^stage2_fixes$'
-          else
-            # stage2_processor is not run on macOS yet. Two of its checks do not hold on the arm64 runner:
-            # the RT60 assistant's live estimate for the concert hall lands 9.8 % from the target (bound 7 %;
-            # 0.2 % on Windows and Linux - a different stochastic realisation of the ray trace), and the
-            # editor layout check after a 150 ms message-loop wait is timing dependent. Both are tracked.
-            ctest --test-dir build --output-on-failure --timeout 600 -E '^(stage2_fixes|stage2_processor)$'
-          fi
-
       - name: Verify and ad-hoc sign macOS Universal bundle
         if: runner.os == 'macOS'
         run: |
@@ -110,6 +96,22 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 30
+
+      - name: Test
+        # Only the tests whose executables are built above; test builds are packaged before this step.
+        continue-on-error: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+        # stage2_fixes is the exhaustive decay/tail regression (about 15 minutes on a fast
+        # desktop CPU); it is run locally before a release and is not built or run here.
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            xvfb-run -a ctest --test-dir build --output-on-failure --timeout 600 -R '^(tail_regression|cathedral_tail|vsl_hall_tail|quality_test|energy_map|portable_presets|spatial_editor|energy_editor|vsl_hall_presets|tail_transition|stage2_engine|stage2_processor)$' -E '^stage2_fixes$'
+          else
+            # stage2_processor is not run on macOS yet. Two of its checks do not hold on the arm64 runner:
+            # the RT60 assistant's live estimate for the concert hall lands 9.8 % from the target (bound 7 %;
+            # 0.2 % on Windows and Linux - a different stochastic realisation of the ray trace), and the
+            # editor layout check after a 150 ms message-loop wait is timing dependent. Both are tracked.
+            ctest --test-dir build --output-on-failure --timeout 600 -R '^(tail_regression|cathedral_tail|vsl_hall_tail|quality_test|energy_map|portable_presets|spatial_editor|energy_editor|vsl_hall_presets|tail_transition|stage2_engine|stage2_processor)$' -E '^(stage2_fixes|stage2_processor)$'
+          fi
 
       - name: Upload test report
         if: always()

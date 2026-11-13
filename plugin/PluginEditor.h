@@ -23,6 +23,11 @@ class VerbEditor : public juce::AudioProcessorEditor, private juce::Timer {
 public:
     explicit VerbEditor(VerbProcessor&);
     ~VerbEditor() override;
+    // N2: a small "New UI" button (bottom of the tool strip) switches to the web editor. It exists only in builds with the web
+    // editor, and only while the WebView2 Runtime and the data folders are usable. Test hooks:
+    bool newUiButtonShown() const;
+    void testClickNewUi();
+    juce::String newUiNoteText() const;
     void paint(juce::Graphics&) override;
     void resized() override;
     void mouseDown(const juce::MouseEvent&) override;
@@ -268,6 +273,12 @@ private:
     juce::ToggleButton autoViewBtn{"Auto view"};
     juce::ToggleButton navLockBtn{"Lock pan"};
     juce::TextButton outlinerBtn{"Outliner"};
+#if VERB_WEB_UI_ENABLED
+    juce::TextButton newUiBtn{"New UI"};
+    juce::Label newUiNote;
+    void setupNewUi();
+    void requestNewUi();
+#endif
     SceneOutliner outliner;
     bool autoFit = true;               // view follows walls and objects
     double vCx = 0, vCy = 0, vScale = 20;  // free view: centre (metres) and pixels per metre

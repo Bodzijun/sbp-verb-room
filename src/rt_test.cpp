@@ -9,11 +9,15 @@
 #include <random>
 
 #include "geometry.hpp"
+#include "energy.hpp"
 #include "layouts.hpp"
 #include "render.hpp"
 #include "rt_engine.hpp"
 #include <thread>
 #include "tail.hpp"
+#include "../plugin/RoomLibrary.h"  // E3d: the MotorSynth car (test 30)
+#include <sstream>
+#include <stdexcept>
 
 using namespace verb;
 
@@ -1078,6 +1082,415 @@ static void testBuildingCornerPartial() {
     check(maxStep < 4.0, "no jump at the corner of a building whose walls let some sound through");
 }
 
+// ---- E3: sound must not leak into a closed room through a sealed corner ----
+static std::vector<float> impulseOut(const Scene& sc, const EngineConfig& cfg, int n = 16384) {
+    Engine eng(sc, cfg);
+    std::vector<float> in((size_t)n, 0.f), out((size_t)n, 0.f);
+    in[0] = 1.f;
+    const float* ip[1] = {in.data()};
+    float* op[1] = {out.data()};
+    eng.process(ip, op, n);
+    return out;
+}
+
+static double peakDb(const std::vector<float>& o) {
+    float m = 0.f;
+    for (float v : o) m = std::max(m, std::fabs(v));
+    return 20 * std::log10((double)m + 1e-30);
+}
+
+// Closed 8 x 6 x 3 box (floor and ceiling too), walls anticlockwise; `wallMat` for every wall.
+static Scene closedBox(int wallMat, int shellMat) {
+    Scene sc = wallScene(nullptr);
+    sc.height = 3.0;
+    sc.diffraction = true;
+    sc.floorMat = shellMat;
+    sc.ceilMat = shellMat;
+    sc.walls = {Wall{0, 0, 8, 0, wallMat}, Wall{8, 0, 8, 6, wallMat}, Wall{8, 6, 0, 6, wallMat}, Wall{0, 6, 0, 0, wallMat}};
+    sc.sources[0].pos = {-2.3, 2.6, 1.2};
+    sc.receivers[0].pos = {6, 3, 1.5};
+    return sc;
+}
+
+static void testClosedCornerLeak() {
+    std::printf("Test 27 (E3): a closed room stays closed to diffraction at its sealed corners\n");
+    EngineConfig cfg;
+    cfg.tailThread = false; cfg.tailRays = 0; cfg.erOrder = 2;
+    const int concrete = presetIndex("Concrete"), acrylic = presetIndex("Thin_acrylic"), absorber = presetIndex("Absorber");
+    const double c = 343.2;
+    // 1. opaque walls: sources outside at several places, none of them is heard inside
+    const Vec3 outside[] = {{-2.3, 2.6, 1.2}, {-2, 3, 1.5}, {-0.05, 3, 1.5}, {4, -0.1, 1.5}, {4, 6.5, 1.5}, {-1, -1, 1.5}, {-0.3, -0.3, 1.5}, {9, 7, 1.5}, {8.4, 6.2, 1.5}, {-1.5, 5, 0.3}, {-2, 0, 1.5}, {4, -2, 1.5}};
+    bool noPath = true, silent = true;
+    double worst = -300;
+    for (const Vec3& p : outside) {
+        Scene sc = closedBox(concrete, absorber);
+        sc.sources[0].pos = p;
+        const Geo g(sc);
+        DiffPath dp;        const bool a = diffractedPath(g, p, sc.receivers[0].pos, c, dp, false), b = diffractedPath(g, p, sc.receivers[0].pos, c, dp, true);        if (a || b) { noPath = false; std::printf("   leak: path from (%.2f,%.2f,%.2f) length %.2f m\n", p.x, p.y, p.z, dp.length); }
+        const double pk = peakDb(impulseOut(sc, cfg));
+        worst = std::max(worst, pk);
+        if (pk > -120) { silent = false; std::printf("   engine output %.1f dBFS from (%.2f,%.2f,%.2f)\n", pk, p.x, p.y, p.z); }
+    }
+    std::printf("  %zu outside positions: loudest engine output %.1f dBFS\n", sizeof outside / sizeof outside[0], worst);
+    check(noPath, "no diffracted path from outside into the closed opaque box (one-, two- and three-end searches)");
+    check(silent, "engine output below -120 dBFS with diffraction on");
+    // 2. a source inside is unaffected by the rule (direct path, no diffraction needed)
+    {
+        Scene sc = closedBox(concrete, absorber);
+        sc.sources[0].pos = {2, 3, 1.5};
+        check(peakDb(impulseOut(sc, cfg)) > -40, "a source inside the closed box is still heard");
+    }
+    // 3. one wall lets sound through (thin acrylic, TL 6..15 dB): the level follows that wall's TL
+    {
+        EngineConfig d = cfg;
+        d.erOrder = 1;
+        Scene base = closedBox(concrete, absorber);
+        base.sources[0].pos = {-2, 3, 1.5};
+        base.walls[3].mat = acrylic;  // the west wall, between the source and the receiver
+        Scene reference = base;       // the same geometry with the west wall taken away
+        reference.walls.erase(reference.walls.begin() + 3);
+        auto windowDb = [&](const Scene& sc, double f0, double f1) {
+            auto o = impulseOut(sc, d);
+            size_t i0 = 0;
+            while (i0 < o.size() && std::fabs(o[i0]) < 1e-9f) ++i0;
+            std::vector<float> w(o.size(), 0.f);
+            for (size_t i = i0 > 8 ? i0 - 8 : 0; i < std::min(o.size(), i0 + 300); ++i) w[i] = o[i];
+            return 10 * std::log10(bandPowerOf(w, 48000, f0, f1) + 1e-30);
+        };
+        const double lossLo = windowDb(reference, 1000, 2000) - windowDb(base, 1000, 2000);
+        const double lossHi = windowDb(reference, 3000, 6000) - windowDb(base, 3000, 6000);
+        std::printf("  transmissive west wall: loss vs the open geometry %.1f dB at 1-2 kHz (wall TL 12-14), %.1f dB at 3-6 kHz (TL 15)\n", lossLo, lossHi);
+        check(lossLo > 10.0 && lossLo < 17.0, "through a transmissive wall the level follows that wall's TL (1-2 kHz)");
+        check(lossHi > 12.0 && lossHi < 19.0, "through a transmissive wall the level follows that wall's TL (3-6 kHz)");
+    }
+    // 3b. a corner shared by a transmissive and an opaque wall: a bend across the transmissive one carries its TL
+    {
+        Scene sc = closedBox(concrete, absorber);
+        sc.walls[3].mat = acrylic;  // west wall; the south wall stays opaque
+        sc.sources[0].pos = {-1.0, -1.0, 1.5};
+        const Geo g(sc);
+        DiffPath dp;
+        const bool found = diffractedPath(g, sc.sources[0].pos, sc.receivers[0].pos, c, dp, false);
+        std::printf("  corner of a transmissive and an opaque wall, source beyond it: %s", found ? "path found" : "no path");
+        if (found) std::printf(" (mid band %.1f dB)", 20 * std::log10(dp.amp[3] + 1e-30));
+        std::printf("\n");
+        check(!found || dp.amp[3] < 0.06f, "a bend across a transmissive wall at a corner is never louder than that wall's TL plus the bend loss");
+    }
+    // 4. a doorway in the west wall (y 2.5 .. 3.5): sound still bends through it
+    {
+        Scene sc = closedBox(concrete, absorber);
+        sc.walls[3] = Wall{0, 2.5, 0, 0, concrete};
+        sc.walls.push_back(Wall{0, 6, 0, 3.5, concrete});
+        sc.sources[0].pos = {-2, 0.8, 1.5};  // off the door axis: the straight line is blocked
+        const Geo g(sc);
+        DiffPath dp;
+        const bool found = diffractedPath(g, sc.sources[0].pos, sc.receivers[0].pos, c, dp, false);
+        const double pk = peakDb(impulseOut(sc, cfg));
+        std::printf("  doorway: diffracted path %s (%.2f m, mid-band %.1f dB), engine output %.1f dBFS\n", found ? "found" : "MISSING", found ? dp.length : 0.0, found ? 20 * std::log10(dp.amp[3] + 1e-30) : 0.0, pk);
+        check(found && dp.amp[3] > 0.02f, "sound still diffracts through a doorway in a closed room");
+        check(pk > -60, "the doorway lets the sound into the engine output");
+    }
+    // 5. L-shaped room: round the reflex corner, both points inside the room, behaves as before
+    {
+        Scene sc = closedBox(concrete, absorber);
+        sc.walls = {Wall{0, 0, 6, 0, concrete}, Wall{6, 0, 6, 3, concrete}, Wall{6, 3, 3, 3, concrete}, Wall{3, 3, 3, 6, concrete}, Wall{3, 6, 0, 6, concrete}, Wall{0, 6, 0, 0, concrete}};
+        const Vec3 S{5, 1.5, 1.5}, R{1.5, 5, 1.5};
+        const Geo g(sc);
+        DiffPath dp;
+        const bool found = diffractedPath(g, S, R, c, dp, false);
+        std::printf("  L-room reflex corner: %s, length %.3f m (expected 5.000)\n", found ? "path found" : "MISSING", found ? dp.length : 0.0);
+        check(found && std::fabs(dp.length - 5.0) < 0.01, "L-room: the sound still bends round the reflex corner (inside to inside)");
+    }
+    // 6. a free-standing screen: free ends behave as before
+    {
+        Scene sc = wallScene("Concrete");
+        sc.walls[0] = Wall{2, 0, 2, 5, presetIndex("Concrete")};
+        sc.diffraction = true;
+        const Geo g(sc);
+        DiffPath dp;
+        const bool found = diffractedPath(g, {0, 1, 1.5}, {4, -1, 1.5}, c, dp, false);
+        check(found && std::fabs(dp.length - 2 * std::hypot(2.0, 1.0)) < 1e-9, "a free screen end still diffracts (length unchanged)");
+    }
+    // 7. T junction: a partition meeting the middle of an outer wall seals it as well
+    {
+        Scene sc = closedBox(concrete, absorber);
+        sc.walls.push_back(Wall{4, 0, 4, 3, concrete});  // partition standing on the south wall at x = 4
+        const Geo g(sc);
+        DiffPath dp;
+        const bool found = diffractedPath(g, {4.5, -1.5, 1.5}, {3.5, 2, 1.5}, c, dp, false);
+        check(!found, "a partition meeting the outer wall at a T junction does not let sound round it from outside");
+    }
+    // 8. low walls (below the path height) seal nothing: old semantics
+    {
+        Scene sc = closedBox(concrete, absorber);
+        for (auto& w : sc.walls) w.z1 = 0.5;
+        const Geo g(sc);
+        float amp[NB] = {1, 1, 1, 1, 1, 1, 1};
+        check(transmitLeg(g, sc.sources[0].pos, sc.receivers[0].pos, -1, -1, amp), "walls lower than the path do not block it (unchanged)");
+    }
+}
+
+// Level continuity while a source walks from inside a room, through its doorway, out and along the outside of the wall.
+static void testDoorwayWalk() {
+    std::printf("Test 28 (E3): source walking inside -> doorway -> outside -> along the wall\n");
+    const int concrete = presetIndex("Concrete"), absorber = presetIndex("Absorber");
+    // The direct + diffracted component as the engine builds it (solveLink): the straight path if it is clear, plus the
+    // way round the wall ends when it is blocked or screened. Mid-band pressure, dB. (The engine output itself also
+    // holds specular reflections that switch on and off as the source passes the doorway: not what is tested here.)
+    Scene sc = closedBox(concrete, absorber);
+    sc.walls[3] = Wall{0, 2.5, 0, 0, concrete};
+    sc.walls.push_back(Wall{0, 6, 0, 3.5, concrete});
+    sc.receivers[0].pos = {6, 3, 1.5};
+    const Geo g(sc);
+    const double c = 343.2;
+    auto level = [&](Vec3 p) {
+        float d[NB];
+        for (int b = 0; b < NB; ++b) d[b] = 1.f;
+        double pw = 0;
+        const bool clear = transmitLeg(g, p, sc.receivers[0].pos, -1, -1, d);
+        DiffPath dp;
+        if (clear) {
+            litEdgeAttenuation(g, p, sc.receivers[0].pos, c, d);
+            pw += (double)d[3] * d[3];
+            if (d[3] < 0.5f && diffractedPath(g, p, sc.receivers[0].pos, c, dp, true)) pw += (double)dp.amp[3] * dp.amp[3];
+        } else if (diffractedPath(g, p, sc.receivers[0].pos, c, dp, false)) pw += (double)dp.amp[3] * dp.amp[3];
+        return 10 * std::log10(pw + 1e-12);
+    };
+    std::vector<Vec3> path;
+    for (double x = 3.0; x > -3.0; x -= 0.25) path.push_back({x, 3.0, 1.5});     // through the doorway
+    for (double y = 3.0; y >= -2.0; y -= 0.25) path.push_back({-3.0, y, 1.5});  // out in front of the wall, along it
+    for (double x = -3.0; x <= 3.0; x += 0.25) path.push_back({x, -1.5, 1.5});  // along the south wall
+    double maxStep = 0, at = 0, lo = 1e9, hi = -1e9;
+    double prev = level(path[0]);
+    for (size_t i = 1; i < path.size(); ++i) {
+        const double v = level(path[i]);
+        if (std::getenv("VERB_E3_VERBOSE")) std::printf("   %2zu (%5.2f,%5.2f)  %6.1f dB\n", i, path[i].x, path[i].y, v);
+        if (std::fabs(v - prev) > maxStep) { maxStep = std::fabs(v - prev); at = (double)i; }
+        lo = std::min(lo, v); hi = std::max(hi, v);
+        prev = v;
+    }
+    std::printf("  %zu positions, biggest step per 0.25 m: %.1f dB at position %.0f; level range %.1f .. %.1f dB (distance-compensated)\n", path.size(), maxStep, at, lo, hi);
+    check(maxStep < 4.0, "no jump while the source moves through the doorway and along the outside of the wall");
+}
+
+// ---- E3d: the listener walking round the car (MotorSynth + EngineSim, edge diffraction on) ----
+// The crackle in REAPER was the audio thread running the full multi-end diffraction search (pairs and triples of wall
+// ends) for many links in the same block near the body corners: blocks of 14-50 ms against 5.33 ms. The search now runs
+// at most a fixed number of work units per control period (EngineConfig::diffractionUnits). Checked in work units, which
+// are deterministic, not wall time: the search work per period stays within the budget plus one indivisible step, a
+// search larger than one period's budget does occur on this loop (so splitting it over periods is exercised), the
+// answers arrive within a bounded number of periods, and the output of a 997 Hz tone on every source has no click.
+static Scene motorSynthScene() {  // as stage2_fixes_test.cpp scene(room, true)
+    for (const auto& room : verbp::builtinRooms()) {
+        if (room.name.find("MotorSynth + EngineSim") == std::string::npos) continue;
+        std::istringstream in(room.text);
+        auto s = parseScene(in, room.name);
+        s.sr = 48000;
+        if (s.receivers.size() > 2) s.receivers.resize(2);
+        const auto points = verbp::buildPoints(room.setup);
+        const auto authored = s.sources;
+        s.sources.clear();
+        for (const auto& pm : points) {
+            const auto& c = room.setup[(size_t)pm.source];
+            const auto& center = authored[(size_t)pm.source];
+            const double az = center.azimuthDeg * kPi / 180.;
+            double x = 0, y = 0, z = 0;
+            if (c.freePoints && pm.channel >= 0 && pm.channel < (int)c.ox.size() && pm.channel < (int)c.oy.size()) {
+                x = c.ox[(size_t)pm.channel]; y = c.oy[(size_t)pm.channel];
+                if (pm.channel < (int)c.oz.size()) z = c.oz[(size_t)pm.channel];
+            } else { x = pm.radius * std::cos(pm.angleDeg * kPi / 180.); y = pm.radius * std::sin(pm.angleDeg * kPi / 180.); }
+            Transducer t; t.name = c.name; t.azimuthDeg = center.azimuthDeg; t.pattern = c.pattern;
+            t.pos = {center.pos.x + std::cos(az) * x - std::sin(az) * y, center.pos.y + std::sin(az) * x + std::cos(az) * y,
+                std::clamp(center.pos.z + z, 0., s.ceilMat < 0 ? 30. : s.height)};
+            s.sources.push_back(t);
+        }
+        if (room.micPattern >= 0) applyMicPattern(s.receivers, (MicPattern)room.micPattern, room.micPattern == (int)MicPattern::HumanEars ? .0875 : .1);
+        return s;
+    }
+    throw std::runtime_error("built-in room MotorSynth + EngineSim not found");
+}
+
+static void testCarLoop() {
+    std::printf("Test 30 (E3d): listener walking round the car, diffraction search bounded per block, no click\n");
+    Scene s = motorSynthScene();
+    s.diffraction = true;
+    double x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (const auto& w : s.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
+    const double sr = 48000, earZ = 1.0;
+    struct Run { double speed, offset; long long budget; };
+    for (const Run run : {Run{5.0, 0.05, 0}, Run{1.0, 0.10, 0}, Run{5.0, 0.10, 3000}}) {
+        // closed loop round the body, `offset` from every corner of the outline, at ear height
+        const double o = run.offset;
+        const std::vector<Vec3> pts = {{0.5 * (x0 + x1), y0 - o, earZ}, {x1 + o, y0 - o, earZ}, {x1 + o, y1 + o, earZ}, {x0 - o, y1 + o, earZ}, {x0 - o, y0 - o, earZ}};
+        std::vector<double> acc{0.0};
+        for (size_t i = 0; i < pts.size(); ++i) acc.push_back(acc.back() + norm(pts[(i + 1) % pts.size()] - pts[i]));
+        const double total = acc.back();
+        auto at = [&](double d) {
+            d = std::fmod(d, total);
+            size_t i = 0;
+            while (i + 1 < acc.size() && acc[i + 1] < d) ++i;
+            const Vec3 a = pts[i], b = pts[(i + 1) % pts.size()];
+            return a + (b - a) * ((d - acc[i]) / std::max(1e-12, acc[i + 1] - acc[i]));
+        };
+        EngineConfig cfg;
+        cfg.erOrder = 1; cfg.ctrlInterval = 128; cfg.tailBlock = 512; cfg.tailRays = 48000; cfg.tailThread = false;
+        cfg.sharedTail = s.sources.size() > 4; cfg.maxEarlyDelaySec = cfg.sharedTail ? .4 : .75;
+        cfg.diffractionUnits = run.budget;
+        Engine e(s, cfg);
+        e.setEarlyDiffusion(.5);
+        const int S = e.numSources(), R = e.numReceivers(), seg = 128;
+        std::vector<std::vector<float>> in((size_t)S, std::vector<float>((size_t)seg));
+        std::vector<const float*> ip((size_t)S);
+        std::vector<float> ob((size_t)R * seg);
+        std::vector<float*> op((size_t)R);
+        for (int r = 0; r < R; ++r) op[(size_t)r] = ob.data() + (size_t)r * seg;
+        std::vector<std::vector<float>> outs((size_t)R);
+        long frame = 0;
+        auto block = [&](Vec3 p, bool keep) {
+            e.setListener(p.x, p.y, p.z, s.listenerYaw);
+            for (int k = 0; k < S; ++k) {
+                for (int i = 0; i < seg; ++i) in[(size_t)k][(size_t)i] = .05f * (float)std::sin(2 * kPi * 997.0 * (double)(frame + i) / sr);
+                ip[(size_t)k] = in[(size_t)k].data();
+            }
+            e.process(ip.data(), op.data(), seg);
+            frame += seg;
+            if (keep) for (int r = 0; r < R; ++r) outs[(size_t)r].insert(outs[(size_t)r].end(), op[(size_t)r], op[(size_t)r] + seg);
+        };
+        for (int k = 0; k < 400; ++k) block(at(0), false);  // standing at the start, then walking
+        const int segs = (int)std::ceil(total / run.speed * sr / seg);
+        for (int k = 0; k < segs; ++k) block(at(run.speed * (double)((k + 1) * seg) / sr), true);
+        const auto st = e.diffractionStats();
+        const long long budget = run.budget > 0 ? run.budget : Engine::kDefaultDiffractionUnits;
+        // One indivisible step of the search: at most a memo row block (160^2/16 + 160 + 1 units) or a few legs and corner
+        // tests; 2000 units covers it with margin. The quick one-end stage and the following of the last answer are linear
+        // in the walls per link and are not part of the budget; with the search they stay below 2.5 default budgets here.
+        const long long stepMax = 2000;
+        // Clicks: high-pass (4th order, 4 kHz) residual of the tone output per 64 samples relative to the output level, and
+        // sample jumps relative to what a 997 Hz sine of the local amplitude can do.
+        double hfMax = -300, jumpMax = 0;
+        for (int r = 0; r < R; ++r) {
+            const auto& x = outs[(size_t)r];
+            struct Bq { double b0, b1, b2, a1, a2, x1, x2, y1, y2; };
+            std::vector<Bq> f;
+            for (double q : {0.5098, 0.6013, 0.9000, 2.5629}) {
+                const double w = 2 * kPi * 4000 / sr, al = std::sin(w) / (2 * q), cw = std::cos(w), a0 = 1 + al;
+                f.push_back(Bq{(1 + cw) / 2 / a0, -(1 + cw) / a0, (1 + cw) / 2 / a0, -2 * cw / a0, (1 - al) / a0, 0, 0, 0, 0});
+            }
+            const size_t W = 64, n = x.size();
+            double hf = 0, tot = 0;
+            for (size_t i = 0; i < n; ++i) {
+                double y = x[i];
+                for (auto& b : f) { const double v = b.b0 * y + b.b1 * b.x1 + b.b2 * b.x2 - b.a1 * b.y1 - b.a2 * b.y2; b.x2 = b.x1; b.x1 = y; b.y2 = b.y1; b.y1 = v; y = v; }
+                hf += y * y; tot += (double)x[i] * x[i];
+                if ((i + 1) % W == 0) {
+                    if (i / W >= 16) hfMax = std::max(hfMax, 10 * std::log10((hf + 1e-30) / (tot + 1e-30)));
+                    hf = tot = 0;
+                }
+            }
+            for (size_t w0 = 16 * W; w0 + W <= n; w0 += W) {
+                double A = 0;
+                for (size_t i = w0 - 256; i < std::min(n, w0 + W + 256); ++i) A = std::max(A, (double)std::fabs(x[i]));
+                for (size_t i = w0; i < w0 + W; ++i) jumpMax = std::max(jumpMax, std::fabs((double)x[i] - x[i - 1]) / (2 * kPi * 997 / sr * std::max(A, 1e-9)));
+            }
+        }
+        std::printf("  %.0f m/s, %.2f m from the corners, budget %lld units/period: search max %lld units/period, all diffraction work max %lld; "
+                    "largest search %lld units; %llu/%llu searches done, update latency max %llu periods (%.0f ms), mean %.1f; HF residual max %.1f dB, jump ratio max %.2f\n",
+            run.speed, run.offset, budget, st.searchUnitsMax, st.unitsMax, st.jobUnitsMax, st.jobsFinished, st.jobsStarted, st.maxLatencyPeriods,
+            (double)st.maxLatencyPeriods * seg / sr * 1e3, st.jobsFinished ? (double)st.latencySumPeriods / (double)st.jobsFinished : 0.0, hfMax, jumpMax);
+        check(st.searchUnitsMax <= budget + stepMax, "the multi-end search does at most its budget (plus one step) per control period");
+        check(st.unitsMax <= Engine::kDefaultDiffractionUnits * 5 / 2, "all diffraction work per control period stays bounded (quick stage + following + search)");
+        check(st.jobUnitsMax > budget, "a search larger than one period's budget occurs on this loop and is spread over periods");
+        check(st.jobsFinished + 1 >= st.jobsStarted && st.jobsFinished > 0, "the searches finish (at most the current one still running)");
+        check(st.maxLatencyPeriods <= (run.budget > 0 && run.budget < Engine::kDefaultDiffractionUnits ? 600u : 200u), "every multi-end answer arrives within a bounded number of periods");
+        check(hfMax < -40.0 && jumpMax < 2.0, "no click in the output (997 Hz tone on every source)");
+    }
+}
+
+// ---- E3 part B: the late-field detection sphere must only count what the receiver can be reached from ----
+static Scene tailBox(double X, double Y, double H, int wallMat, int shell, double len) {
+    Scene sc = wallScene(nullptr);
+    sc.length = len; sc.height = H; sc.order = 2; sc.diffraction = false;
+    sc.floorMat = shell; sc.ceilMat = shell;
+    sc.walls = {Wall{0, 0, X, 0, wallMat}, Wall{X, 0, X, Y, wallMat}, Wall{X, Y, 0, Y, wallMat}, Wall{0, Y, 0, 0, wallMat}};
+    sc.detectRadius = 0.5;
+    return sc;
+}
+
+// Late energy (1 kHz band) at every receiver position, pooled over a few seeds.
+static std::vector<double> tailEnergyAt(const Scene& sc, Vec3 s, const std::vector<Vec3>& rc, int rays) {
+    Transducer src;
+    src.name = "S"; src.pos = s;
+    std::vector<Transducer> r;
+    for (const Vec3& p : rc) { Transducer t; t.name = "R"; t.pos = p; r.push_back(t); }
+    std::vector<double> acc(rc.size(), 0.0);
+    const int seeds = 3;
+    for (int k = 1; k <= seeds; ++k) {
+        const TailHist h = traceTail(sc, src, r, 2, rays / seeds, k, false);
+        for (size_t i = 0; i < r.size(); ++i)
+            for (double v : h.h[i][3]) acc[i] += v / seeds;
+    }
+    return acc;
+}
+
+static void testTailSphere() {
+    std::printf("Test 29 (E3 B): the late-field detection sphere counts only what the receiver can be reached from\n");
+    const int concrete = presetIndex("Concrete"), plaster = presetIndex("Plaster"), brick = presetIndex("Brick"), drywall = presetIndex("Drywall_partition");
+    auto dB = [](double a, double b) { return 10 * std::log10((a + 1e-30) / (b + 1e-30)); };
+    // 1. the owner's vocal booth: 0.9 x 1.1 x 2.3 m, opaque brick, source outside, two ears
+    Scene booth = tailBox(0.9, 1.1, 2.3, brick, plaster, 2.0);
+    for (auto& w : booth.walls) { w.ax += 0.6; w.bx += 0.6; w.ay += 0.2; w.by += 0.2; }
+    booth.detectRadius = 0.5;
+    const std::vector<Vec3> ears = {{0.992, 0.5575, 1.5}, {0.992, 0.3825, 1.5}};
+    {
+        const auto out = tailEnergyAt(booth, {2.426, 0.795, 1.5}, ears, 90000);
+        const auto in = tailEnergyAt(booth, {1.2, 0.9, 1.5}, ears, 90000);
+        std::printf("  booth: source outside -> %.3e / %.3e (ears); source inside -> %.3e / %.3e\n", out[0], out[1], in[0], in[1]);
+        check(out[0] == 0.0 && out[1] == 0.0, "booth, source outside: no late energy at either ear (exact silence, detect_radius 0.5)");
+        check(in[0] > 0 && in[1] > 0 && std::fabs(dB(in[0], in[1])) < 1.0, "booth, source inside: both ears get the same late level");
+    }
+    // 2. a closed room: the diffuse late field is the same everywhere; near a wall / corner / floor / ceiling it must be too
+    {
+        Scene room = tailBox(6, 5, 3, plaster, plaster, 1.5);
+        const std::vector<Vec3> rc = {{3, 2.5, 1.5}, {0.25, 2.5, 1.5}, {0.3, 0.3, 1.5}, {3, 2.5, 0.3}, {3, 2.5, 2.8}, {0.1, 0.1, 0.1}};
+        const auto e = tailEnergyAt(room, {1.5, 1.2, 1.2}, rc, 300000);
+        const char* nm[] = {"centre", "0.25 m from a wall", "0.3 m from a corner", "0.3 m above the floor", "0.2 m under the ceiling", "in a corner"};
+        double worst = 0;
+        for (size_t i = 1; i < e.size(); ++i) {
+            std::printf("  room 6x5x3, %-24s %+.2f dB re centre\n", nm[i], dB(e[i], e[0]));
+            worst = std::max(worst, std::fabs(dB(e[i], e[0])));
+        }
+        check(worst < 1.0, "late level near walls, corners, floor and ceiling equals the level in the middle (within 1 dB; before: down to -5.6 dB)");
+    }
+    // 3. a large hall: the sphere grows with the room, a listener near a wall is not worse off than in the middle
+    {
+        Scene hall = tailBox(30, 20, 10, plaster, plaster, 3.0);
+        const auto e = tailEnergyAt(hall, {8, 6, 2}, {{15, 10, 5}, {0.3, 10, 5}}, 300000);
+        std::printf("  hall 30x20x10, 0.3 m from a wall: %+.2f dB re centre\n", dB(e[1], e[0]));
+        check(std::fabs(dB(e[1], e[0])) < 0.8, "hall: late level 0.3 m from a wall equals the level in the middle (within 0.8 dB)");
+    }
+    // 4. an interior partition: opaque -> nothing right behind it; light partition -> less than in front but not nothing
+    {
+        Scene two = tailBox(8, 4, 3, plaster, plaster, 1.5);
+        two.walls.push_back(Wall{4, 0, 4, 4, concrete});
+        const auto e = tailEnergyAt(two, {1.5, 2, 1.5}, {{3.8, 2, 1.5}, {4.2, 2, 1.5}}, 150000);
+        std::printf("  opaque partition: in front %.3e, 0.2 m behind %.3e\n", e[0], e[1]);
+        check(e[0] > 0 && e[1] == 0.0, "an opaque partition passes no late energy to a receiver 0.2 m behind it");
+        Scene thin = two;
+        thin.walls.back().mat = drywall;
+        const auto t = tailEnergyAt(thin, {1.5, 2, 1.5}, {{3.8, 2, 1.5}, {4.2, 2, 1.5}}, 150000);
+        std::printf("  drywall partition (TL 15-35 dB): in front %.3e, 0.2 m behind %.3e (%.1f dB lower)\n", t[0], t[1], dB(t[0], t[1]));
+        check(t[1] > 0 && dB(t[0], t[1]) > 6.0, "a light partition lets a reduced late level through to the receiver behind it");
+    }
+    // 5. a sphere that touches nothing keeps the original arithmetic: moving the room's walls away changes nothing
+    {
+        Scene big = tailBox(20, 20, 10, plaster, plaster, 1.0);
+        const std::vector<Vec3> rc = {{10, 10, 5}};
+        const auto a = tailEnergyAt(big, {5, 5, 3}, rc, 60000);
+        const auto b = tailEnergyAt(big, {5, 5, 3}, rc, 60000);
+        check(a[0] == b[0] && a[0] > 0, "traces stay deterministic for a receiver in free space");
+    }
+}
+
 // How smooth is the late tail? Window energies (10 ms) of an impulse response over 0.35..2.2 s, in dB, against the
 // straight line (exponential decay) fitted through them: the residual's standard deviation. A diffuse noise tail is
 // within ~0.5 dB; sparse ray statistics give a ragged envelope that is heard as modulation / fragmentation.
@@ -1572,8 +1985,1310 @@ static void testSwirlDefaults(const std::string& dir) {
     check(sd < sp * 0.6, "plugin defaults cut the audible swirl by more than 40 % versus strict physical settings");
 }
 
+
+// E4 diagnostic regression: real 25-point car, rear -> bonnet, then a held
+// pointer's 2 mm jitter for 3 s. This checks scheduler progress, not audibility:
+// horizontal bonnet-edge diffraction is not implemented by the model.
+static void testCarHeldJitter() {
+    std::printf("Test 31 (E4): held bonnet drag, multi-end jobs progress during jitter\n");
+    for(double speed:{.3,1.}) {
+        auto scene=motorSynthScene();scene.diffraction=true;
+        EngineConfig cfg;cfg.erOrder=1;cfg.sharedTail=true;cfg.tailThread=false;cfg.tailRays=1500;
+        Engine e(scene,cfg);e.setSoloMask(1);
+        const int S=e.numSources(),R=e.numReceivers(),block=128;
+        std::vector<float> input(block),output((size_t)R*block);
+        std::vector<const float*> ip(S,input.data());std::vector<float*>op(R);
+        for(int r=0;r<R;++r)op[r]=output.data()+r*block;
+        const double arrival=4.6/speed;
+        unsigned long long atArrival=0,atRelease=0;bool finite=true;
+        double jitterEnergy=0,stillEnergy=0;long jitterN=0,stillN=0;
+        for(int frame=0;frame<(arrival+4)*48000;frame+=block) {
+            const double t=frame/48000.;double x=-2.6+std::min(4.6,t*speed),y=-1.05;
+            if(t>=arrival&&t<arrival+3){x+=.002*std::sin(t*81);y+=.002*std::cos(t*67);}
+            for(int j=0;j<block;++j)input[j]=.03f*(float)std::sin((frame+j)*.17);
+            e.setListener(x,y,1.,0);e.process(ip.data(),op.data(),block);
+            if(t<arrival)atArrival=e.diffractionStats().jobsFinished;
+            if(t<arrival+3)atRelease=e.diffractionStats().jobsFinished;
+            for(float v:output){finite&=std::isfinite(v);if(t>=arrival+1&&t<arrival+3){jitterEnergy+=v*v;++jitterN;}if(t>=arrival+3.5){stillEnergy+=v*v;++stillN;}}
+        }
+        const auto st=e.diffractionStats();
+        std::printf("  %.1f m/s: jobs during held jitter %llu, max search %lld units, mixed direct/diff RMS jitter %.3f / still %.3f dBFS\n",speed,atRelease-atArrival,st.searchUnitsMax,
+            10*std::log10(std::max(1e-30,jitterEnergy/std::max(1L,jitterN))),10*std::log10(std::max(1e-30,stillEnergy/std::max(1L,stillN))));
+        check(atRelease>atArrival,"multi-end searches complete while the held pointer jitters (no release required)");
+        check(st.searchUnitsMax<=Engine::kDefaultDiffractionUnits+2000,"held jitter preserves E3d search work budget");
+        check(finite,"held jitter audio remains finite");
+    }
+}
+
+
+// ---- E4a: late-field gains follow a move; one re-trace after it settles, crossfaded in ----
+// Deterministic: EngineConfig::manualWorker, the worker runs every 20 ms of stream time (Engine::runWorkerStep), so the
+// re-trace and the estimates are instantaneous in stream time; their wall-clock cost is reported separately.
+struct E4aRun {
+    std::vector<std::vector<float>> out;          // tail-only output per receiver
+    Engine::MotionStats atArrival, atEnd, atStart;
+    std::vector<double> energyAt;                 // lateAppliedEnergy at the probe time
+    std::vector<double> energyArrival;            // ... at the arrival (motion estimate only)
+    std::vector<double> procSec;                  // wall time of process() per 0.1 s of audio
+    std::vector<double> workerSec;                // wall time of runWorkerStep() per 0.1 s of audio
+    double probeTime = -1;
+};
+template <class PathFn>
+static E4aRun e4aRun(Engine& e, double yaw, double seconds, PathFn path, double probeTime, Engine::MotionStats* atArrivalOut, double arrival, uint32_t seed = 11, double startTime = 0.5) {
+    const int S = e.numSources(), R = e.numReceivers(), seg = 128, workerEvery = 960;
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<std::vector<float>> in((size_t)S, std::vector<float>((size_t)seg));
+    std::vector<const float*> ip((size_t)S);
+    std::vector<float> ob((size_t)R * seg);
+    std::vector<float*> op((size_t)R);
+    for (int r = 0; r < R; ++r) op[(size_t)r] = ob.data() + (size_t)r * seg;
+    E4aRun run;
+    run.out.assign((size_t)R, {});
+    const long total = (long)(seconds * 48000);
+    bool arrived = false, probed = false, started = false;
+    for (long frame = 0; frame < total; frame += seg) {
+        const double t = frame / 48000.0;
+        const Vec3 p = path(t);
+        e.setListener(p.x, p.y, p.z, yaw);
+        for (int k = 0; k < S; ++k) {
+            for (int i = 0; i < seg; ++i) in[(size_t)k][(size_t)i] = .02f * nd(rng);
+            ip[(size_t)k] = in[(size_t)k].data();
+        }
+        const size_t win = (size_t)(frame / 4800);
+        if (run.procSec.size() <= win) { run.procSec.resize(win + 1, 0.0); run.workerSec.resize(win + 1, 0.0); }
+        auto c0 = std::chrono::steady_clock::now();
+        e.process(ip.data(), op.data(), seg);
+        run.procSec[win] += std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
+        for (int r = 0; r < R; ++r) run.out[(size_t)r].insert(run.out[(size_t)r].end(), op[(size_t)r], op[(size_t)r] + seg);
+        if ((frame + seg) % workerEvery == 0) {
+            c0 = std::chrono::steady_clock::now();
+            e.runWorkerStep();
+            run.workerSec[win] += std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
+        }
+        if (!started && t + seg / 48000.0 >= startTime) { started = true; run.atStart = e.motionStats(); }
+        if (!arrived && t + seg / 48000.0 >= arrival) { arrived = true; run.atArrival = e.motionStats(); run.energyArrival = e.lateAppliedEnergy(); if (atArrivalOut) *atArrivalOut = run.atArrival; }
+        if (!probed && probeTime >= 0 && t + seg / 48000.0 >= probeTime) { probed = true; run.energyAt = e.lateAppliedEnergy(); run.probeTime = t; }
+    }
+    run.atEnd = e.motionStats();
+    return run;
+}
+
+static EngineConfig e4aConfig(bool shared = true) {
+    EngineConfig cfg;
+    cfg.erOrder = 1; cfg.ctrlInterval = 128; cfg.tailBlock = 512; cfg.tailRays = 48000;
+    cfg.tailThread = true; cfg.manualWorker = true; cfg.sharedTail = shared; cfg.maxEarlyDelaySec = shared ? .4 : .75;
+    if (const char* m = std::getenv("E4A_MODE")) cfg.motionMode = std::atoi(m);
+    if (const char* m = std::getenv("E4A_HOLD")) cfg.motionHoldDb = std::atof(m);
+    if (const char* m = std::getenv("E4A_KF")) cfg.motionForwardRays = std::atoi(m);
+    if (const char* m = std::getenv("E4A_KR")) cfg.motionReciprocalRays = std::atoi(m);
+    return cfg;
+}
+
+static Scene withListenerAt(Scene s, Vec3 p) {
+    Vec3 l0{};
+    if (s.hasListener) l0 = s.listenerPos; else { for (auto& r : s.receivers) l0 = l0 + r.pos; l0 = l0 * (1.0 / s.receivers.size()); }
+    for (auto& r : s.receivers) r.pos = r.pos + (p - l0);
+    s.hasListener = true; s.listenerPos = p;
+    return s;
+}
+
+// Per band: energy of the sources named `name`, summed over the receivers; dB difference a vs b (bands where b is
+// within 30 dB of its strongest band).
+static double e4aBandErr(const std::vector<double>& a, const std::vector<double>& b, const Scene& s, int R, const char* name, std::string* line) {
+    const int S = (int)s.sources.size();
+    double ea[NB] = {}, eb[NB] = {}, mx = 0, worst = 0;
+    for (int r = 0; r < R; ++r)
+        for (int k = 0; k < S; ++k) {
+            if (name && s.sources[(size_t)k].name != name) continue;
+            for (int q = 0; q < NB; ++q) { ea[q] += a[((size_t)r * S + k) * NB + q]; eb[q] += b[((size_t)r * S + k) * NB + q]; }
+        }
+    for (int q = 0; q < NB; ++q) mx = std::max(mx, eb[q]);
+    char buf[64];
+    if (line) line->clear();
+    for (int q = 0; q < NB; ++q) {
+        if (eb[q] <= mx * 1e-3 || eb[q] <= 0) { if (line) *line += "    -"; continue; }
+        const double d = 10 * std::log10(std::max(ea[q], 1e-30) / eb[q]);
+        worst = std::max(worst, std::fabs(d));
+        if (line) { std::snprintf(buf, sizeof buf, " %+5.1f", d); *line += buf; }
+    }
+    return worst;
+}
+
+// Level steps of a tail-only output: RMS per 20 ms window, largest change between neighbours (dB), from `from` seconds.
+static double e4aMaxStep(const std::vector<std::vector<float>>& out, double from, double to) {
+    const size_t W = 960;
+    double worst = 0;
+    for (const auto& x : out) {
+        double prev = -1000;
+        for (size_t w0 = (size_t)(from * 48000); w0 + W <= std::min(x.size(), (size_t)(to * 48000)); w0 += W) {
+            double e = 0;
+            for (size_t i = w0; i < w0 + W; ++i) e += (double)x[i] * x[i];
+            const double db = 10 * std::log10(e / W + 1e-30);
+            if (prev > -900) worst = std::max(worst, std::fabs(db - prev));
+            prev = db;
+        }
+    }
+    return worst;
+}
+
+// Level of a tail-only output (both receivers) per `win` seconds window, dB.
+static std::vector<double> e4aLevels(const std::vector<std::vector<float>>& out, double win) {
+    const size_t W = (size_t)(win * 48000);
+    std::vector<double> L;
+    for (size_t w0 = 0; w0 + W <= out[0].size(); w0 += W) {
+        double e = 0;
+        for (const auto& x : out) for (size_t i = w0; i < w0 + W; ++i) e += (double)x[i] * x[i];
+        L.push_back(10 * std::log10(e / W + 1e-30));
+    }
+    return L;
+}
+static double e4aMean(const std::vector<double>& L, double win, double a, double b) {
+    double e = 0; int n = 0;
+    for (size_t i = (size_t)(a / win); i < L.size() && (double)(i + 1) * win <= b; ++i) { e += std::pow(10.0, L[i] / 10); ++n; }
+    return n ? 10 * std::log10(e / n) : -300;
+}
+
+static void testE4aOwner() {
+    std::printf("Test 32 (E4a): owner's drag in MotorSynth + EngineSim, behind the car -> bonnet, then held jitter\n");
+    Scene s = motorSynthScene();
+    s.diffraction = true;
+    int engine = -1;
+    for (size_t k = 0; k < s.sources.size(); ++k) if (s.sources[k].name == "Engine") engine = (int)k;
+    check(engine >= 0, "the car has a source named Engine");
+    if (engine < 0) return;
+    const Vec3 eng = s.sources[(size_t)engine].pos;
+    // Positions on a 2^-12 m grid (0.24 mm), the ear offsets too: then listener + offset is exact in floating point and
+    // an engine built at the end pose places its ears bit-for-bit where the moving engine re-traces them.
+    auto q = [](Vec3 v) { return Vec3{std::round(v.x * 4096) / 4096, std::round(v.y * 4096) / 4096, std::round(v.z * 4096) / 4096}; };
+    {
+        Vec3 l0{};
+        if (s.hasListener) l0 = s.listenerPos; else { for (auto& r : s.receivers) l0 = l0 + r.pos; l0 = l0 * (1.0 / s.receivers.size()); }
+        l0 = q(l0);
+        for (auto& r : s.receivers) r.pos = l0 + q(r.pos - l0);
+        s.hasListener = true; s.listenerPos = l0;
+    }
+    const Vec3 behind = q({eng.x, -2.6, 1.0}), bonnet = q({eng.x, eng.y - 0.1, 1.0});
+    // The late-field length is probed at construction from the first source and receiver, so engines built at different
+    // poses can get different lengths (2.09 s behind the car, 2.31 s at the bonnet). For the comparison with a static
+    // engine built at the end pose both use 2.5 s, longer than either probe asks for.
+    s.length = 2.5;
+    std::printf("  Engine at (%.2f, %.2f, %.2f); path (%.2f, %.2f) -> (%.2f, %.2f) at ear height 1.0 m\n", eng.x, eng.y, eng.z, behind.x, behind.y, bonnet.x, bonnet.y);
+    const double dist = norm(bonnet - behind);
+    for (const double speed : {0.3, 1.0}) {
+        const Scene start = withListenerAt(s, behind);
+        Engine e(start, e4aConfig());
+        e.setSoloMask(4);
+        const int R = e.numReceivers();
+        const double t0 = 0.5, arrival = t0 + dist / speed, jitterEnd = arrival + 3.0;
+        const double tail = e.tailSeconds(), end = jitterEnd + tail + 1.5;
+        Vec3 settledAt{};
+        auto path = [&](double t) {
+            Vec3 p = behind + (bonnet - behind) * std::min(1.0, std::max(0.0, (t - t0) * speed / dist));
+            if (t >= arrival && t < jitterEnd) { p.x += .002 * std::sin(t * 81); p.y += .002 * std::cos(t * 67); p.z += .002 * std::sin(t * 53 + 1); }
+            if (t >= jitterEnd) p = settledAt;  // the pointer is released where it was held last
+            else settledAt = q(p);
+            return q(p);
+        };
+        // the probe: the gains applied at the end of the jitter, compared below with a static engine at that pose
+        const double bound = 0.4 + 0.75 + 0.1;  // settle + crossfade + margin
+        Engine::MotionStats atArrival;
+        // gains just after arrival (motion estimate only) and after the bound
+        std::vector<double> estAtArrival;
+        E4aRun run;
+        {
+            // first pass up to arrival + 0.05 s to read the estimate, then continue in the same engine
+            run = e4aRun(e, s.listenerYaw, end, path, arrival + bound, &atArrival, arrival);
+        }
+        (void)estAtArrival;
+        const auto& st = run.atEnd;
+        // static engine at the held pose (where the re-trace happened is within the dead-band of it)
+        const Vec3 held{st.refListener[0], st.refListener[1], st.refListener[2]};  // where the re-trace was made
+        Engine ref(withListenerAt(s, held), e4aConfig());
+        ref.setSoloMask(4);
+        const auto refE = ref.lateAppliedEnergy();
+        std::string line;
+        const double errAfter = e4aBandErr(run.energyAt, refE, s, R, "Engine", &line);
+        std::string lineArr, lineAll;
+        e4aBandErr(run.energyArrival, refE, s, R, "Engine", &lineArr);
+        e4aBandErr(run.energyArrival, refE, s, R, nullptr, &lineAll);
+        std::printf("    at arrival (motion estimate, before the re-trace) vs static: Engine%s dB; all sources%s dB\n", lineArr.c_str(), lineAll.c_str());
+        std::printf("  %.1f m/s: arrival at %.2f s; during the move: %llu short swaps, %llu transitions, %llu estimates (%llu values held); "
+                    "after: %llu transitions started, %llu done, %llu cancelled re-traces; estimate %.1f ms max, re-trace %.0f ms max\n",
+            speed, arrival, atArrival.legacySwaps, atArrival.transitionsStarted, atArrival.estimates, atArrival.held,
+            st.transitionsStarted, st.transitionsDone, st.retraceCancelled, st.maxEstimateMs, st.maxRetraceMs);
+        std::printf("    Engine late energy vs static engine at the held pose, %.2f s after arrival, per band 125..8k:%s dB\n", run.probeTime - arrival, line.c_str());
+        const double stepMove = e4aMaxStep(run.out, t0 + 0.3, arrival), stepHold = e4aMaxStep(run.out, arrival, end);
+        if (const char* dump = std::getenv("E4A_DUMP")) {  // tail-only RMS per 20 ms, dB
+            char fn[512]; std::snprintf(fn, sizeof fn, "%s_%.1f.txt", dump, speed);
+            if (FILE* f = std::fopen(fn, "w")) {
+                for (size_t w0 = 0; w0 + 960 <= run.out[0].size(); w0 += 960) {
+                    std::fprintf(f, "%.3f", w0 / 48000.0);
+                    for (const auto& x : run.out) { double e2 = 0; for (size_t i = w0; i < w0 + 960; ++i) e2 += (double)x[i] * x[i]; std::fprintf(f, " %.2f", 10 * std::log10(e2 / 960 + 1e-30)); }
+                    std::fprintf(f, "\n");
+                }
+                std::fclose(f);
+            }
+        }
+        std::printf("    tail-only level steps (20 ms windows): during the move %.1f dB, after it %.1f dB; tail %.2f s, static engine tail %.2f s\n", stepMove, stepHold, tail, ref.tailSeconds());
+        {   // audio-thread cost: process() time per 0.1 s of audio, still (before the move), moving, crossfade, still (after)
+            auto meanP = [&](const std::vector<double>& v, double a, double b) { double x = 0; int n = 0; for (size_t i = (size_t)(a / 0.1); i < v.size() && (double)(i + 1) * 0.1 <= b; ++i) { x += v[i]; ++n; } return n ? 1000 * x / n : 0.0; };
+            double fadeMax = 0; for (size_t i = (size_t)((arrival + 0.4) / 0.1); i < run.procSec.size() && (double)(i + 1) * 0.1 <= arrival + 1.2; ++i) fadeMax = std::max(fadeMax, 1000 * run.procSec[i]);
+            std::printf("    audio cost, ms of process() per 100 ms of audio: still %.2f, moving %.2f, crossfade %.2f (max %.2f), after %.2f; worker during the move %.1f ms per 100 ms\n",
+                meanP(run.procSec, 0.1, t0), meanP(run.procSec, t0 + 0.2, arrival), meanP(run.procSec, arrival + 0.45, arrival + 1.15), fadeMax, meanP(run.procSec, end - 1.0, end),
+                meanP(run.workerSec, t0 + 0.2, arrival));
+        }
+        check(atArrival.legacySwaps == 0 && atArrival.transitionsStarted == 0, "no tail IR swap while the listener moves");
+        check(st.legacySwaps == 0 && st.transitionsStarted == 1 && st.transitionsDone == 1, "exactly one re-trace after the move (held jitter of +-2 mm does not trigger more)");
+        check(errAfter <= 2.0, "Engine late gain within 2 dB of the static engine within settle + crossfade after arrival");
+        // the crossfade: 100 ms levels between the settle and the end of the fade stay between the levels before
+        // (arrival .. settle) and after (once settled), with 1.5 dB for the natural fluctuation of a noise-driven tail
+        const auto L = e4aLevels(run.out, 0.1);
+        const double before = e4aMean(L, 0.1, arrival, arrival + 0.4), after = e4aMean(L, 0.1, arrival + 1.4, arrival + 2.9);
+        double lo = 1e9, hi = -1e9;
+        for (size_t i = (size_t)(arrival / 0.1); i < L.size() && (double)(i + 1) * 0.1 <= arrival + 1.4; ++i) { lo = std::min(lo, L[i]); hi = std::max(hi, L[i]); }
+        const double stepStill = e4aMaxStep(run.out, arrival + 1.4 + tail, end);  // the same output once it is static
+        std::printf("    level (100 ms windows): before the settle %.1f dB, after %.1f dB, during settle+crossfade %.1f .. %.1f dB; 20 ms steps once static %.1f dB\n",
+            before, after, lo, hi, stepStill);
+        check(lo >= std::min(before, after) - 1.5 && hi <= std::max(before, after) + 1.5, "no dip or bump in the tail level during the crossfade");
+        check(stepHold <= stepStill + 1.0, "20 ms level steps after the move no larger than those of the static output (+1 dB)");
+        // end state: bit-identical tail with the static engine once the transition and the IR length have passed
+        if (std::fabs(tail - ref.tailSeconds()) < 1e-9) {
+            // feed both engines the same input from the start: rebuild the moving engine's run with the reference
+            // engine alongside is costly; instead compare the gains/IR state through a common continuation.
+            const int S = e.numSources(), seg = 128;
+            std::mt19937 rng(99);
+            std::normal_distribution<float> nd(0.f, 1.f);
+            std::vector<std::vector<float>> in((size_t)S, std::vector<float>((size_t)seg));
+            std::vector<const float*> ip((size_t)S);
+            std::vector<float> oa((size_t)R * seg), obuf((size_t)R * seg);
+            std::vector<float*> pa((size_t)R), pb((size_t)R);
+            for (int r = 0; r < R; ++r) { pa[(size_t)r] = oa.data() + (size_t)r * seg; pb[(size_t)r] = obuf.data() + (size_t)r * seg; }
+            // both engines get the same new input for longer than the IR; their histories then hold only it
+            const long n = (long)((tail + 0.5) * 48000);
+            double maxDiff = 0, peak = 0;
+            for (long f = 0; f < n; f += seg) {
+                for (int k = 0; k < S; ++k) { for (int i = 0; i < seg; ++i) in[(size_t)k][(size_t)i] = .02f * nd(rng); ip[(size_t)k] = in[(size_t)k].data(); }
+                e.setListener(held.x, held.y, held.z, s.listenerYaw);
+                e.process(ip.data(), pa.data(), seg);
+                ref.process(ip.data(), pb.data(), seg);
+                if (f >= (long)((tail + 0.1) * 48000))
+                    for (size_t i = 0; i < oa.size(); ++i) { maxDiff = std::max(maxDiff, (double)std::fabs(oa[i] - obuf[i])); peak = std::max(peak, (double)std::fabs(obuf[i])); }
+            }
+            const bool same = e.lateStateHash() == ref.lateStateHash();
+            std::printf("    end state: IR + applied gains %s the static engine's; tail output after %.1f s of common input: max |difference| %.3g (peak %.3g)\n",
+                same ? "identical to" : "DIFFERENT from", tail + 0.5, maxDiff, peak);
+            check(same, "after the transition the late-field state (IR and gains) is bit-identical to a static engine at that pose");
+        } else std::printf("    end state: tail lengths differ (pose-dependent length probe); bit-identity not checked\n");
+    }
+}
+
+
+static Scene builtinSceneNamed(const char* key) {  // as motorSynthScene(), any built-in room
+    for (const auto& room : verbp::builtinRooms()) {
+        if (room.name.find(key) == std::string::npos) continue;
+        std::istringstream in(room.text);
+        auto s = parseScene(in, room.name);
+        s.sr = 48000;
+        if (s.receivers.size() > 2) s.receivers.resize(2);
+        if (!room.setup.empty()) {
+            const auto points = verbp::buildPoints(room.setup);
+            const auto authored = s.sources;
+            s.sources.clear();
+            for (const auto& pm : points) {
+                const auto& c = room.setup[(size_t)pm.source];
+                const auto& center = authored[(size_t)pm.source];
+                const double az = center.azimuthDeg * kPi / 180.;
+                double x = 0, y = 0, z = 0;
+                if (c.freePoints && pm.channel >= 0 && pm.channel < (int)c.ox.size() && pm.channel < (int)c.oy.size()) {
+                    x = c.ox[(size_t)pm.channel]; y = c.oy[(size_t)pm.channel];
+                    if (pm.channel < (int)c.oz.size()) z = c.oz[(size_t)pm.channel];
+                } else { x = pm.radius * std::cos(pm.angleDeg * kPi / 180.); y = pm.radius * std::sin(pm.angleDeg * kPi / 180.); }
+                Transducer t; t.name = c.name; t.azimuthDeg = center.azimuthDeg; t.pattern = c.pattern;
+                t.pos = {center.pos.x + std::cos(az) * x - std::sin(az) * y, center.pos.y + std::sin(az) * x + std::cos(az) * y,
+                    std::clamp(center.pos.z + z, 0., s.ceilMat < 0 ? 30. : s.height)};
+                s.sources.push_back(t);
+            }
+        }
+        if (room.micPattern >= 0) applyMicPattern(s.receivers, (MicPattern)room.micPattern, room.micPattern == (int)MicPattern::HumanEars ? .0875 : .1);
+        return s;
+    }
+    throw std::runtime_error(std::string("built-in room not found: ") + key);
+}
+
+// Clicks in a tail-only output: per 64 samples, the energy above 4 kHz (4th-order high-pass) relative to all of it, as
+// the largest excess (dB) over the median of the run, from `from` seconds; and the largest sample step relative to the
+// local RMS.
+static void e4aClick(const std::vector<std::vector<float>>& out, double from, double& hfSpike, double& jump) {
+    hfSpike = -300; jump = 0;
+    for (const auto& x : out) {
+        struct Bq { double b0, b1, b2, a1, a2, x1, x2, y1, y2; };
+        std::vector<Bq> f;
+        for (double qq : {0.5098, 0.6013, 0.9000, 2.5629}) {
+            const double w = 2 * kPi * 4000 / 48000.0, al = std::sin(w) / (2 * qq), cw = std::cos(w), a0 = 1 + al;
+            f.push_back(Bq{(1 + cw) / 2 / a0, -(1 + cw) / a0, (1 + cw) / 2 / a0, -2 * cw / a0, (1 - al) / a0, 0, 0, 0, 0});
+        }
+        const size_t W = 64, n = x.size(), i0 = (size_t)(from * 48000);
+        std::vector<double> ratio;
+        double hf = 0, tot = 0;
+        for (size_t i = 0; i < n; ++i) {
+            double y = x[i];
+            for (auto& b : f) { const double v = b.b0 * y + b.b1 * b.x1 + b.b2 * b.x2 - b.a1 * b.y1 - b.a2 * b.y2; b.x2 = b.x1; b.x1 = y; b.y2 = b.y1; b.y1 = v; y = v; }
+            hf += y * y; tot += (double)x[i] * x[i];
+            if ((i + 1) % W == 0) { if (i >= i0) ratio.push_back(10 * std::log10((hf + 1e-30) / (tot + 1e-30))); hf = tot = 0; }
+        }
+        if (ratio.empty()) continue;
+        auto sorted = ratio; std::sort(sorted.begin(), sorted.end());
+        const double med = sorted[sorted.size() / 2];
+        for (double r : ratio) hfSpike = std::max(hfSpike, r - med);
+        for (size_t w0 = std::max(i0, (size_t)256); w0 + W + 256 <= n; w0 += W) {
+            double e = 0;
+            for (size_t i = w0 - 256; i < w0 + W + 256; ++i) e += (double)x[i] * x[i];
+            const double rms = std::sqrt(e / (W + 512)) + 1e-12;
+            for (size_t i = w0; i < w0 + W; ++i) jump = std::max(jump, std::fabs((double)x[i] - x[i - 1]) / rms);
+        }
+    }
+}
+
+static void testE4aSweeps(bool shared) {
+    std::printf(shared ? "Test 33 (E4a): listener sweeps in a small, medium and large room, shared late field (one convolver per output), steady noise\n"
+                       : "Test 34 (E4a): listener sweeps in a small, medium and large room, per-source late field (gains held while moving), steady noise\n");
+    struct Room { const char* key; double dist; };
+    auto q = [](Vec3 v) { return Vec3{std::round(v.x * 4096) / 4096, std::round(v.y * 4096) / 4096, std::round(v.z * 4096) / 4096}; };
+    const std::vector<Room> rooms = shared ? std::vector<Room>{Room{"Vocal booth", 0.8}, Room{"Studio live room", 3.5}, Room{"VSL Grand hall - audience", 8.0}}
+                                           : std::vector<Room>{Room{"Vocal booth", 0.8}, Room{"Studio live room", 3.5}, Room{"Concert hall (audience zone)", 8.0}};
+    for (const Room room : rooms) {
+        Scene s = builtinSceneNamed(room.key);
+        Vec3 l0{};
+        if (s.hasListener) l0 = s.listenerPos; else { for (auto& r : s.receivers) l0 = l0 + r.pos; l0 = l0 * (1.0 / s.receivers.size()); }
+        l0 = q(l0);
+        for (auto& r : s.receivers) r.pos = l0 + q(r.pos - l0);
+        s.hasListener = true; s.listenerPos = l0;
+        double x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+        for (const auto& w : s.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
+        // towards the middle of the room, at most `dist`, staying 0.4 m inside the outline
+        Vec3 c{0.5 * (x0 + x1), 0.5 * (y0 + y1), l0.z};
+        Vec3 u = c - l0; u.z = 0;
+        if (norm(u) < 0.2) u = {1, 0, 0};
+        u = u * (1.0 / norm(u));
+        double d = room.dist;
+        for (;;) {
+            const Vec3 e = l0 + u * d;
+            if ((e.x > x0 + 0.4 && e.x < x1 - 0.4 && e.y > y0 + 0.4 && e.y < y1 - 0.4) || d < 0.3) break;
+            d *= 0.9;
+        }
+        const Vec3 dest = q(l0 + u * d);
+        // the same late-field length for engines built at both ends (the length probe depends on the pose)
+        {
+            EngineConfig lc = e4aConfig(shared); lc.tailRays = 1500;
+            Engine a(s, lc), b(withListenerAt(s, dest), lc);
+            s.length = std::max(a.tailSeconds(), b.tailSeconds());
+        }
+        std::printf("  %s: %zu points, listener (%.2f, %.2f, %.2f) -> (%.2f, %.2f), %.2f m, tail %.2f s\n", room.key, s.sources.size(), l0.x, l0.y, l0.z, dest.x, dest.y, d, s.length);
+        for (const double speed : {0.5, 2.0, 10.0}) {
+            Engine e(s, e4aConfig(shared));
+            e.setSoloMask(4);
+            const int R = e.numReceivers();
+            const double t0 = 0.5, arrival = t0 + d / speed, tail = e.tailSeconds(), end = arrival + 2.5 + tail;
+            auto path = [&](double t) { return q(l0 + (dest - l0) * std::min(1.0, std::max(0.0, (t - t0) * speed / d))); };
+            Engine::MotionStats atArrival;
+            const auto run = e4aRun(e, s.listenerYaw, end, path, arrival + 1.3, &atArrival, arrival);
+            const auto& st = run.atEnd;
+            Engine ref(withListenerAt(s, dest), e4aConfig(shared));
+            ref.setSoloMask(4);
+            const auto refRun = e4aRun(ref, s.listenerYaw, end, [&](double) { return dest; }, arrival + 1.3, nullptr, arrival);
+            const auto refE = ref.lateAppliedEnergy();
+            std::string lineArr;
+            const double errArr = shared ? e4aBandErr(run.energyArrival, refE, s, R, nullptr, &lineArr) : 0.0;
+            if (!shared) lineArr = " (gains held, no estimate)";
+            // levels relative to the static engine on the same input (the input's own fluctuation cancels): before the
+            // settle the difference is the estimate's error, afterwards zero; in between it must not leave that range
+            const auto Lm = e4aLevels(run.out, 0.1), Lr = e4aLevels(refRun.out, 0.1);
+            std::vector<double> L(Lm.size());
+            for (size_t i = 0; i < L.size(); ++i) L[i] = Lm[i] - Lr[i];
+            auto meanD = [&](double a, double b) { double x = 0; int n = 0; for (size_t i = (size_t)(a / 0.1); i < L.size() && (double)(i + 1) * 0.1 <= b; ++i) { x += L[i]; ++n; } return n ? x / n : 0.0; };
+            const double before = meanD(arrival, arrival + 0.4), after = meanD(arrival + 1.4 + tail, end);
+            double lo = 1e9, hi = -1e9;
+            for (size_t i = (size_t)(arrival / 0.1); i < L.size() && (double)(i + 1) * 0.1 <= arrival + 1.4; ++i) { lo = std::min(lo, L[i]); hi = std::max(hi, L[i]); }
+            double hfM, jM, hfR, jR;
+            e4aClick(run.out, t0, hfM, jM);
+            e4aClick(refRun.out, t0, hfR, jR);
+            const bool same = e.lateStateHash() == ref.lateStateHash();
+            std::printf("    %4.1f m/s: move %.2f s: %llu swaps / %llu transitions while moving, %llu / %llu (%llu done) in all; %llu estimates, %llu values held\n",
+                speed, d / speed, atArrival.legacySwaps - run.atStart.legacySwaps, atArrival.transitionsStarted - run.atStart.transitionsStarted, st.legacySwaps, st.transitionsStarted, st.transitionsDone, st.estimates, st.held);
+            std::printf("      estimate at arrival vs static, all sources, per band:%s dB; tail level minus the static engine's: before the settle %+.1f, after %+.1f, during %+.1f .. %+.1f dB\n",
+                lineArr.c_str(), before, after, lo, hi);
+            std::printf("      clicks: HF spike over median %.1f dB (static %.1f), sample step / local RMS %.2f (static %.2f); end state %s\n",
+                hfM, hfR, jM, jR, same ? "identical to the static engine" : "DIFFERENT");
+            // (the per-source worker re-traces every source once ~0.3 s after construction, as before E4a: an identical IR)
+            const auto& s0 = run.atStart;
+            {   // audio cost of the late field's transition: process() per 100 ms of audio, still vs crossfade
+                auto meanP = [&](double a, double b) { double x = 0; int n = 0; for (size_t i = (size_t)(a / 0.1); i < run.procSec.size() && (double)(i + 1) * 0.1 <= b; ++i) { x += run.procSec[i]; ++n; } return n ? 1000 * x / n : 0.0; };
+                std::printf("      audio cost, ms of process() per 100 ms of audio: before the move %.2f, crossfade %.2f, at the end %.2f\n",
+                    meanP(0.1, t0), meanP(arrival + 0.45, arrival + 1.15), meanP(end - 1.0, end));
+            }
+            check(atArrival.legacySwaps == s0.legacySwaps && atArrival.transitionsStarted == s0.transitionsStarted && s0.transitionsStarted == 0,
+                "no tail IR swap during the sweep");
+            check(st.legacySwaps == s0.legacySwaps && st.transitionsStarted == 1 && st.transitionsDone == 1, "exactly one transition after the sweep stops");
+            check(hfM <= hfR + 3.0 && jM <= jR * 1.5 + 0.5, "no click: HF bursts and sample steps as in the static output");
+            check(lo >= std::min(before, after) - 1.0 && hi <= std::max(before, after) + 1.0, "during the crossfade the tail level stays between the estimate's and the exact level (1 dB)");
+            check(same, "end state identical to a static engine at the end pose");
+            (void)errArr;
+        }
+    }
+}
+
+#include "e7_handover_test.hpp"
+
+// E5: sample the physical transfer at a 128-sample / 1 m/s control spacing.
+static void testE5SoftShadows() {
+    std::printf("Test 35 (E5): first-order screen shadow and horizontal rim continuity\n");
+    Scene sc;sc.mats=surfacePresets();sc.floorMat=0;sc.ceilMat=0;sc.height=3;sc.diffraction=true;
+    sc.walls={{0,0,10,0,0},{10,0,10,8,0},{10,8,0,8,0},{0,8,0,0,0},{5,0,5,4,0}};
+    const Vec3 S{2,2,1.2}; Geo g(sc);
+    double maxStep[NB]={};double old[NB]={};bool bounded=true;
+    for(int k=0;k<=1500;++k) {
+        Vec3 R{8,2+k*128./48000,1.2};Vec3 P;float a[NB];std::fill_n(a,NB,1.f);
+        bool ok=crossSurfaceSoft(g,R,mirror(g,S,g.ceilId()),g.ceilId(),P,343.2,a)
+            &&softReflectionLeg(g,R,P,g.ceilId(),-1,343.2,a)
+            &&softReflectionLeg(g,P,S,g.ceilId(),-1,343.2,a);
+        for(int b=0;b<NB;++b){bounded=bounded&&a[b]>=0&&a[b]<=1;double db=20*log10(std::max(1e-15,ok?(double)a[b]:0.));if(k){double step=std::abs(db-old[b]);if(step>1.)std::printf("  diagnostic k=%d band=%d old=%g new=%g\n",k,b,old[b],db);maxStep[b]=std::max(maxStep[b],step);}old[b]=db;}
+    }
+    double worst=0;for(double x:maxStep)worst=std::max(worst,x);
+    std::printf("  reflected ceiling leg max step %.6f dB\n",worst);
+    check(worst<=1.,"each reflected band changes by <=1 dB/control period at partition end");
+    check(bounded,"reflection leg transfer does not create energy");
+    sc.walls.clear();sc.ceilMat=-1;Zone z;z.mat=0;z.z=.8;z.poly={{0,0},{2,0},{2,2},{0,2}};sc.ceilZones={z};Geo plate(sc);
+    double plateWorst=0;bool plateEnergy=true;
+    for(int k=0;k<=750;++k){Vec3 R{2+k*128./48000,1,1.2};float a[NB];std::fill_n(a,NB,1.f);bool ok=softReflectionLeg(plate,{1,1,.4},R,-1,-1,343.2,a);for(int b=0;b<NB;++b){plateEnergy=plateEnergy&&a[b]>=0&&a[b]<=1;double db=20*log10(std::max(1e-15,ok?(double)a[b]:0.));if(k)plateWorst=std::max(plateWorst,std::abs(db-old[b]));old[b]=db;}}
+    std::printf("  plate rim max step %.6f dB\n",plateWorst);
+    check(plateWorst<=1.,"each direct plate-rim band changes by <=1 dB/control period");
+    check(plateEnergy,"plate-rim transfer does not create energy");
+    sc.walls={{0,0,4,0,0},{4,0,4,4,0},{4,4,0,4,0},{0,4,0,0,0}};sc.ceilZones.clear();Geo box(sc);float a[NB];std::fill_n(a,NB,1.f);
+    check(!softReflectionLeg(box,{-1,2,1},{2,2,1},-1,-1,343.2,a),"E5 continuation cannot enter a sealed opaque room");
+}
+
+// Keep the owner's acceptance target executable even where E5 remains incomplete.
+static void testE5OwnerTargets() {
+    std::printf("Test 36 (E5): owner tracks, summed first-order field acceptance target\n");
+    auto track=[&](Scene sc,Vec3 start,Vec3 velocity,int count,const char* name) {
+        double prev[NB]={},worst[NB]={};
+        for(int k=0;k<=count;++k){auto f=earlyFieldEnergy(sc,sc.sources[0],start+velocity*(k*128./48000));for(int b=0;b<NB;++b){double level=10*std::log10(std::max(1e-30,f.early[b]));if(k)worst[b]=std::max(worst[b],std::abs(level-prev[b]));prev[b]=level;}}
+        double peak=0;std::printf("  %s early steps:",name);for(double x:worst){std::printf(" %.6f",x);peak=std::max(peak,x);}std::printf(" dB\n");check(peak<=1.,name);
+    };
+    auto door=closedBox(presetIndex("Concrete"),presetIndex("Absorber"));
+    door.walls={{0,0,8,0,0},{8,0,8,6,0},{8,6,0,6,0},{0,2.5,0,0,0},{0,6,0,3.5,0}};
+    door.sources[0].pos={-2,.8,1.5};track(door,{1,1,1.5},{0,1,0},900,"door opening <=1 dB/band/control period");
+    auto car=motorSynthScene();
+    for(const auto& src:car.sources)if(src.name=="Engine"){
+        auto sc=car;sc.sources={src};
+        track(sc,{src.pos.x,-.1,.1},{0,0,1},600,"car bonnet <=1 dB/band/control period");
+        track(sc,{1,-2.6,1},{0,1,0},600,"car body corner <=1 dB/band/control period");break;
+    }
+}
+
+static void testE5bFreeSupports() {
+    std::printf("Test 37 (E5b): free height/polygon boundaries and direct endpoint clip\n");
+    Scene sc;sc.mats=surfacePresets();sc.floorMat=0;sc.ceilMat=-1;sc.height=3;sc.diffraction=true;
+    sc.walls={{0,-2,0,2,0,.8,2}};Geo wall(sc);
+    auto sweep=[&](const Geo& g,int surf,Vec3 S,Vec3 start,Vec3 velocity,int count,const char* name){double old[NB]={},worst=0;bool energy=true;
+        for(int k=0;k<=count;++k){Vec3 R=start+velocity*(k*128./48000),P;float a[NB];std::fill_n(a,NB,1.f);bool ok=crossSurfaceSoft(g,R,mirror(g,S,surf),surf,P,343.2,a);for(int b=0;b<NB;++b){energy=energy&&a[b]>=0&&a[b]<=1;double d=20*log10(std::max(1e-15,ok?(double)a[b]:0.));if(k)worst=std::max(worst,std::abs(d-old[b]));old[b]=d;}}
+        std::printf("  %s max %.6f dB\n",name,worst);check(worst<=1.,name);check(energy,"finite-support attenuation never exceeds unity");};
+    sweep(wall,0,{1,0,.4},{1,1,.4},{0,0,1},600,"wall bottom z0 continuity");
+    sweep(wall,0,{1,0,1.8},{1,1,1.4},{0,0,1},600,"wall top z1 continuity");
+    sc.walls.clear();Zone pl;pl.mat=0;pl.z=.8;pl.poly={{0,0},{2,0},{2,2},{0,2}};sc.ceilZones={pl};Geo plate(sc);
+    sweep(plate,plate.W+2,{1,1,.3},{2.2,1,.3},{1,0,0},600,"plate polygon edge continuity");
+    sc.walls={{2,0,2,2,0,0,3}};Geo joint(sc);Vec3 P;float a[NB];std::fill_n(a,NB,1.f);
+    bool ok=crossSurfaceSoft(joint,{2.98,1,.3},mirror(joint,{1,1,.3},joint.W+2),joint.W+2,P,343.2,a);
+    bool full=ok;for(float x:a)full=full&&x==1.f;check(full,"joined plate/wall edge has no own support fade");
+    sc.ceilZones.clear();sc.walls={{0,0,0,-2,0}};Geo jamb(sc);double old[NB]={},worst=0;
+    for(int k=0;k<=120;++k){Vec3 S{-2,0,1},R{-.05,.15+k*128./48000,1};float x[NB];std::fill_n(x,NB,1.f);litEdgeAttenuation(jamb,S,R,343.2,x);for(int b=0;b<NB;++b){double d=20*log10(std::max(1e-15,(double)x[b]));if(k)worst=std::max(worst,std::abs(d-old[b]));old[b]=d;}}
+    std::printf("  direct jamb endpoint max %.6f dB\n",worst);check(worst<=1.,"direct lit-edge t=1 is continuous");
+}
+
+// E6 step 1: welded edge topology of hand-built scenes.
+static void testE6Topology() {
+    std::printf("Test 38 (E6): welded edge topology (split of partly shared edges, T junction, box)\n");
+    auto find = [](const Geo& g, Vec3 a, Vec3 b) -> const Geo::Weld* {
+        for (const auto& w : g.welds) if ((norm(w.A - a) < 1e-9 && norm(w.B - b) < 1e-9) || (norm(w.A - b) < 1e-9 && norm(w.B - a) < 1e-9)) return &w;
+        return nullptr; };
+    {   // a plate side (y = 0, x 0..2) longer than the wall under it (x 0.5..1.5): free / shared / free
+        Scene sc; sc.mats = surfacePresets(); sc.floorMat = 0; sc.ceilMat = -1; sc.height = 3;
+        Zone p; p.mat = 0; p.z = .8; p.poly = {{0, 0}, {2, 0}, {2, 2}, {0, 2}}; sc.ceilZones = {p};
+        sc.walls = {{.5, 0, 1.5, 0, 0, 0, .8}};
+        Geo g(sc);
+        const auto* a = find(g, {0, 0, .8}, {.5, 0, .8});
+        const auto* b = find(g, {.5, 0, .8}, {1.5, 0, .8});
+        const auto* c = find(g, {1.5, 0, .8}, {2, 0, .8});
+        check(a && a->n == 1 && a->kind == 0, "partly shared plate side: free part before the wall");
+        check(b && b->n == 2 && b->kind == 2, "partly shared plate side: plate/wall wedge over the wall");
+        check(c && c->n == 1 && c->kind == 0, "partly shared plate side: free part after the wall");
+        check(g.weldCounts.partlyShared >= 1, "partly shared edge counted before splitting");
+        bool b2 = false; if (b) for (int k : g.legWelds) b2 |= &g.welds[(size_t)k] == b;
+        check(b2, "plate/wall wedge at mid height can change a passing leg");
+    }
+    {   // T junction: wall (2,0)->(2,3) ends on the middle of wall (0,0)->(4,0)
+        Scene sc; sc.mats = surfacePresets(); sc.floorMat = 0; sc.ceilMat = 0; sc.height = 3;
+        sc.walls = {{0, 0, 4, 0, 0}, {2, 0, 2, 3, 0}};
+        Geo g(sc);
+        const auto* t = find(g, {2, 0, 0}, {2, 0, 3});
+        check(t && t->n == 3 && t->kind == 3, "T junction: three rays");
+        if (t) check(std::fabs(t->ang[0]) < 1e-9 && std::fabs(t->ang[1] - kPi / 2) < 1e-9 && std::fabs(t->ang[2] - kPi) < 1e-9, "T junction: ray angles 0, 90, 180 deg");
+        const auto* fr = find(g, {2, 3, 0}, {2, 3, 3});
+        check(fr && fr->n == 1, "free wall end is a free edge");
+    }
+    {   // closed box with a door panel stacked under a glass panel on one side
+        Scene sc; sc.mats = surfacePresets(); sc.floorMat = 0; sc.ceilMat = 0; sc.height = 3;
+        sc.walls = {{0, 0, 4, 0, 0}, {4, 0, 4, 4, 0}, {4, 4, 0, 4, 0}, {0, 4, 0, 0, 0}};
+        Geo g(sc);
+        int wedges = 0, domainT = 0;
+        for (const auto& w : g.welds) { if (w.vertical && w.kind == 2) ++wedges; if (!w.vertical && w.domain && w.kind == 3) ++domainT; }
+        check(wedges == 4 && domainT == 8 && g.weldCounts.freeEdges == 0, "box: four corner wedges, eight floor/ceiling junctions, no free edge");
+        check(g.legWelds.size() == 4, "box: only the convex outside of the corners can change a leg");
+        sc.walls[0] = {0, 0, 4, 0, presetIndex("Concrete"), 0, 1.2};
+        sc.walls.push_back({0, 0, 4, 0, presetIndex("Glass_window"), 1.2, 1e9});
+        Geo s2(sc);
+        const auto* st = find(s2, {0, 0, 1.2}, {4, 0, 1.2});
+        check(st && st->kind == 1, "stacked door/glass panels: coplanar weld");
+        const auto* v = find(s2, {0, 0, 0}, {0, 0, 1.2});
+        const auto* v2 = find(s2, {0, 0, 1.2}, {0, 0, 3});
+        auto has = [](const Geo::Weld* w, int f) { if (!w) return false; for (int q = 0; q < w->n; ++q) if (w->face[q] == f) return true; return false; };
+        check(has(v, 0) && has(v, 3) && has(v2, 4) && has(v2, 3) && !has(v2, 0), "corner edge split at the panel height");
+        check(s2.weldCounts.partlyShared >= 1, "corner edge of the neighbour wall counted as partly shared");
+    }
+}
+
+// E6 partial delivery: do not relax the 1 dB owner target on the remaining arc.
+static void testE6Handover() {
+    std::printf("Test 39 (E6): welded-leg midpoint, bounds, concave sector and owner rear arcs\n");
+    bool bounded=true,mid=true;
+    for(int b=0;b<NB;++b) for(double d:{0.,1e-10,.001,.1,1.,4.}) {
+        double a=e6Blend(.001,1.,d,b,343.2),c=e6Blend(1.,.001,d,b,343.2);
+        bounded &= a>=.001 && a<=1 && c>=.001 && c<=1;
+        if(d==0) mid &= std::abs(a-.5005)<1e-12 && std::abs(c-.5005)<1e-12;
+    }
+    check(bounded,"one welded-edge blend lies between both transmissions");
+    check(mid,"both sides meet at the exact amplitude midpoint");
+    Scene box;box.height=3;box.diffraction=true;box.mats=surfacePresets();box.floorMat=0;box.ceilMat=0;
+    box.walls={{0,0,4,0,0},{4,0,4,4,0},{4,4,0,4,0},{0,4,0,0,0}};
+    Geo g(box);float own[NB];std::fill_n(own,NB,1.f);WeldLegSum ws;
+    check(weldLegHits(g,{1,1,1},{2,2,0},g.W,343.2,own,ws,1,{3,3,1},0,own,own)==0,"concave interior keeps both legitimate reflections unchanged");
+    auto sc=builtinSceneNamed("MotorSynth + EngineSim");sc.diffraction=true;
+    std::vector<Transducer> sources;
+    for(auto src:sc.sources)if(src.name=="Exhaust"||src.name=="Backfire"||src.name=="EngineSim Exhaust A"||src.name=="EngineSim Exhaust B")sources.push_back(src);
+    bool energyBound=true;Geo car(sc);double c=speedOfSound(sc.tempC);
+    for(double z:{1.,.5}) {
+        double prev[NB]={},worst=0;const double step=128./48000/.5;int n=(int)((210.*kPi/180)/step);
+        for(int k=0;k<=n;++k){double th=60*kPi/180-k*step;Vec3 r{.8+.5*cos(th),-1.5+.5*sin(th),z};double total[NB]={};
+            for(auto src:sources){auto f=earlyFieldEnergy(sc,src,r);for(int b=0;b<NB;++b)total[b]+=f.early[b];
+                for(int sf=0;sf<car.nSurf();++sf){Vec3 p;float a[NB];std::fill_n(a,NB,1.f);
+                    if(crossSurfaceSoft(car,r,mirror(car,src.pos,sf),sf,p,c,a)&&softReflectionLeg(car,r,p,sf,-1,c,a,1,src.pos)&&softReflectionLeg(car,p,src.pos,sf,-1,c,a,2)&&touchCross(car,r,p,src.pos,a))for(float v:a)energyBound &= v>=0 && v<=1.000001f;
+                }
+            }
+            for(int b=0;b<NB;++b){double d=10*log10(std::max(1e-30,total[b]));if(k)worst=std::max(worst,std::abs(d-prev[b]));prev[b]=d;}
+        }
+        std::printf("  rear arc z=%.1f max %.6f dB/control period\n",z,worst);
+        check(worst<=1.,z>.9?"rear upper arc <=1 dB/band/control period":"rear lower arc <=1 dB/band/control period");
+    }
+    check(energyBound,"complete reflected path never exceeds unobstructed amplitude");
+}
+
+static Scene makeE8Corridor(Vec3 srcPos = {2.7, 12.5, 1.5}, Vec3 lstPos = {0.05, 12.5, 1.5}, double lstYaw = 0.0,
+                            Layout lay = Layout::StereoORTF, MicPattern mp = MicPattern::LayoutDefault) {
+    Scene s;
+    s.sr = 48000.0;
+    s.length = 2.0;
+    s.height = 2.7;
+    s.order = 2;
+    s.diffraction = true;
+    s.mats = surfacePresets();
+    s.floorMat = presetIndex("Ceramic_tiles");
+    s.ceilMat = presetIndex("Plaster");
+    const int mw = presetIndex("Plaster");
+    const double w = 3.7, l = 14.0, stub = 0.85;
+    s.walls = {{0, 0, stub, 0, mw}, {w - stub, 0, w, 0, mw}, {w, 0, w, l, mw}, {w, l, 0, l, mw}, {0, l, 0, 0, mw}};
+    Transducer src;
+    src.name = "Source";
+    src.pos = srcPos;
+    src.azimuthDeg = std::atan2(lstPos.y - srcPos.y, lstPos.x - srcPos.x) * 180.0 / kPi;
+    src.pattern = 0.0;
+    s.sources.push_back(src);
+    s.receivers = makeReceiverArray(lay, lstPos, 0.1, 2);
+    applyMicPattern(s.receivers, mp, mp == MicPattern::HumanEars ? 0.0875 : 0.1);
+    s.hasListener = true;
+    s.listenerPos = lstPos;
+    s.listenerYaw = lstYaw;
+    return s;
+}
+
+static void testE8Jump() {
+    std::printf("Test 41 (E8 Step 1): jump reset, click-free transition, immediate worker rebuild, handover abort\n");
+    const Vec3 S0{2.7, 12.5, 1.5}, L0{0.05, 12.5, 1.5};
+    const Vec3 S1{1.35, -0.5, 1.5}, L1{2.35, -0.5, 1.5};
+    const double yaw0 = std::atan2(S0.y - L0.y, S0.x - L0.x) * 180.0 / kPi;
+    const double yaw1 = std::atan2(S1.y - L1.y, S1.x - L1.x) * 180.0 / kPi;
+
+    // Periodic broadband noise (8192 samples) so steady-state energy fluctuates minimally between windows.
+    std::vector<cd> bins(8192);
+    std::mt19937 rng(8801);
+    std::uniform_real_distribution<double> phDist(0.0, 2.0 * kPi);
+    for (int k = 1; k < 4096; ++k) {
+        const double f = k * 48000.0 / 8192.0;
+        if (f >= 88.0 && f <= 11314.0) { bins[(size_t)k] = std::polar(1.0, phDist(rng)); bins[(size_t)(8192 - k)] = std::conj(bins[(size_t)k]); }
+    }
+    verb::fft(bins, true);
+    double ss = 0.0;
+    for (const auto& v : bins) ss += v.real() * v.real();
+    const double scale = 0.02 / std::sqrt(ss / 8192.0);
+    std::vector<float> signal(8192);
+    for (int j = 0; j < 8192; ++j) signal[(size_t)j] = (float)(bins[(size_t)j].real() * scale);
+
+    Scene scBase = makeE8Corridor(S0, L0, yaw0);
+    {
+        EngineConfig lc = e4aConfig(false); lc.tailRays = 16000;
+        Engine ea(scBase, lc);
+        scBase.length = ea.tailSeconds();
+    }
+
+    auto levelDb = [](const std::vector<std::vector<float>>& b, size_t i0, size_t i1) {
+        double e = 0.0;
+        for (const auto& ch : b) for (size_t i = i0; i < i1; ++i) e += (double)ch[i] * ch[i];
+        return 10.0 * std::log10(e / (double)(std::max<size_t>(1, i1 - i0) * b.size()) + 1e-30);
+    };
+
+    // 1. 5-repetition Corridor loop (shared = false & shared = true, manualWorker = true)
+    // Test both Early (solo=2) and Tail (solo=4) recovery + no-burst check.
+    for (bool shared : {false, true}) {
+        for (int mask : {2, 4}) {
+            EngineConfig cfg = e4aConfig(shared);
+            cfg.tailRays = 16000;
+            cfg.tailThread = false;
+            cfg.manualWorker = true;
+            Engine eng(scBase, cfg), ref(scBase, cfg);
+            eng.setSoloMask(mask);
+            ref.setSoloMask(mask);
+            const int R = eng.numReceivers(), seg = 128;
+            std::vector<std::vector<float>> out(R), refOut(R);
+            std::vector<float> in(seg), oa(seg), ob(seg), ra(seg), rb(seg);
+            const float* ip[1] = {in.data()};
+            float* op[2] = {oa.data(), ob.data()};
+            float* rp[2] = {ra.data(), rb.data()};
+            uint64_t fidx = 0;
+            auto stepBlock = [&](int blocks) {
+                for (int b = 0; b < blocks; ++b) {
+                    for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[(fidx + (uint64_t)j) % 8192];
+                    eng.process(ip, op, seg);
+                    ref.process(ip, rp, seg);
+                    for (int j = 0; j < seg; ++j) {
+                        out[0].push_back(op[0][j]); out[1].push_back(op[1][j]);
+                        refOut[0].push_back(rp[0][j]); refOut[1].push_back(rp[1][j]);
+                    }
+                    fidx += seg;
+                }
+            };
+            // Warm up steady state at S0/L0
+            stepBlock(750);  // 2.0 s
+            double worstBurstDb = -1e9, maxEarlyErr = 0.0, maxTailErr = 0.0;
+            int maxWorkerSteps = 0;
+            for (int rep = 0; rep < 5; ++rep) {
+                // Smooth walk out of corridor to outside in 0.8 s (~16 m/s)
+                const int moveBlocks = 300;
+                for (int b = 0; b < moveBlocks; ++b) {
+                    const double u = (double)(b + 1) / moveBlocks;
+                    const Vec3 lp = L0 + (L1 - L0) * u;
+                    const Vec3 sp = S0 + (S1 - S0) * u;
+                    const double y = yaw0 + std::remainder(yaw1 - yaw0, 360.0) * u;
+                    eng.setSourcePosition(0, sp.x, sp.y, sp.z);
+                    eng.setListener(lp.x, lp.y, lp.z, y);
+                    stepBlock(1);
+                    if ((b + 1) % 8 == 0) eng.runWorkerStep();
+                }
+                // Hold outside for at least 0.65 s and (for tail) until the outside rebuild finishes
+                // (for !shared after an interrupted handover, the previous FDL handover drains in ~2.5 s).
+                const int beforeOutRef = eng.tailRefreshCount();
+                const int maxOutHold = (mask == 4 && !shared) ? 1100 : 260;
+                for (int b = 0; b < maxOutHold; ++b) {
+                    stepBlock(1);
+                    if ((b + 1) % 8 == 0) eng.runWorkerStep();
+                    if (b >= 244 && (mask != 4 || eng.tailRefreshCount() != beforeOutRef)) break;
+                }
+                if (mask == 4) {
+                    // Drain longFade briefly outside so pre-jump tail clearly reflects outside pose
+                    for (int b = 0; b < 30; ++b) stepBlock(1);
+                }
+                // Jump back to S0/L0
+                const int refCountBefore = eng.tailRefreshCount();
+                const size_t jumpSample = out[0].size();
+                const double preJumpLvl = levelDb(out, jumpSample - 4800, jumpSample);
+                eng.setSourcePosition(0, S0.x, S0.y, S0.z);
+                eng.setSourceAzimuth(0, scBase.sources[0].azimuthDeg);
+                eng.setListener(L0.x, L0.y, L0.z, yaw0);
+                eng.notifyJump();
+                // Process 1.0 s while pumping worker; measure immediate jump rebuild & steady convergence
+                int stepsNeeded = 0;
+                for (int b = 0; b < 375; ++b) {
+                    stepBlock(1);
+                    if (b == 0 || ((b % 10) == 0 && eng.tailRefreshCount() == refCountBefore)) {
+                        eng.runWorkerStep();
+                        ++stepsNeeded;
+                    }
+                    if (b < 20 && (b % 10) == 9 && eng.tailRefreshCount() == refCountBefore) eng.runWorkerStep();
+                }
+                if (stepsNeeded > 1) {
+                    std::printf("    [diag stepsNeeded=%d rep=%d mask=%d shared=%d before=%d after=%d]\n",
+                        stepsNeeded, rep, mask, (int)shared, refCountBefore, eng.tailRefreshCount());
+                }
+                maxWorkerSteps = std::max(maxWorkerSteps, stepsNeeded);
+                // Check 20 ms bursts right after jump (0..200 ms) against the louder of pre-jump & inside reference (+ 1 dB)
+                const double refLvl = levelDb(refOut, jumpSample + 4800, jumpSample + 19200);
+                const double burstCeiling = std::max(preJumpLvl, refLvl);
+                for (size_t w0 = jumpSample; w0 + 960 <= jumpSample + 9600; w0 += 480) {
+                    const double lvl = levelDb(out, w0, w0 + 960);
+                    const double refW = levelDb(refOut, w0, w0 + 960);
+                    const double over = lvl - std::max(preJumpLvl, refW);
+                    if (over > 1.0) {
+                        std::printf("    [diag rep=%d mask=%d shared=%d w0=%zu] out=%.2f pre=%.2f refWin=%.2f refAvg=%.2f\n",
+                            rep, mask, (int)shared, w0 - jumpSample, lvl, preJumpLvl, refW, refLvl);
+                    }
+                    worstBurstDb = std::max(worstBurstDb, over);
+                }
+                if (mask == 2) {
+                    // Early must recover within <= 1.0 dB by 50 ms after jump
+                    const double eAfter = levelDb(out, jumpSample + 2400, jumpSample + 12000);
+                    const double eRef = levelDb(refOut, jumpSample + 2400, jumpSample + 12000);
+                    maxEarlyErr = std::max(maxEarlyErr, std::fabs(eAfter - eRef));
+                } else {
+                    // For tail, verify converged level and exact late gain match
+                    const double tAfter = levelDb(out, jumpSample + 24000, jumpSample + 43200);
+                    const double tRef = levelDb(refOut, jumpSample + 24000, jumpSample + 43200);
+                    maxTailErr = std::max(maxTailErr, std::fabs(tAfter - tRef));
+                    if (shared) {
+                        const auto eEng = eng.lateAppliedEnergy(), eRefVec = ref.lateAppliedEnergy();
+                        double sumE = 0.0, sumR = 0.0;
+                        for (size_t k = 0; k < eEng.size() && k < eRefVec.size(); ++k) { sumE += eEng[k]; sumR += eRefVec[k]; }
+                        const double gErr = std::fabs(10.0 * std::log10((sumE + 1e-30) / (sumR + 1e-30)));
+                        maxTailErr = std::max(maxTailErr, gErr);
+                    }
+                }
+            }
+            if (mask == 2) {
+                std::printf("  %s early (5 reps): worst burst %+.2f dB vs max(pre,ref), post-jump err %.3f dB\n",
+                    shared ? "shared" : "per-source", worstBurstDb, maxEarlyErr);
+                check(worstBurstDb <= 1.0 && maxEarlyErr <= 1.0, "early 5-rep corridor loop: no burst > +1 dB and <= 1 dB recovery in 50 ms");
+            } else {
+                std::printf("  %s tail (5 reps): worst burst %+.2f dB vs max(pre,ref), post-jump err %.3f dB, worker steps %d\n",
+                    shared ? "shared" : "per-source", worstBurstDb, maxTailErr, maxWorkerSteps);
+                check(worstBurstDb <= 1.0 && maxTailErr <= 1.0 && maxWorkerSteps <= 1, "tail 5-rep corridor loop: no burst > +1 dB, rebuilt in 1 worker step, <= 1 dB error");
+            }
+        }
+    }
+
+    // 2. Live worker thread (tailThread = true) jump recovery timing measurement
+    for (bool shared : {false, true}) {
+        EngineConfig cfg = e4aConfig(shared);
+        cfg.tailRays = 12000;
+        cfg.tailThread = true;
+        cfg.manualWorker = false;
+        Engine eng(scBase, cfg), ref(scBase, cfg);
+        eng.setSoloMask(4);
+        ref.setSoloMask(4);
+        const int seg = 512;
+        std::vector<float> in(seg), oa(seg), ob(seg), ra(seg), rb(seg);
+        const float* ip[1] = {in.data()};
+        float* op[2] = {oa.data(), ob.data()};
+        float* rp[2] = {ra.data(), rb.data()};
+        uint64_t fidx = 0;
+        auto pump = [&](double sec, int sleepMs = 5) {
+            const int blocks = std::max(1, (int)std::lround(sec * 48000.0 / seg));
+            double sumE = 0.0, sumR = 0.0;
+            for (int b = 0; b < blocks; ++b) {
+                for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[(fidx + (uint64_t)j) % 8192];
+                eng.process(ip, op, seg);
+                ref.process(ip, rp, seg);
+                for (int j = 0; j < seg; ++j) {
+                    sumE += (double)op[0][j] * op[0][j] + (double)op[1][j] * op[1][j];
+                    sumR += (double)rp[0][j] * rp[0][j] + (double)rp[1][j] * rp[1][j];
+                }
+                fidx += seg;
+                if (sleepMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+            }
+            return 10.0 * std::log10((sumE + 1e-30) / (sumR + 1e-30));
+        };
+        // Move outside and wait for settle rebuild + crossfade
+        eng.setSourcePosition(0, S1.x, S1.y, S1.z);
+        eng.setListener(L1.x, L1.y, L1.z, yaw1);
+        const int beforeOut = eng.tailRefreshCount();
+        for (int i = 0; i < 300 && eng.tailRefreshCount() == beforeOut; ++i) { pump(0.011, 5); }
+        pump(shared ? 0.9 : 2.6, 0);
+        const double outDiff = pump(0.2, 0);
+        // Jump back inside
+        const int beforeIn = eng.tailRefreshCount();
+        const auto tJump = std::chrono::steady_clock::now();
+        eng.setSourcePosition(0, S0.x, S0.y, S0.z);
+        eng.setListener(L0.x, L0.y, L0.z, yaw0);
+        eng.notifyJump();
+        while (eng.tailRefreshCount() == beforeIn && std::chrono::duration<double>(std::chrono::steady_clock::now() - tJump).count() < 3.0) {
+            pump(0.011, 5);
+        }
+        const double rebuildMs = 1000.0 * std::chrono::duration<double>(std::chrono::steady_clock::now() - tJump).count();
+        const int rebuildDelta = eng.tailRefreshCount() - beforeIn;
+        pump(0.30, 1);
+        const double recoveredDiff = pump(0.20, 1);
+        const auto ms = eng.motionStats();
+        std::printf("  live worker (%s): outside diff %.1f dB -> jump rebuild in %.1f ms (delta=%d, beforeOut=%d beforeIn=%d retraceCancelled=%llu ts=%d) -> recovered diff %+.2f dB\n",
+            shared ? "shared" : "per-source", outDiff, rebuildMs, rebuildDelta, beforeOut, beforeIn, ms.retraceCancelled, ms.transState, recoveredDiff);
+        check(outDiff < -6.0 && rebuildDelta == 1 && rebuildMs < 1500.0 && std::fabs(recoveredDiff) <= 1.0,
+            "live worker thread rebuilds in 1 pass immediately after jump and recovers <= 1 dB");
+    }
+
+    // 3. Jump arriving in the middle of an active E7 handover (transState == 2 / 3)
+    for (int targetTs : {2, 3}) {
+        EngineConfig cfg = e4aConfig(true);
+        cfg.tailRays = 12000;
+        cfg.tailThread = false;
+        cfg.manualWorker = true;
+        Engine eng(scBase, cfg), ref(scBase, cfg);
+        eng.setSoloMask(4); ref.setSoloMask(4);
+        const int seg = 128;
+        std::vector<float> in(seg), oa(seg), ob(seg), ra(seg), rb(seg);
+        const float* ip[1] = {in.data()};
+        float* op[2] = {oa.data(), ob.data()};
+        float* rp[2] = {ra.data(), rb.data()};
+        uint64_t fidx = 0;
+        auto tick = [&](bool runW) {
+            for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[(fidx + (uint64_t)j) % 8192];
+            eng.process(ip, op, seg);
+            ref.process(ip, rp, seg);
+            fidx += seg;
+            if (runW) eng.runWorkerStep();
+        };
+        // Smooth move inside corridor to trigger E7 handover at midPos
+        const Vec3 midL{1.85, 6.0, 1.5}, midS{2.0, 6.0, 1.5};
+        for (int b = 0; b < 60; ++b) {
+            const double u = (double)(b + 1) / 60.0;
+            const Vec3 lp = L0 + (midL - L0) * u;
+            const Vec3 sp = S0 + (midS - S0) * u;
+            eng.setSourcePosition(0, sp.x, sp.y, sp.z);
+            eng.setListener(lp.x, lp.y, lp.z, yaw0);
+            tick((b % 8) == 7);
+        }
+        for (int b = 0; b < 500 && eng.motionStats().transState != targetTs; ++b) tick((b % 8) == 7);
+        check(eng.motionStats().transState == targetTs, "reached active E7 handover before jump interruption");
+        // Now interrupt with a jump back to start pose!
+        eng.setSourcePosition(0, S0.x, S0.y, S0.z);
+        eng.setListener(L0.x, L0.y, L0.z, yaw0);
+        eng.notifyJump();
+        tick(true);
+        for (int b = 0; b < 400; ++b) tick((b % 8) == 7);
+        // Drain FDL + handover completely so hash and impulse compare against cold ref
+        const int drainBlocks = (int)std::ceil((eng.tailSeconds() + 0.5) * 48000.0 / seg);
+        for (int b = 0; b < drainBlocks; ++b) tick(false);
+        const bool sameHash = eng.lateStateHash() == ref.lateStateHash();
+        bool audioSame = true;
+        for (int b = 0; b < 100; ++b) {
+            tick(false);
+            audioSame &= std::memcmp(oa.data(), ra.data(), seg * sizeof(float)) == 0
+                      && std::memcmp(ob.data(), rb.data(), seg * sizeof(float)) == 0;
+        }
+        std::printf("  jump interrupting E7 transState=%d: final transState=%d, hash=%s, audio=%s\n",
+            targetTs, eng.motionStats().transState, sameHash ? "same" : "DIFF", audioSame ? "bit-identical" : "DIFF");
+        check(eng.motionStats().transState == 0 && sameHash && audioSame,
+            "jump during active E7 handover cleans up transState=0 and converges bit-identically to static ref");
+    }
+
+    // 4. Smooth 20 m/s move must NOT trigger jump reset
+    {
+        EngineConfig cfg = e4aConfig(true);
+        cfg.tailRays = 12000;
+        cfg.tailThread = false;
+        cfg.manualWorker = true;
+        Engine eng(scBase, cfg);
+        const int seg = 128;
+        std::vector<float> in(seg, 0.f), oa(seg), ob(seg);
+        const float* ip[1] = {in.data()};
+        float* op[2] = {oa.data(), ob.data()};
+        for (int b = 0; b < 30; ++b) eng.process(ip, op, seg);
+        // Move along +y at 20 m/s: step = 20 * 128 / 48000 = 0.0533 m/period
+        for (int b = 0; b < 90; ++b) {
+            eng.setListener(1.85, 2.0 + (b + 1) * (20.0 * seg / 48000.0), 1.5, 0.0);
+            eng.process(ip, op, seg);
+            if ((b % 8) == 7) eng.runWorkerStep();
+        }
+        const auto st = eng.motionStats();
+        std::printf("  20 m/s smooth move: transitionsStarted=%llu (expect 0)\n", st.transitionsStarted);
+        check(st.transitionsStarted == 0, "20 m/s smooth movement does not trigger jump rebuild");
+    }
+}
+
+static void testE8WallAndCapsules() {
+    std::printf("Test 42 (E8 Step 2): Rule C capsule containment, Rule D wall-line tolerance, static bit-identity\n");
+    const Vec3 S0{2.7, 12.5, 1.5}, L_out{2.35, -0.5, 1.5}, S_out{1.35, -0.5, 1.5};
+
+    // Periodic broadband noise (8192 samples)
+    std::vector<cd> bins(8192);
+    std::mt19937 rng(8803);
+    std::uniform_real_distribution<double> phDist(0.0, 2.0 * kPi);
+    for (int k = 1; k < 4096; ++k) {
+        const double f = k * 48000.0 / 8192.0;
+        if (f >= 88.0 && f <= 11314.0) { bins[(size_t)k] = std::polar(1.0, phDist(rng)); bins[(size_t)(8192 - k)] = std::conj(bins[(size_t)k]); }
+    }
+    verb::fft(bins, true);
+    double ss = 0.0;
+    for (const auto& v : bins) ss += v.real() * v.real();
+    const double scale = 0.02 / std::sqrt(ss / 8192.0);
+    std::vector<float> signal(8192);
+    for (int j = 0; j < 8192; ++j) signal[(size_t)j] = (float)(bins[(size_t)j].real() * scale);
+
+    auto measureChannels = [&](const Scene& sc, int mask, double sec = 0.25) {
+        EngineConfig cfg = e4aConfig(false);
+        cfg.tailRays = 4000;
+        cfg.tailThread = false;
+        cfg.manualWorker = false;
+        Engine eng(sc, cfg);
+        eng.setSoloMask(mask);
+        const int seg = 128;
+        const int blocks = std::max(1, (int)std::lround(sec * 48000.0 / seg));
+        std::vector<float> in(seg), oa(seg), ob(seg);
+        const float* ip[1] = {in.data()};
+        float* op[2] = {oa.data(), ob.data()};
+        double eL = 0.0, eR = 0.0;
+        int cnt = 0;
+        const int warm = blocks / 3;
+        for (int b = 0; b < blocks; ++b) {
+            for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[((size_t)b * seg + (size_t)j) % 8192];
+            eng.process(ip, op, seg);
+            if (b >= warm) {
+                for (int j = 0; j < seg; ++j) { eL += (double)oa[j] * oa[j]; eR += (double)ob[j] * ob[j]; }
+                cnt += seg;
+            }
+        }
+        return std::pair<double, double>{10.0 * std::log10(eL / std::max(1, cnt) + 1e-30),
+                                         10.0 * std::log10(eR / std::max(1, cnt) + 1e-30)};
+    };
+
+    // 1. Yaw sweeps at x = +5 cm, +2 cm, 0, -5 mm for ORTF and HumanEars (Early solo=2 & Tail solo=4)
+    for (int patIdx = 0; patIdx < 2; ++patIdx) {
+        const Layout lay = Layout::StereoORTF;
+        const MicPattern mp = patIdx == 0 ? MicPattern::LayoutDefault : MicPattern::HumanEars;
+        const char* patName = patIdx == 0 ? "StereoORTF" : "HumanEars";
+        EngineConfig cfg = e4aConfig(false);
+        cfg.tailRays = 4000;
+        cfg.tailThread = false;
+        cfg.manualWorker = true;
+        Engine eng(makeE8Corridor(S0, {0.50, 12.5, 1.5}, -180.0, lay, mp), cfg);
+        const int seg = 128;
+        std::vector<float> in(seg), oa(seg), ob(seg);
+        const float* ip[1] = {in.data()};
+        float* op[2] = {oa.data(), ob.data()};
+        uint64_t fidx = 0;
+        auto pumpSeg = [&](int blocks, double* outL, double* outR, int warmBlocks) {
+            double eL = 0.0, eR = 0.0;
+            int cnt = 0;
+            for (int b = 0; b < blocks; ++b) {
+                for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[(fidx + (uint64_t)j) % 8192];
+                eng.process(ip, op, seg);
+                fidx += seg;
+                if (b >= warmBlocks && outL && outR) {
+                    for (int j = 0; j < seg; ++j) { eL += (double)oa[j] * oa[j]; eR += (double)ob[j] * ob[j]; }
+                    cnt += seg;
+                }
+            }
+            if (outL && outR) {
+                *outL = 10.0 * std::log10(eL / std::max(1, cnt) + 1e-30);
+                *outR = 10.0 * std::log10(eR / std::max(1, cnt) + 1e-30);
+            }
+        };
+        eng.setSoloMask(2);
+        pumpSeg(225, nullptr, nullptr, 225);  // 0.6 s pre-warm
+        auto measureAt = [&](double x, double yaw) {
+            eng.setListener(x, 12.5, 1.5, yaw);
+            eng.notifyJump();
+            eng.runWorkerStep();
+            eng.setSoloMask(2);
+            double eL = 0.0, eR = 0.0, tL = 0.0, tR = 0.0;
+            pumpSeg(75, &eL, &eR, 38);   // 0.20 s early (measure last 0.10 s, after 30 ms fade)
+            eng.setSoloMask(4);
+            pumpSeg(130, &tL, &tR, 65);  // 0.35 s tail (measure after 0.20 + 0.17 = 0.37 s)
+            return std::pair<std::pair<double, double>, std::pair<double, double>>{{eL, eR}, {tL, tR}};
+        };
+        double worstEarlyDrop = 0.0, worstTailDrop = 0.0;
+        for (int yi = 0; yi < 12; ++yi) {
+            const double yaw = -180.0 + 30.0 * yi;
+            const auto ref = measureAt(0.50, yaw);
+            for (double x : {0.05, 0.02, 0.0, -0.005}) {
+                const auto cur = measureAt(x, yaw);
+                worstEarlyDrop = std::max(worstEarlyDrop, std::max(ref.first.first - cur.first.first, ref.first.second - cur.first.second));
+                worstTailDrop = std::max(worstTailDrop, std::max(ref.second.first - cur.second.first, ref.second.second - cur.second.second));
+            }
+        }
+        // Check C0 geometric capsule continuity during 1-deg yaw sweep at x = 0.0
+        Scene scYaw = makeE8Corridor(S0, {0.0, 12.5, 1.5}, 0.0, lay, mp);
+        Geo gYaw(scYaw);
+        double maxStep = 0.0;
+        std::vector<Transducer> prevCaps;
+        for (int deg = -180; deg <= 180; ++deg) {
+            SurfaceSideHist h;
+            Vec3 c = resolveWallLinePose(gYaw, {0.0, 12.5, 1.5}, h, 1);
+            std::vector<Transducer> caps = makeReceiverArray(lay, c, 0.1, 2);
+            applyMicPattern(caps, mp, mp == MicPattern::HumanEars ? 0.0875 : 0.1);
+            // rotate about c manually as listenerReceivers does
+            const double rad = deg * kPi / 180.0, cy = std::cos(rad), sy = std::sin(rad);
+            for (auto& cp : caps) {
+                Vec3 d = cp.pos - c;
+                cp.pos = {c.x + d.x * cy - d.y * sy, c.y + d.x * sy + d.y * cy, c.z + d.z};
+            }
+            containCapsulesInRoom(gYaw, c, caps.data(), (int)caps.size());
+            if (!prevCaps.empty()) {
+                for (size_t r = 0; r < caps.size(); ++r)
+                    maxStep = std::max(maxStep, norm(caps[r].pos - prevCaps[r].pos));
+            }
+            prevCaps = caps;
+        }
+        std::printf("  %s yaw sweep (x=+5cm..+2cm..0..-5mm): worst early drop %.2f dB, worst tail drop %.2f dB, max cap step %.3f mm/deg\n",
+            patName, worstEarlyDrop, worstTailDrop, maxStep * 1000.0);
+        check(worstEarlyDrop < 4.0 && worstTailDrop < 3.0 && maxStep < 0.004,
+            "neither L nor R loses reflections or tail across yaw sweep at x=+5cm..-5mm and capsule path is C0 continuous");
+    }
+
+    // 2. Wall-hugging walk: x = +5 mm -> 0 -> -5 mm -> 0 -> +5 mm along left wall y = 12.5 -> 8.0
+    {
+        Scene sc = makeE8Corridor(S0, {0.05, 12.5, 1.5}, 0.0);
+        EngineConfig cfg = e4aConfig(true);
+        cfg.tailRays = 12000;
+        cfg.tailThread = false;
+        cfg.manualWorker = true;
+        Engine eng(sc, cfg);
+        eng.setSoloMask(2);
+        const int seg = 128;
+        std::vector<float> in(seg), oa(seg), ob(seg);
+        const float* ip[1] = {in.data()};
+        float* op[2] = {oa.data(), ob.data()};
+        for (int b = 0; b < 40; ++b) {
+            for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[((size_t)b * seg + (size_t)j) % 8192];
+            eng.process(ip, op, seg);
+        }
+        auto refCh = measureChannels(makeE8Corridor(S0, {0.50, 10.0, 1.5}, 0.0), 2, 0.25);
+        double minEarlyDb = 1e9, maxEarlyDb = -1e9;
+        const int walkBlocks = 450;  // 1.2 s
+        for (int b = 0; b < walkBlocks; ++b) {
+            const double u = (double)b / (walkBlocks - 1);
+            // Smooth excursion: +0.02 -> +0.005 -> -0.005 -> +0.005 -> +0.02 while y walks 12.5 -> 8.0
+            const double x = 0.0075 + 0.0125 * std::cos(2.0 * kPi * u);
+            const double y = 12.5 - 4.5 * u;
+            eng.setListener(x, y, 1.5, 0.0);
+            for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[((size_t)(b + 40) * seg + (size_t)j) % 8192];
+            eng.process(ip, op, seg);
+            if ((b % 8) == 7) eng.runWorkerStep();
+            if (b >= 30 && (b % 15) == 0) {
+                double eL = 0.0, eR = 0.0;
+                for (int j = 0; j < seg; ++j) { eL += (double)oa[j] * oa[j]; eR += (double)ob[j] * ob[j]; }
+                const double lL = 10.0 * std::log10(eL / seg + 1e-30);
+                const double lR = 10.0 * std::log10(eR / seg + 1e-30);
+                minEarlyDb = std::min(minEarlyDb, std::min(lL, lR));
+                maxEarlyDb = std::max(maxEarlyDb, std::max(lL, lR));
+            }
+        }
+        const double worstDrop = std::min(refCh.first, refCh.second) - minEarlyDb;
+        const double burstAbove = maxEarlyDb - std::max(refCh.first, refCh.second);
+        std::printf("  wall-hugging walk (+5mm->0->-5mm->0->+5mm): worst L/R early drop %.2f dB, peak over interior %+.2f dB\n",
+            worstDrop, burstAbove);
+        check(worstDrop < 5.0 && burstAbove < 4.0, "wall-hugging walk along Corridor left wall stays continuous without drops or bursts");
+    }
+
+    // 3. Walking out through the 2 m opening still fades cleanly to the outside level
+    {
+        Scene sc = makeE8Corridor(S0, {1.85, 6.0, 1.5}, -90.0);
+        EngineConfig cfg = e4aConfig(true);
+        cfg.tailRays = 12000;
+        cfg.tailThread = false;
+        cfg.manualWorker = true;
+        Engine eng(sc, cfg);
+        Engine refOut(makeE8Corridor(S0, {1.85, -0.5, 1.5}, -90.0), cfg);
+        eng.setSoloMask(4);
+        refOut.setSoloMask(4);
+        const int seg = 128;
+        std::vector<float> in(seg), oa(seg), ob(seg), ra(seg), rb(seg);
+        const float* ip[1] = {in.data()};
+        float* op[2] = {oa.data(), ob.data()};
+        float* rp[2] = {ra.data(), rb.data()};
+        uint64_t fidx = 0;
+        auto stepBoth = [&](int blocks, bool runW, double* eOutDb = nullptr, double* rOutDb = nullptr, int warm = 0) {
+            double e = 0.0, r = 0.0;
+            int cnt = 0;
+            for (int b = 0; b < blocks; ++b) {
+                for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[(fidx + (uint64_t)j) % 8192];
+                eng.process(ip, op, seg);
+                refOut.process(ip, rp, seg);
+                fidx += seg;
+                if (runW && (b % 8) == 7) eng.runWorkerStep();
+                if (b >= warm && (eOutDb || rOutDb)) {
+                    for (int j = 0; j < seg; ++j) {
+                        e += (double)oa[j] * oa[j] + (double)ob[j] * ob[j];
+                        r += (double)ra[j] * ra[j] + (double)rb[j] * rb[j];
+                    }
+                    cnt += seg;
+                }
+            }
+            if (eOutDb) *eOutDb = 10.0 * std::log10(e / std::max(1, cnt * 2) + 1e-30);
+            if (rOutDb) *rOutDb = 10.0 * std::log10(r / std::max(1, cnt * 2) + 1e-30);
+        };
+        double inDb = 0.0;
+        stepBoth(450, false, &inDb, nullptr, 300);  // 1.2 s inside warmup, measure last 0.4 s
+        for (int b = 0; b < 300; ++b) {
+            const double y = 6.0 - 6.5 * (double)(b + 1) / 300.0;  // walks (1.85, +6.0) -> (1.85, 0) -> (1.85, -0.5)
+            eng.setListener(1.85, y, 1.5, -90.0);
+            stepBoth(1, (b % 8) == 7);
+        }
+        // Wait for settle (0.4 s) + crossfade (0.7 s) + inside FDL drain
+        for (int b = 0; b < 1000 && (eng.motionStats().transitionsDone == 0 || eng.motionStats().transState != 0); ++b)
+            stepBoth(1, (b % 8) == 7);
+        stepBoth(550, true);  // drain residual inside FDL (~1.47 s)
+        double outDb = 0.0, staticOutDb = 0.0;
+        stepBoth(150, true, &outDb, &staticOutDb, 0);
+        const double dropDb = outDb - inDb;
+        const double errStatic = std::fabs(outDb - staticOutDb);
+        std::printf("  opening walkout (1.85,+6.0 -> 0 -> -0.5): tail diff outside vs inside %.2f dB, vs static outside %.3f dB\n",
+            dropDb, errStatic);
+        check(dropDb < -3.5 && errStatic <= 0.5, "walking out through doorway converges to quiet outside tail");
+    }
+
+    // 4. Source within 2 cm / behind wall line (-5 mm) after jump resolves inside
+    {
+        Scene sc = makeE8Corridor(S0, {1.85, 12.5, 1.5}, 0.0);
+        EngineConfig cfg = e4aConfig(false);
+        cfg.tailRays = 12000;
+        cfg.tailThread = false;
+        cfg.manualWorker = true;
+        Engine eng(sc, cfg), ref(makeE8Corridor({0.002, 12.5, 1.5}, {1.85, 12.5, 1.5}, 0.0), cfg);
+        eng.setSoloMask(2); ref.setSoloMask(2);
+        const int seg = 128;
+        std::vector<float> in(seg), oa(seg), ob(seg), ra(seg), rb(seg);
+        const float* ip[1] = {in.data()};
+        float* op[2] = {oa.data(), ob.data()};
+        float* rp[2] = {ra.data(), rb.data()};
+        for (int b = 0; b < 40; ++b) {
+            for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[((size_t)b * seg + (size_t)j) % 8192];
+            eng.process(ip, op, seg); ref.process(ip, rp, seg);
+        }
+        eng.setSourcePosition(0, -0.005, 12.5, 1.5);
+        eng.notifyJump();
+        double eEng = 0.0, eRef = 0.0;
+        for (int b = 0; b < 80; ++b) {
+            for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[((size_t)(b + 40) * seg + (size_t)j) % 8192];
+            eng.process(ip, op, seg); ref.process(ip, rp, seg);
+            if ((b % 8) == 7) eng.runWorkerStep();
+            if (b >= 40) {
+                for (int j = 0; j < seg; ++j) {
+                    eEng += (double)oa[j] * oa[j] + (double)ob[j] * ob[j];
+                    eRef += (double)ra[j] * ra[j] + (double)rb[j] * rb[j];
+                }
+            }
+        }
+        const double errDb = std::fabs(10.0 * std::log10((eEng + 1e-30) / (eRef + 1e-30)));
+        std::printf("  source jump onto x=-5mm: early level err vs x=+2mm ref = %.3f dB\n", errDb);
+        check(errDb <= 0.5, "source jump onto wall line (-5mm) resolves inside identically to +2mm ref");
+    }
+
+    // 5. 5-repetition tester Corridor loop starting RIGHT ON/OUTSIDE wall line L0 = (-0.005, 12.5)
+    {
+        const Vec3 L_wall{-0.005, 12.5, 1.5};
+        const double yaw0w = std::atan2(S0.y - L_wall.y, S0.x - L_wall.x) * 180.0 / kPi;
+        const double yaw1w = std::atan2(S_out.y - L_out.y, S_out.x - L_out.x) * 180.0 / kPi;
+        Scene scW = makeE8Corridor(S0, L_wall, yaw0w);
+        for (int mask : {2, 4}) {
+            EngineConfig cfg = e4aConfig(true);
+            cfg.tailRays = 12000;
+            cfg.tailThread = false;
+            cfg.manualWorker = true;
+            Engine eng(scW, cfg), ref(scW, cfg);
+            eng.setSoloMask(mask); ref.setSoloMask(mask);
+            const int seg = 128;
+            std::vector<float> in(seg), oa(seg), ob(seg), ra(seg), rb(seg);
+            const float* ip[1] = {in.data()};
+            float* op[2] = {oa.data(), ob.data()};
+            float* rp[2] = {ra.data(), rb.data()};
+            std::vector<std::vector<float>> out(2), refOut(2);
+            uint64_t fidx = 0;
+            auto step = [&](int blocks) {
+                for (int b = 0; b < blocks; ++b) {
+                    for (int j = 0; j < seg; ++j) in[(size_t)j] = signal[(fidx + (uint64_t)j) % 8192];
+                    eng.process(ip, op, seg); ref.process(ip, rp, seg);
+                    for (int j = 0; j < seg; ++j) {
+                        out[0].push_back(oa[j]); out[1].push_back(ob[j]);
+                        refOut[0].push_back(ra[j]); refOut[1].push_back(rb[j]);
+                    }
+                    fidx += seg;
+                }
+            };
+            auto lvlDb = [](const std::vector<std::vector<float>>& b, size_t i0, size_t i1) {
+                double e = 0.0;
+                for (const auto& ch : b) for (size_t i = i0; i < i1; ++i) e += (double)ch[i] * ch[i];
+                return 10.0 * std::log10(e / (double)(std::max<size_t>(1, i1 - i0) * b.size()) + 1e-30);
+            };
+            step(375);
+            double maxErr = 0.0, worstBurst = -1e9;
+            for (int rep = 0; rep < 5; ++rep) {
+                for (int b = 0; b < 300; ++b) {
+                    const double u = (double)(b + 1) / 300.0;
+                    const Vec3 lp = L_wall + (L_out - L_wall) * u;
+                    const Vec3 sp = S0 + (S_out - S0) * u;
+                    eng.setSourcePosition(0, sp.x, sp.y, sp.z);
+                    eng.setListener(lp.x, lp.y, lp.z, yaw0w + std::remainder(yaw1w - yaw0w, 360.0) * u);
+                    step(1);
+                    if ((b % 8) == 7) eng.runWorkerStep();
+                }
+                for (int b = 0; b < 260; ++b) { step(1); if ((b % 8) == 7) eng.runWorkerStep(); }
+                const size_t js = out[0].size();
+                const double preLvl = lvlDb(out, js - 4800, js);
+                eng.setSourcePosition(0, S0.x, S0.y, S0.z);
+                eng.setListener(L_wall.x, L_wall.y, L_wall.z, yaw0w);
+                eng.notifyJump();
+                for (int b = 0; b < 375; ++b) {
+                    step(1);
+                    if (b == 0) eng.runWorkerStep();
+                }
+                for (size_t w0 = js; w0 + 960 <= js + 9600; w0 += 480)
+                    worstBurst = std::max(worstBurst, lvlDb(out, w0, w0 + 960) - std::max(preLvl, lvlDb(refOut, w0, w0 + 960)));
+                const size_t a0 = (mask == 2) ? js + 2400 : js + 24000;
+                const size_t a1 = (mask == 2) ? js + 12000 : js + 43200;
+                maxErr = std::max(maxErr, std::fabs(lvlDb(out, a0, a1) - lvlDb(refOut, a0, a1)));
+            }
+            std::printf("  wall-line L0=(-5mm, 12.5) 5-rep loop (solo=%d): worst burst %+.2f dB, recovery err %.3f dB\n",
+                mask, worstBurst, maxErr);
+            check(worstBurst <= 1.0 && maxErr <= 1.0, "wall-line L0=(-5mm, 12.5) 5-rep loop recovers <= 1 dB with <= +1 dB burst");
+        }
+    }
+
+    // 6. Static bit-identity for poses > 2 cm from every surface
+    {
+        const Scene sc = makeE8Corridor(S0, {1.85, 7.0, 1.5}, 25.0);
+        const Geo g(sc);
+        SurfaceSideHist h;
+        bool exactPos = true, exactCaps = true;
+        for (Vec3 p : {Vec3{1.85, 7.0, 1.5}, Vec3{0.50, 2.0, 0.50}, Vec3{3.20, 12.0, 2.20}, Vec3{1.85, -0.50, 1.50}}) {
+            const Vec3 r = resolveWallLinePose(g, p, h, 1);
+            exactPos &= (std::memcmp(&r, &p, sizeof(Vec3)) == 0);
+            std::vector<Transducer> rc = makeReceiverArray(Layout::StereoORTF, p, 0.1, 2);
+            applyMicPattern(rc, MicPattern::HumanEars, 0.0875);
+            const auto orig = rc;
+            containCapsulesInRoom(g, p, rc.data(), (int)rc.size());
+            exactCaps &= (std::memcmp(rc.data(), orig.data(), rc.size() * sizeof(Transducer)) == 0);
+        }
+        std::printf("  static > 2 cm geometry identity: pos=%s, capsules=%s\n",
+            exactPos ? "bit-identical" : "DIFF", exactCaps ? "bit-identical" : "DIFF");
+        check(exactPos && exactCaps, "poses > 2 cm from every surface stay bit-identical");
+    }
+}
+
 int main(int argc, char** argv) {
+    if(std::getenv("VERB_ONLY_E8")){std::setvbuf(stdout,nullptr,_IONBF,0);try{testE8Jump();testE8WallAndCapsules();}catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}std::printf(fails?"\n%d check(s) FAILED\n":"\nall checks passed\n",fails);return fails?1:0;}
+    if(std::getenv("VERB_ONLY_E7")){std::setvbuf(stdout,nullptr,_IONBF,0);testE7Handover();return fails?1:0;}
+    if(std::getenv("VERB_ONLY_E6")){std::setvbuf(stdout,nullptr,_IONBF,0);try{testE6Topology();testE6Handover();}catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}std::printf(fails?"\n%d check(s) FAILED\n":"\nall checks passed\n",fails);return fails?1:0;}
+    if(std::getenv("VERB_ONLY_E5")){testE5SoftShadows();testE5OwnerTargets();testE5bFreeSupports();return fails?1:0;}
     std::string dir = argc > 1 ? argv[1] : "scenes";
+    if(std::getenv("VERB_ONLY_E4")){testCarHeldJitter();return fails?1:0;}
+    if(std::getenv("VERB_ONLY_E4A")){std::setvbuf(stdout,nullptr,_IONBF,0);try{if(!std::getenv("E4A_SWEEPS_ONLY"))testE4aOwner();if(!std::getenv("E4A_OWNER_ONLY")){if(!std::getenv("E4A_PS_ONLY"))testE4aSweeps(true);testE4aSweeps(false);}}catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}
+        std::printf(fails?"\n%d check(s) FAILED\n":"\nall checks passed\n",fails);return fails?1:0;}
     if(std::getenv("VERB_DECAY_PERF_ONLY")) {testManySources(dir,3.);testManySources(dir,3.,false);return fails?1:0;}
     if (std::getenv("VERB_RECOVERY_ONLY")) { testRecovery(dir); return fails ? 1 : 0; }
     if (std::getenv("VERB_SWIRL")) {
@@ -1588,6 +3303,18 @@ int main(int argc, char** argv) {
         try { testCompare(dir); } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 1; }
         return 0;
     }
+    if (std::getenv("VERB_ONLY_E3B")) {
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        try { testTailSphere(); } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 1; }
+        std::printf(fails ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", fails);
+        return fails ? 1 : 0;
+    }
+    if (std::getenv("VERB_ONLY_E3")) {
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        try { testDiffraction(); testBuildingCorner(); testBuildingCornerPartial(); testClosedCornerLeak(); testDoorwayWalk(); testCarLoop(); testCarHeldJitter(); testTailSphere(); } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 1; }
+        std::printf(fails ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", fails);
+        return fails ? 1 : 0;
+    }
     if (std::getenv("VERB_ONLY21")) {  // exploration: just the tail smoothness test
         try { testTailSmoothness(); } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 1; }
         return 0;
@@ -1601,6 +3328,11 @@ int main(int argc, char** argv) {
         testDiffraction();
         testBuildingCorner();
         testBuildingCornerPartial();
+        testClosedCornerLeak();
+        testDoorwayWalk();
+        testCarLoop();
+    testCarHeldJitter();
+        testTailSphere();
         testPlates();
         testZones();
         testWallHeights(dir);

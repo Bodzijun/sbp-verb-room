@@ -26,16 +26,21 @@ FieldEnergy earlyFieldEnergy(const Scene& sc, const Transducer& src, Vec3 rc, do
     }
     if (sc.diffraction && (!clear || screened)) {
         DiffPath path;
-        if (diffractedPath(g, src.pos, rc, c, path, clear))
+        bool wall=diffractedPath(g,src.pos,rc,c,path,clear);DiffPath plate;
+        bool rim=singleEdgePath(g,src.pos,rc,c,plate,-1,true);
+        if(rim && (!wall || plate.length<path.length))path=plate;
+        if (wall || rim)
             deposit(result.direct, path.length, dirGain(src, unit(path.first - src.pos)), path.amp, 1);
     }
+    if(g.separatedShell(src.pos,rc,false))return result;
     for (int s = 0; s < g.nSurf(); ++s) {
         if (s == g.ceilId() && !g.hasCeil) continue;
         const Vec3 image = mirror(g, src.pos, s);
         Vec3 point; float amp[NB]; std::fill_n(amp, NB, 1.f);
         if (!crossSurfaceSoft(g, rc, image, s, point, c, amp)
-            || !transmitLeg(g, rc, point, s, -1, amp)
-            || !transmitLeg(g, point, src.pos, s, -1, amp)) continue;
+            || !softReflectionLeg(g, rc, point, s, -1, c, amp, 1, src.pos)
+            || !softReflectionLeg(g, point, src.pos, s, -1, c, amp, 2)
+            || !touchCross(g, rc, point, src.pos, amp)) continue;
         const auto* material = g.matAt(s, point.x, point.y);
         if (!material) continue;
         for (int b = 0; b < NB; ++b) amp[b] *= (float)std::sqrt(reflEnergy(*material, b) * (1 - scatterAt(*material, b)));

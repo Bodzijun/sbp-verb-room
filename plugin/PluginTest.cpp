@@ -7,6 +7,7 @@
 #include <random>
 
 #include "InputOrder.h"
+#include "TestRoomSelection.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 #include "../src/tail.hpp"
@@ -133,10 +134,19 @@ static void testTailControls() {
 }
 
 #include "Stage2Test.h"
+#include "E1Test.h"
+#include "E7Test.h"
+#include "E8Test.h"
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
+    if (std::getenv("VERB_ONLY_E8")) return testE8Plugin();
+    if (std::getenv("VERB_ONLY_E7_MAKEUP")) return testE7Makeup();
+    if (std::getenv("VERB_E1_PERF")) return e1Performance();
+    if (std::getenv("VERB_E1_ONLY")) return e1Processor();
+    if (std::getenv("VERB_E1_CAPTURE")) return e1Null(true);
+    if (std::getenv("VERB_E1_NULL")) return e1Null(false);
     if (std::getenv("VERB_STAGE2_ONLY")) return testStage2Processor();
     if(std::getenv("VERB_EXPORT_LIVE_ONLY")) {
         VerbProcessor p;p.setPlayConfigDetails(2,2,48000,256);p.prepareToPlay(48000,256);
@@ -2307,6 +2317,7 @@ receiver R 0 0 1.5 0 0
         juce::AudioBuffer<float> buf(4, 256);
         juce::MidiBuffer midi;
         for (auto& r : rooms) {
+            if(!verbp::selectedTestRoom(r))continue;
             p.loadSceneText(juce::String(r.text), juce::String(r.name), true);
             if (!waitReady(p, 60)) { allLoad = false; std::printf("    %s did not load: %s\n", r.name.c_str(), p.getStatus().toRawUTF8()); continue; }
             double en = 0;
@@ -2415,3 +2426,6 @@ receiver R 0 0 1.5 0 0
     std::printf(fails ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", fails);
     return fails ? 1 : 0;
 }
+
+
+

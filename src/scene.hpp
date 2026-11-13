@@ -444,6 +444,7 @@ inline Scene parseScene(std::istream& in, const std::string& path) {
             if (ss >> v) s.clutter.seed = (int)v;
             if (ss >> v) s.clutter.hMin = v;
             if (ss >> v) s.clutter.hMax = v;
+            if (ss >> v) s.clutter.minDist = v;  // optional 9th token (T3): the 0.1.15 parser stops reading after hMax and ignores it
         } else if (cmd == "zone") {  // zone floor|ceiling <material|open> x1 y1 x2 y2 x3 y3 ...
             std::string kind, mn;
             ss >> kind >> mn;
@@ -665,9 +666,11 @@ inline std::string serializeScene(const Scene& s) {
             o << "\n";
         }
     }
-    if (s.clutter.count > 0)
+    // The line is also written for count 0 when minDist is not the default, so the setting is not lost. minDist is the 9th
+    // token; the 0.1.15 parser reads the line token by token and ignores what follows hMax.
+    if (s.clutter.count > 0 || s.clutter.minDist != ClutterCfg{}.minDist)
         o << "clutter " << s.clutter.count << ' ' << s.clutter.minLen << ' ' << s.clutter.maxLen << ' ' << s.clutter.tlMin << ' ' << s.clutter.tlMax << ' ' << s.clutter.seed << ' '
-          << s.clutter.hMin << ' ' << s.clutter.hMax << "\n";
+          << s.clutter.hMin << ' ' << s.clutter.hMax << ' ' << s.clutter.minDist << "\n";
     if (!s.diffraction) o << "diffraction 0\n";
     if (s.roughness > 0) o << "roughness " << s.roughness << ' ' << s.roughSeed << "\n";
     o << "floor " << name[s.floorMat] << "\nceiling " << (s.ceilMat < 0 ? std::string("open") : name[s.ceilMat]) << "\n";
@@ -711,4 +714,19 @@ inline Scene loadScene(const std::string& path) {
     return parseScene(in, path);
 }
 
+// Uniform authoring/effective geometry scale. Caller selects origin and legacy height limits.
+// Furniture dimensions, physical microphone spacing, materials and air are unchanged.
+inline void scaleRoomGeometry(Scene& s, double f, double cx=0, double cy=0, bool heights=true) {
+    if(f==1.)return;
+    for(auto& w:s.walls) {
+        w.ax=cx+(w.ax-cx)*f;w.ay=cy+(w.ay-cy)*f;
+        w.bx=cx+(w.bx-cx)*f;w.by=cy+(w.by-cy)*f;
+        if(heights){w.z0*=f;if(w.z1<1e8)w.z1*=f;}
+    }
+    for(auto* zones:{&s.floorZones,&s.ceilZones})for(auto& z:*zones) {
+        for(auto& p:z.poly){p.first=cx+(p.first-cx)*f;p.second=cy+(p.second-cy)*f;}
+        if(heights&&z.z>=0)z.z*=f;
+    }
+    if(heights)s.height*=f;
+}
 }  // namespace verb

@@ -1,5 +1,6 @@
 #include "rt_engine.hpp"
 #include "geometry.hpp"
+#include "../plugin/TestRoomSelection.h"
 #include "../plugin/RoomLibrary.h"
 #include <chrono>
 #include <cstdio>
@@ -67,6 +68,8 @@ static void extremes() {
     csv<<"room,points,probes,group,multiplier,unity_peak,peak,worst_peak_ratio,finite,band,physical_rt60,result_rt60,effective_multiplier,status,error\n";
     double worst=0;
     for(const auto& room:verbp::builtinRooms()) {
+        if(!verbp::selectedTestRoom(room))continue;
+        std::printf("Stage2 room: %s\n",room.name.c_str());
         auto s=scene(room,true);const auto unity=render(s,{{1,1,1}});
         bool normal=room.name=="Bedroom"||room.name=="Living room"||room.name.find("Bathroom")!=std::string::npos
             ||room.name.find("Studio")!=std::string::npos||room.name=="Corridor"||room.name.find("hall")!=std::string::npos||room.name.find("VSL")!=std::string::npos;

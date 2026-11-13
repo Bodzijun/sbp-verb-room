@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en" data-state="loading">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verb Room</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>Verb Room <span class="tag">web shell (T1)</span></h1>
+  <p id="status" class="status">Connecting to the plugin…</p>
+  <dl class="grid">
+    <dt>Plugin version</dt><dd id="pluginVersion">–</dd>
+    <dt>Revision</dt><dd id="revision">–</dd>
+    <dt>Capabilities</dt><dd id="capabilities">–</dd>
+    <dt>Page version</dt><dd id="pageVersion">–</dd>
+    <dt>Window (CSS px)</dt><dd id="size">–</dd>
+    <dt>Ping round trips</dt><dd id="pings">0</dd>
+    <dt>Last key sent to host</dt><dd id="lastKey">–</dd>
+  </dl>
+  <div class="row">
+    <button id="pingBtn" type="button">Ping</button>
+    <button id="classicBtn" type="button">Use classic UI</button>
+  </div>
+  <div class="row">
+    <label for="demoText">Text field (keys typed here stay in the page):</label>
+    <input id="demoText" type="text" autocomplete="off" spellcheck="false" placeholder="type here, Space types a space">
+  </div>
+  <p class="note">Typed: <span id="typed"></span></p>
+  <p class="note">Click the background, then press Space: the DAW transport should toggle. Ctrl+Y is "used by the page" and is not sent.</p>
+  <p class="note">This page only proves the editor shell. All sound, parameters and room editing still live in the plugin.</p>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
