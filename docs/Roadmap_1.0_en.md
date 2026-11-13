@@ -60,6 +60,14 @@ RT60 target assistant, editor improvements. Windows, macOS (universal) and Linux
 - Engine fixes: a sealed room is now really sealed (no sound leaking through closed corners or through walls into the
   tail), correct tail level near walls, bounded real-time cost of the diffraction search.
 
+![The new interface (in testing): energy map of a symphony hall, decay curves per band, room size](images/new_ui_main_energy.png)
+
+*The new interface (in testing): energy map of a symphony hall, decay curves per band, room size.*
+
+![The same hall in the 3D view](images/new_ui_main_3d.png)
+
+*The same hall in the 3D view.*
+
 ## Road to 1.0
 
 We would like to call the next major version 1.0 when the following is in place. Order may change.
