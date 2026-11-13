@@ -102,6 +102,6 @@ We would like to call the next major version 1.0 when the following is in place.
 - **Support development.** Verb Room is written by one person together with AI coding agents. The agents write and
   test most of the code, and their usage limits are the main thing that slows the project down: work regularly stops
   for hours until a limit resets. Donations go to agent credits, which translate directly into fixes and features.
-  A donation link will be added here shortly.
+  Donate: [ko-fi.com/bohdan_sbp](https://ko-fi.com/bohdan_sbp).
 
 Questions and ideas: GitHub issues of the project.
