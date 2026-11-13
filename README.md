@@ -1,5 +1,7 @@
 # Verb Room
 
+**Where the project is going and how to help:** [road to 1.0](docs/Roadmap_1.0_en.md) · [українською](docs/Roadmap_1.0_uk.md)
+
 Version 0.1.16 smooths the start of the late tail, adds **Physical / Creative** modes with an Absorption scale and an RT60 target assistant, remembers Walls / Floors / Ceilings / Plates layer locks in projects and presets, and adds pan, zoom-to-cursor and fit-to-view to the 3D view. See the [0.1.16 release notes](docs/Release_0.1.16_en.md); older projects and presets still load. Version 0.1.15 extends the Energy analyzer to 48 / 64 / 96-cell grids and adds 0.5–120 dB colour range with Auto contrast. See the [latest release notes](docs/Release_0.1.15_en.md) and [analyzer guide](docs/Energy_analyzer_0.1.14_en.md). The background energy map offers source, height, component and octave-band selection. This includes positioned dry sound and the scene Outliner from 0.1.12, plus the 0.1.13 layout fixes; see the [editor guide](docs/Spatial_editor_0.1.12_en.md) and [preset exchange guide](docs/Presets_0.1.10_en.md). Experimental macOS Universal and Linux x86_64 builds use GitHub Actions; see the [cross-platform build guide](docs/Cross_platform_builds_en.md).
 
 A physically based room reverb for **REAPER and other VST3 hosts** (Windows x64), built for scenes where
