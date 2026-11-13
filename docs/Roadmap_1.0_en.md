@@ -80,8 +80,12 @@ We would like to call the next major version 1.0 when the following is in place.
 - Smooth changes while the listener or a source moves; one accurate update when it stops.
 - Soft shadow edges for reflected sound and for horizontal edges (a bonnet, a table), so sound does not appear in steps
   when you come round a corner.
+- Smooth hand-over of reflections where surfaces meet (a bonnet joined to the body, wall corners).
 - Repeatable offline render: two bounces of the same project are identical.
-- Later: pre-computed ("baked") tails along an automated path.
+- Movement paths: draw a path for a source or the listener in the viewport and automate one "position on path"
+  parameter instead of X/Y/Z separately (requested by a tester).
+- Later: pre-computed ("baked") tails along a path — possible exactly because the plug-in then knows the trajectory
+  in advance.
 
 **2. Lower CPU for big scenes**
 - Spreading the convolution work evenly across audio blocks.
@@ -96,7 +100,13 @@ We would like to call the next major version 1.0 when the following is in place.
 - Directional tail, binaural and Ambisonics output.
 - Low-frequency room modes.
 
-**5. Product basics**
+**5. Easier room drawing**
+- A box primitive: a closed body with clean joints for car bodies, columns, furniture.
+- Edge extrusion in the editor (slide, then extrude), so surfaces share edges by construction.
+- An auto level button and a wider output range for quiet listener positions in big halls.
+- After 1.0: full 3D meshes with sloped surfaces.
+
+**6. Product basics**
 - The new interface on macOS and Linux; stable automated tests on all three platforms.
 - Installers, signing, a manual, more ready-made rooms.
 - Other plug-in formats (CLAP, AU) if there is demand.
