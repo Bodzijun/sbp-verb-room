@@ -64,9 +64,13 @@ RT60 target assistant, editor improvements. Windows, macOS (universal) and Linux
 
 *The new interface (in testing): energy map of a symphony hall, decay curves per band, room size.*
 
-![The same hall in the 3D view](images/new_ui_main_3d.png)
+![3D view with reflection paths from the engine, the listener settings and the source list](images/new_ui_main_3d_rays.png)
 
-*The same hall in the 3D view.*
+*3D view with reflection paths from the engine, the listener settings and the source list.*
+
+![Room editor: a selected wall with its length, height and material](images/new_ui_edit_room.png)
+
+*Room editor: a selected wall with its length, height and material.*
 
 ## Road to 1.0
 
