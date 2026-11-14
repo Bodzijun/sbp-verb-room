@@ -67,6 +67,7 @@ const std::vector<std::string>& modelParamIds() {
         }
         for (int k = 0; k < 4; ++k) v.push_back(paramId(kListener, k).toStdString());
         v.push_back("makeup");
+        for(int o=0;o<=kMaxSources;++o)v.push_back(VerbProcessor::pathParamId(o).toStdString());
         return v;
     }();
     return ids;
@@ -202,6 +203,7 @@ std::string Key::path() const {
     case KeyType::SourceList: return "document.sources";
     case KeyType::Output: return "document.output";
     case KeyType::Tail: return "document.tail";
+    case KeyType::Path: return "document.paths["+std::to_string(index)+"]";
     case KeyType::Param: return "parameters." + id;
     }
     return {};
@@ -209,6 +211,7 @@ std::string Key::path() const {
 
 Model readModel(VerbProcessor& p) {
     Model m;
+    for(int o=0;o<=kMaxSources;++o)m.paths[(size_t)o]=p.getMovementPath(o);
     m.scene = p.getDisplayScene();
     m.sources = p.getSources();
     m.output = p.getOutputCfg();
@@ -276,6 +279,7 @@ std::vector<KeyChange> diffModels(const Model& a, const Model& b) {
             add(k, it == a.params.end() ? 0.f : it->second, kv.second, true);
         }
     }
+    for(int o=0;o<=kMaxSources;++o)if(!(a.paths[(size_t)o]==b.paths[(size_t)o])) {Key k;k.type=KeyType::Path;k.index=o;add(k,a.paths[(size_t)o],b.paths[(size_t)o],false);}
     return out;
 }
 
@@ -302,6 +306,7 @@ std::optional<Snap> captureKey(const Model& m, const Key& k) {
     case KeyType::Source:
         if (k.index < 0 || k.index >= (int)m.sources.size()) return std::nullopt;
         return Snap(m.sources[(size_t)k.index]);
+    case KeyType::Path: return Snap(m.paths[(size_t)k.index]);
     case KeyType::SourceList: return Snap(m.sources);
     case KeyType::Output: return Snap(m.output);
     case KeyType::Tail: return Snap(m.tail);
@@ -337,11 +342,13 @@ bool snapsEqual(const Snap& a, const Snap& b) {
     }
     if (auto* x = std::get_if<OutputCfg>(&a)) { const auto& y = std::get<OutputCfg>(b); return x->layout == y.layout && x->radius == y.radius && x->micPattern == y.micPattern; }
     if (auto* x = std::get_if<TailSettings>(&a)) return x->rays == std::get<TailSettings>(b).rays && x->adaptive == std::get<TailSettings>(b).adaptive;
+    if (auto* x = std::get_if<MovementPath>(&a)) return *x==std::get<MovementPath>(b);
     if (auto* x = std::get_if<float>(&a)) return std::fabs(*x - std::get<float>(b)) < 1e-4f;  // parameters are quantised to 0.001
     return false;
 }
 
 size_t snapBytes(const Snap& s) {
+    if(auto* x=std::get_if<MovementPath>(&s))return sizeof(*x)+x->points.capacity()*sizeof(PathPoint);
     if (auto* x = std::get_if<SurfaceSnap>(&s)) return surfBytes(*x);
     if (auto* x = std::get_if<std::vector<SurfaceSnap>>(&s)) { size_t n = sizeof(*x); for (auto& e : *x) n += surfBytes(e); return n; }
     if (auto* x = std::get_if<SourceCfg>(&s)) return sourceBytes(*x);
@@ -401,6 +408,7 @@ Fail applyTargets(VerbProcessor& proc, const std::vector<Target>& targets, int* 
         if (t.key.type == KeyType::Output) proc.setOutputCfg(std::get<OutputCfg>(*t.snap));
         else if (t.key.type == KeyType::Tail) proc.setTailSettings(std::get<TailSettings>(*t.snap));
     }
+    for(const auto& t:targets)if(t.key.type==KeyType::Path)proc.setMovementPath(t.key.index,std::get<MovementPath>(*t.snap));
     if (conflicts) *conflicts = skipped;
     return {};
 }
@@ -949,6 +957,11 @@ Fail opScale(const juce::var& p, Model& m, const Ctx& c) {
             m.params[ix] = clampParam(c.proc, ix, cx + (m.params[ix] - cx) * f);
             m.params[iy] = clampParam(c.proc, iy, cy + (m.params[iy] - cy) * f);
             m.params[iz] = clampParam(c.proc, iz, m.params[iz] * f);
+            for (auto& pt : m.paths[(size_t)obj].points) {
+                pt[0] = std::clamp(cx + (pt[0] - cx) * f, -200.0, 200.0);
+                pt[1] = std::clamp(cy + (pt[1] - cy) * f, -200.0, 200.0);
+                pt[2] = std::clamp(pt[2] * f, 0.0, 30.0);
+            }
         }
     }
     return {};
@@ -1082,6 +1095,8 @@ Fail opSourceRemove(const juce::var& p, Model& m, const Ctx&) {
         for (int k = 0; k < 5; ++k) m.params[paramId(i, k).toStdString()] = m.params[paramId(i + 1, k).toStdString()];
         for (bool solo : {false, true}) m.params[sourceSwitchId(i, solo).toStdString()] = m.params[sourceSwitchId(i + 1, solo).toStdString()];
     }
+    for(int i=index;i+1<(int)m.sources.size();++i){m.paths[(size_t)i]=m.paths[(size_t)i+1];m.params[VerbProcessor::pathParamId(i).toStdString()]=m.params[VerbProcessor::pathParamId(i+1).toStdString()];}
+    m.paths[m.sources.size()-1]={};
     m.sources.erase(m.sources.begin() + index);
     return {};
 }
@@ -1188,6 +1203,44 @@ Fail opListenerSet(const juce::var& p, Model& m, const Ctx& c) {  // extension (
     return {};
 }
 
+
+Fail opPath(const juce::var& p,Model& m,const Ctx&) {
+    Args a(p);const int o=a.integer("object",0,kMaxSources);
+    if(a.bad())return a.f;
+    if(o!=kListener && o>=(int)m.sources.size())return {"invalid","Source does not exist","object"};
+    auto& path=m.paths[(size_t)o];const auto op=a.get("op").toString();
+    if(op=="path.clear"){path={};return {};}
+    if(op=="path.set") {
+        auto* points=a.get("points").getArray();
+        if(!points || points->size()<2 || points->size()>64)return {"invalid","Expected 2..64 points","points"};
+        path.points.clear();
+        for(const auto& pt:*points) {
+            auto* xyz=pt.getArray();if(!xyz || xyz->size()!=3)return {"invalid","Expected [x,y,z]","points"};
+            PathPoint q{};for(int k=0;k<3;++k){if(!Args::isNum((*xyz)[k]))return {"invalid","Expected numeric point","points"};q[(size_t)k]=(double)(*xyz)[k];}path.points.push_back(q);
+        }
+    } else if(op=="path.addPoint" || op=="path.movePoint") {
+        auto xyz=a.vecProp("point",3,3,200);if(a.bad())return a.f;
+        PathPoint q{xyz[0],xyz[1],xyz[2]};
+        if(op=="path.addPoint") {
+            if(a.has("index")){int i=a.integer("index",0,(int)path.points.size());if(a.bad())return a.f;path.points.insert(path.points.begin()+i,q);}
+            else path.points.push_back(q);
+        } else {int i=a.integer("index",0,(int)path.points.size()-1);if(a.bad())return a.f;path.points[(size_t)i]=q;}
+    } else if(op=="path.removePoint") {
+        int i=a.integer("index",0,(int)path.points.size()-1);if(a.bad())return a.f;
+        if(path.points.size()<=2)return {"invalid","A path requires two points; use clear","index"};
+        path.points.erase(path.points.begin()+i);
+    } else if(op!="path.setFlags")return {"unsupported","Unknown path operation","op"};
+    for(auto flag:{"enabled","closed","smooth","orient"})if(a.has(flag)) {
+        bool value=a.boolean(flag);if(a.bad())return a.f;
+        if(juce::String(flag)=="enabled")path.enabled=value;
+        if(juce::String(flag)=="closed")path.closed=value;
+        if(juce::String(flag)=="smooth")path.smooth=value;
+        if(juce::String(flag)=="orient")path.orient=value;
+    }
+    if(a.has("laps")){int laps=a.integer("laps",1,64);if(a.bad())return a.f;path.laps=laps;}
+    if(!validPath(path))return {"invalid","Path points exceed count or coordinate bounds","points"};
+    return {};
+}
 // ============================================================================================ labels / coalescing
 std::string lbl(const char* s) { return s; }
 std::string refsCount(const juce::var& p, const char* one, const char* many) {
@@ -1227,6 +1280,12 @@ std::string labelLink(const juce::var& p) { return refsCount(p, "Link surfaces",
 //   mix ... belong to the host's automation and undo), loading a room / preset / project (clears the history instead).
 // To reproduce the native editor's narrower undo (no air / clutter / sources / output / tail) set `undoable` to false for those.
 static const Descriptor kDescriptors[] = {
+    {"path.set",true,[](const juce::var&){return lbl("Set path");},noKey,opPath},
+    {"path.clear",true,[](const juce::var&){return lbl("Clear path");},noKey,opPath},
+    {"path.addPoint",true,[](const juce::var&){return lbl("Add path point");},noKey,opPath},
+    {"path.movePoint",true,[](const juce::var&){return lbl("Move path point");},[](const juce::var& p){return p.getProperty("object",{}).toString().toStdString()+"/"+p.getProperty("index",{}).toString().toStdString();},opPath},
+    {"path.removePoint",true,[](const juce::var&){return lbl("Remove path point");},noKey,opPath},
+    {"path.setFlags",true,[](const juce::var&){return lbl("Path flags");},noKey,opPath},
     {"output.autoMakeup", true, [](const juce::var&) {return lbl("Auto makeup");}, noKey,
         [](const juce::var&, Model& m, const Ctx& c)->Fail { float v=0; if(!c.proc.autoMakeupDb(v))return {"notReady","No complete energy result or enabled source", ""}; m.params["makeup"]=v; return {}; }},
     {"surface.translate", true, labelMove, keyRefs, opTranslate},

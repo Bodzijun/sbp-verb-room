@@ -1,3 +1,4 @@
+#include "bake_pool.hpp"
 #include "EnergyMapView.h"
 
 EnergyMapView::EnergyMapView(VerbProcessor& p) : proc(p) {
@@ -112,6 +113,7 @@ void EnergyMapView::startAnalysis() {
     submittedSignature = signature(sc, opt); stop.store(false); progress.store(0); working.store(true);
     setControlsEnabled(false); status.setText("Analyzing... 0%", juce::dontSendNotification);
     worker = std::thread([this, sc, opt] {
+        verb::BakePool::lowerCurrentThread(true);
         std::shared_ptr<const verb::EnergyMap> done; juce::String error;
         try {
             done = std::make_shared<verb::EnergyMap>(verb::analyzeEnergyMap(sc, opt,

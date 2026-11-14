@@ -1701,6 +1701,9 @@ void VerbEditor::paint(juce::Graphics& g) {
             g.fillEllipse(p.x - 2.5f, p.y - 2.5f, 5.f, 5.f);
         }
     }
+    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);if(p.points.size()<2)continue;verbp::CompiledPath t;t.build(p);g.setColour(o==verbp::kListener?kLis:srcColour(o));
+        for(size_t i=1;i<t.points.size();++i)g.drawLine({view.toScreen(t.points[i-1][0],t.points[i-1][1]),view.toScreen(t.points[i][0],t.points[i][1])},1.4f);
+        auto q=t.evaluate(proc.apvts.getRawParameterValue(VerbProcessor::pathParamId(o))->load());auto v=view.toScreen(q[0],q[1]);g.drawEllipse(v.x-5,v.y-5,10,10,2.f);}
     auto drawObj = [&](int obj, juce::Colour c, const juce::String& label, double az) {
         const auto p = view.toScreen(paramValue(obj, 0), paramValue(obj, 1));
         const bool sel = selKind == SelKind::Object && obj == selected;
@@ -2719,6 +2722,9 @@ void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double*
     const auto classColour = [&](int mat) {
         return mat >= 0 && mat < (int)sc.mats.size() ? juce::Colour(verb::surfaceClasses()[(size_t)std::min(std::max(sc.mats[(size_t)mat].cls, 0), (int)verb::SC_Custom)].argb) : skin::textMid;
     };
+    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);if(p.points.size()<2)continue;verbp::CompiledPath t;t.build(p);g.setColour(o==verbp::kListener?kLis:srcColour(o));
+        for(size_t i=1;i<t.points.size();++i){auto a=proj(t.points[i-1][0],t.points[i-1][1],t.points[i-1][2]),b=proj(t.points[i][0],t.points[i][1],t.points[i][2]);g.drawLine(a.x,a.y,b.x,b.y,1.4f);}
+        auto q=t.evaluate(proc.apvts.getRawParameterValue(VerbProcessor::pathParamId(o))->load());auto v=proj(q[0],q[1],q[2]);g.drawEllipse(v.x-5,v.y-5,10,10,2.f);}
     // floor: a faint slab with a 1 m grid, then the zones
     {
         const double gx0 = std::floor(x0) - 1, gx1 = std::ceil(x1) + 1, gy0 = std::floor(y0) - 1, gy1 = std::ceil(y1) + 1;

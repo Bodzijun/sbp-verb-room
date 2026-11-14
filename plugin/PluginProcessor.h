@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <atomic>
+#include "MovementPath.h"
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -66,6 +67,9 @@ public:
     void changeProgramName(int, const juce::String&) override {}
     void getStateInformation(juce::MemoryBlock&) override;
     void setStateInformation(const void*, int) override;
+    verbp::MovementPath getMovementPath(int object) const;
+    bool setMovementPath(int object, const verbp::MovementPath&);
+    static juce::String pathParamId(int o) { return o==verbp::kListener ? "lpath" : "s"+juce::String(o+1)+"path"; }
     bool autoMakeupDb(float& value) const;
 
     // ---- room (scene) ----
@@ -140,6 +144,10 @@ public:
     bool isTailCurrent() const;
     // Immutable web snapshots published by the scene worker; none acquires engineLock.
     std::shared_ptr<const verb::TailDiagnostics> getWebTailDiagnostics() const { return std::atomic_load(&webTailDiagnostics); }
+    int pathBakePercent() const {return webBakePercent.load();}
+    bool startPathBake(int object=-1);
+    void cancelPathBake();
+    juce::var pathBakeStatus() const;
     double webAppliedSize() const {return engineSize.load();}
     float webDuckReductionDb() const {return duckReduction.load();}
     double webAppliedAbsorption() const { return engineAbsorption.load(); }
@@ -260,6 +268,12 @@ private:
     std::shared_ptr<const verb::Scene> webModeledScene;
     std::shared_ptr<const verb::TailDiagnostics> webTailDiagnostics;
     std::atomic<bool> webTailCurrent{false};
+    std::atomic<int> webBakePercent{0};
+    std::atomic<int> webBakeStart{-2};
+    std::atomic<bool> webBakeCancel{false};
+    mutable juce::CriticalSection webBakeLock;
+    juce::var webBakeStatus;
+    std::array<bool,33> webBakeTouched{};
     std::atomic<uint64_t> webProcessedBlocks{0};
     std::atomic<float> webCpuMean{0.f};
     std::atomic<float> webCpuWorst{0.f};
@@ -312,6 +326,12 @@ private:
     std::atomic<float>* pv[verbp::kMaxSources + 1][5] = {};
     std::atomic<float> *sizeParam=nullptr,*predelayParam=nullptr,*widthParam=nullptr,*freezeParam=nullptr,*duckParam=nullptr,*duckReleaseParam=nullptr;
     std::atomic<float>* gainParam = nullptr;
+    friend struct P1Access;
+    friend struct E9bAccess;
+    mutable juce::CriticalSection pathLock;
+    std::array<verbp::MovementPath, verbp::kMaxSources+1> movementPaths;
+    std::array<verbp::PathMailbox, verbp::kMaxSources+1> pathMailboxes;
+    std::atomic<float>* pathParams[verbp::kMaxSources+1] = {};
     std::atomic<float>* makeupParam = nullptr;
     std::atomic<float>* modeParam = nullptr;
     std::atomic<float>* absorptionParam = nullptr;

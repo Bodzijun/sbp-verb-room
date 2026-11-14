@@ -10,6 +10,7 @@
 
 #include "scene.hpp"
 #include "tail.hpp"
+#include "baked_path.hpp"
 
 namespace verb {
 
@@ -56,6 +57,7 @@ struct EngineConfig {
     int motionIntervalMs = 50;       // shortest time between two estimates
     // Tests: no worker thread even with tailThread; the caller runs the worker with Engine::runWorkerStep().
     bool manualWorker = false;
+    unsigned rebuildWorkers = 0; // internal/test override;0=hardware concurrency-1,1=serial
 };
 
 // Last complete worker result, unit source excitation, omni listener energy.
@@ -152,6 +154,15 @@ public:
     // Only the reference worker is locked; its process() does not acquire this mutex.
     bool copyTailForOffline(const Engine& reference);
 
+    // Control thread only. Empty or multiple paths select the legacy estimator.
+    void setBakedPaths(const std::vector<BakedPath>& paths);
+    enum class BakeState { NotBaked, Baking, Baked, Outdated, Cancelled, Blocked, Approximate, Failed };
+    // Control thread requests only. workers=0 selects hardware concurrency minus one.
+    void requestPathBake(unsigned workers=0);
+    void cancelPathBake();
+    struct BakeStats { BakeState state=BakeState::NotBaked; int percent=0, discontinuities=0,waitReason=0,workers=0,done=0,total=0; uint64_t hash=0,lookups=0,stations=0,resets=0,cancelled=0; double milliseconds=0; };
+    BakeStats bakeStats() const;
+    std::shared_ptr<const BakedTable> bakedTableSnapshot() const;
     // E4a. Tests with EngineConfig::manualWorker: one pass of the late-field worker, synchronously (control thread,
     // never while process() runs).
     void runWorkerStep();

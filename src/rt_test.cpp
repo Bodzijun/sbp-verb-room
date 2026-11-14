@@ -3280,7 +3280,12 @@ static void testE8WallAndCapsules() {
     }
 }
 
+#include "e9_test.inc"
+#include "e10_test.inc"
+
 int main(int argc, char** argv) {
+    if(std::getenv("VERB_ONLY_E10")){std::setvbuf(stdout,nullptr,_IONBF,0);testE10();return fails?1:0;}
+    if(std::getenv("VERB_ONLY_E9")){std::setvbuf(stdout,nullptr,_IONBF,0);testE9Paths();return fails?1:0;}
     if(std::getenv("VERB_ONLY_E8")){std::setvbuf(stdout,nullptr,_IONBF,0);try{testE8Jump();testE8WallAndCapsules();}catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}std::printf(fails?"\n%d check(s) FAILED\n":"\nall checks passed\n",fails);return fails?1:0;}
     if(std::getenv("VERB_ONLY_E7")){std::setvbuf(stdout,nullptr,_IONBF,0);testE7Handover();return fails?1:0;}
     if(std::getenv("VERB_ONLY_E6")){std::setvbuf(stdout,nullptr,_IONBF,0);try{testE6Topology();testE6Handover();}catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}std::printf(fails?"\n%d check(s) FAILED\n":"\nall checks passed\n",fails);return fails?1:0;}

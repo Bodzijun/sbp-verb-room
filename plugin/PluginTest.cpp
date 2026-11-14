@@ -137,10 +137,14 @@ static void testTailControls() {
 #include "E1Test.h"
 #include "E7Test.h"
 #include "E8Test.h"
+#include "P1Test.h"
+#include "E9Test.h"
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
+    if (std::getenv("VERB_ONLY_E9")) return testE9Plugin();
+    if (std::getenv("VERB_ONLY_P1")) return testP1();
     if (std::getenv("VERB_ONLY_E8")) return testE8Plugin();
     if (std::getenv("VERB_ONLY_E7_MAKEUP")) return testE7Makeup();
     if (std::getenv("VERB_E1_PERF")) return e1Performance();

@@ -1,6 +1,8 @@
 #include "tail.hpp"
+#include "bake_pool.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <random>
@@ -132,15 +134,45 @@ struct TraceCRN {
     long long work = 0;    // out: deterministic work units (ray segments + receiver records)
 };
 
-static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize,
-    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr) {
-    const Geo g(sc);
-    const int R = (int)rcv.size();
-    const double c = speedOfSound(sc.tempC);
-    std::array<double, NB> airDb;
-    for (int b = 0; b < NB; ++b) airDb[b] = airAbsDbPerM(kBandHz[b], sc.tempC, sc.humidity);
+// Fixed-width arithmetic and explicit uniform conversion keep ray streams portable.
+static uint64_t tailRaySeed(int seed,uint64_t index){
+    uint64_t x=(uint64_t)(uint32_t)seed*7919ull+13+0x9e3779b97f4a7c15ull*(index+1);
+    x=(x^(x>>30))*0xbf58476d1ce4e5b9ull;x=(x^(x>>27))*0x94d049bb133111ebull;
+    return x^(x>>31);
+}
+struct TailCounter {
+    uint64_t state=0;
+    explicit TailCounter(uint64_t initial=0):state(initial){}
+    void seed(uint64_t initial){state=initial;}
+    uint64_t operator()(){uint64_t x=(state+=0x9e3779b97f4a7c15ull);x=(x^(x>>30))*0xbf58476d1ce4e5b9ull;x=(x^(x>>27))*0x94d049bb133111ebull;return x^(x>>31);}
+};
+struct TailUniform { double operator()(TailCounter& rng)const{return (rng()>>11)*(1.0/9007199254740992.0);} };
 
-    TailHist out;
+struct TailTracePrepared {
+    Geo g;int R;double c,rd=0,Vs=0;std::array<double,NB> airDb;std::vector<SphereClip> clip;
+    TailTracePrepared(const Scene& sc,const std::vector<Transducer>&rcv):g(sc),R((int)rcv.size()),c(speedOfSound(sc.tempC)){
+        for(int b=0;b<NB;++b)airDb[b]=airAbsDbPerM(kBandHz[b],sc.tempC,sc.humidity);
+    rd = sc.detectRadius;
+    {
+        double x0 = 1e18, x1 = -1e18, y0 = 1e18, y1 = -1e18;
+        for (const auto& w : sc.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
+        if (x1 > x0 && y1 > y0) {
+            const double vol = (x1 - x0) * (y1 - y0) * std::max(1.0, std::min(sc.height, 40.0));
+            rd = std::min(3.0, std::max(rd, 0.05 * std::cbrt(vol)));
+        }
+    }
+    Vs = 4.0 / 3.0 * kPi * rd * rd * rd;
+    clip.resize((size_t)R);
+    for (int r = 0; r < R; ++r) clip[(size_t)r] = makeSphereClip(g, rcv[(size_t)r].pos, rd);
+    }
+};
+static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize,
+    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr, int firstRay=0,int lastRay=-1,const TailTracePrepared* prepared=nullptr,TailHist* recycle=nullptr) {
+    std::unique_ptr<TailTracePrepared> owned;
+    if(!prepared){owned=std::make_unique<TailTracePrepared>(sc,rcv);prepared=owned.get();}
+    const auto& g=prepared->g;const int R=prepared->R;const double c=prepared->c;
+    const auto& airDb=prepared->airDb;
+    TailHist out=recycle?std::move(*recycle):TailHist{};
     out.binDur = 0.001;
     out.nBins = integrated ? 1 : (size_t)std::ceil(sc.length / out.binDur) + 2;
     out.h.resize(R);
@@ -152,24 +184,13 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
     out.reliableEnd.resize(R);
     for (auto& r : out.reliableEnd) r.fill(out.nBins);
 
-    std::mt19937_64 rng((uint64_t)seed * 7919ull + 13);
-    std::uniform_real_distribution<double> U(0, 1);
+    TailCounter rng((uint64_t)seed * 7919ull + 13);
+    TailUniform U;
     const double maxPath = c * sc.length;
     // The receiver sphere grows with the room: in a hall only a handful of rays cross a 0.5 m sphere per millisecond,
     // and the late histogram turns into Poisson noise (heard as modulation / fragmentation of the tail). The late field
     // is diffuse, so averaging over a larger sphere loses nothing.
-    double rd = sc.detectRadius;
-    {
-        double x0 = 1e18, x1 = -1e18, y0 = 1e18, y1 = -1e18;
-        for (const auto& w : sc.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
-        if (x1 > x0 && y1 > y0) {
-            const double vol = (x1 - x0) * (y1 - y0) * std::max(1.0, std::min(sc.height, 40.0));
-            rd = std::min(3.0, std::max(rd, 0.05 * std::cbrt(vol)));
-        }
-    }
-    const double Vs = 4.0 / 3.0 * kPi * rd * rd * rd;
-    std::vector<SphereClip> clip((size_t)R);
-    for (int r = 0; r < R; ++r) clip[(size_t)r] = makeSphereClip(g, rcv[(size_t)r].pos, rd);
+    const double rd=prepared->rd,Vs=prepared->Vs;const auto&clip=prepared->clip;
     // Spatial queries are used only for analysis. Clip each segment to the
     // receivers' height slab, then search their X-sorted sphere bounds.
     std::vector<int> receiverOrder;
@@ -179,12 +200,12 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
         std::sort(receiverOrder.begin(), receiverOrder.end(), [&](int a, int b) { return rcv[a].pos.x < rcv[b].pos.x; });
         for (const auto& r : rcv) { rz0 = std::min(rz0, r.pos.z - rd); rz1 = std::max(rz1, r.pos.z + rd); }
     }
-    for (int i = 0; i < rays; ++i) {
+    for (int i = firstRay; i < (lastRay<0?rays:lastRay); ++i) {
         if (i % 32 == 0) {
             if (cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
             if (progress) progress((double)i / rays);
         }
-        if (crn && crn->perRay) rng.seed((uint64_t)seed * 7919ull + 13 + 0x9E3779B97F4A7C15ull * (uint64_t)(i + 1));
+        rng.seed(tailRaySeed(seed,(uint64_t)i));
         if (crn) crn->rayAcc.assign((size_t)R * NB, 0.0);
         double zc = 2 * U(rng) - 1, ph = 2 * kPi * U(rng), sr_ = std::sqrt(1 - zc * zc);
         Vec3 d{sr_ * std::cos(ph), sr_ * std::sin(ph), zc};
@@ -347,8 +368,35 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
     return out;
 }
 
-TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize, const std::function<bool()>& cancelled) {
-    return traceTailImpl(sc, src, rcv, order, rays, seed, finalize, false, cancelled);
+TailHist traceTail(const Scene& sc,const Transducer& src,const std::vector<Transducer>& rcv,int order,int rays,int seed,bool finalize,const std::function<bool()>& cancelled,const TailExecution& execution){
+    using Clock=std::chrono::steady_clock;auto prepare=Clock::now();
+    constexpr int chunk=1024;const TailTracePrepared prepared(sc,rcv);
+    TailHist out;bool initialized=false;
+    const size_t bytes=(size_t)(std::ceil(sc.length/.001)+2)*std::max<size_t>(1,rcv.size())*NB*16;
+    const unsigned width=execution.pool?std::max(1u,std::min<unsigned>(execution.workers,(unsigned)std::max<size_t>(1,128u*1024u*1024u/std::max<size_t>(1,bytes)))):1;
+    const int chunks=std::max(1,(rays+chunk-1)/chunk);
+    std::vector<double> work(chunks,0.);std::atomic<bool> failed{false};
+    auto stop=[&]{return failed.load()||(cancelled&&cancelled());};
+    auto run=[&](int j,TailHist recycled=TailHist{}){auto t=Clock::now();auto h=traceTailImpl(sc,src,rcv,order,rays,seed,false,false,stop,{},nullptr,j*chunk,std::min(rays,(j+1)*chunk),&prepared,&recycled);work[j]=std::chrono::duration<double,std::milli>(Clock::now()-t).count();return h;};
+    auto merge=[&](TailHist& h){auto t=Clock::now();if(!initialized){out=std::move(h);initialized=true;}
+        else for(size_t r=0;r<rcv.size();++r)for(int b=0;b<NB;++b)for(size_t k=0;k<out.nBins;++k){out.h[r][b][k]+=h.h[r][b][k];out.h2[r][b][k]+=h.h2[r][b][k];}
+        if(execution.stats)execution.stats->mergeMs+=std::chrono::duration<double,std::milli>(Clock::now()-t).count();
+    };
+    if(execution.stats){*execution.stats={};execution.stats->prepareMs=std::chrono::duration<double,std::milli>(Clock::now()-prepare).count();execution.stats->chunks=chunks;execution.stats->peakHistBytes=bytes*std::min<size_t>(chunks,width);}
+    if(width==1){TailHist recycled;for(int j=0;j<chunks;++j){recycled=run(j,std::move(recycled));merge(recycled);}}
+    else{
+        std::vector<std::future<TailHist>> jobs(chunks);
+        try{
+            for(int j=0;j<std::min<int>(chunks,width);++j)jobs[j]=execution.pool->submit([&,j]{return run(j);},true);
+            for(int j=0;j<chunks;++j){auto t=Clock::now();auto h=jobs[j].get();if(execution.stats)execution.stats->waitMs+=std::chrono::duration<double,std::milli>(Clock::now()-t).count();
+                merge(h);
+                if(j+(int)width<chunks){int next=j+width;jobs[next]=execution.pool->submit([&,next,recycled=std::move(h)]()mutable{return run(next,std::move(recycled));},true);}
+                if(stop())throw std::runtime_error("Tail rebuild cancelled");
+            }
+        }catch(...){failed=true;for(auto&f:jobs)if(f.valid())try{f.get();}catch(...){}throw;}
+    }
+    if(execution.stats)for(double ms:work)execution.stats->workMs+=ms;
+    if(finalize)finalizeTail(out);return out;
 }
 
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
@@ -413,8 +461,8 @@ std::vector<std::array<double, NB>> traceLateReciprocal(const Scene& sc, Vec3 or
     for (const auto& t : srcs) { sz0 = std::min(sz0, t.pos.z - rd); sz1 = std::max(sz1, t.pos.z + rd); }
     const double stopRel = stopDb < 0 ? std::pow(10.0, stopDb / 10.0) : 0.0;
     long long units = 0;
-    std::mt19937_64 rng;
-    std::uniform_real_distribution<double> U(0, 1);
+    TailCounter rng;
+    TailUniform U;
     std::vector<double> w((size_t)R * NB);
     std::vector<std::array<double, NB>> rayAcc;     // this ray's totals, for the variance
     std::vector<int> touched;
@@ -422,7 +470,7 @@ std::vector<std::array<double, NB>> traceLateReciprocal(const Scene& sc, Vec3 or
     if (sumSq) { sumSq->assign((size_t)S * R, std::array<double, NB>{}); rayAcc.assign((size_t)S * R, std::array<double, NB>{}); isTouched.assign((size_t)S, 0); }
     for (int i = 0; i < rays; ++i) {
         if (i % 32 == 0 && cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
-        rng.seed((uint64_t)seed * 7919ull + 13 + 0x9E3779B97F4A7C15ull * (uint64_t)(i + 1));
+        rng.seed(tailRaySeed(seed,(uint64_t)i));
         double zc = 2 * U(rng) - 1, ph = 2 * kPi * U(rng), sr_ = std::sqrt(1 - zc * zc);
         Vec3 d{sr_ * std::cos(ph), sr_ * std::sin(ph), zc};
         for (int r = 0; r < R; ++r) {
@@ -800,16 +848,16 @@ bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized) {
 }
 
 TailHist traceTailAdaptive(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rc,
-                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore, const std::function<bool()>& cancelled) {
+                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore, const std::function<bool()>& cancelled, const TailExecution& execution,TailHist* retainedRaw) {
     raysUsed = std::max(0, baseRays);
     maxRays = std::max(raysUsed, maxRays);
     for (;;) {
-        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false, cancelled);
+        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false, cancelled, execution);
         auto h = raw;
         finalizeTail(h);
         const bool sparse = tailNeedsMoreRays(raw, h);
         if (needsMore) *needsMore = sparse;
-        if (raysUsed == 0 || raysUsed >= maxRays || !sparse) return h;
+        if (raysUsed == 0 || raysUsed >= maxRays || !sparse) {if(retainedRaw)*retainedRaw=std::move(raw);return h;}
         raysUsed = (int)std::min<int64_t>(maxRays, 2ll * raysUsed);
     }
 }
@@ -994,43 +1042,47 @@ std::array<double, NB> estimateRoomRT60(const Scene& scene) {
     return out;
 }
 
-double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled) {
+double tailSecondsFromTrace(const TailHist& input,double minimum){
+    auto h=input;finalizeTail(h,false);double len=minimum;
+    double need = 0;
+    for(size_t receiver=0;receiver<h.h.size();++receiver){
+    std::array<double, NB> totals{};
+    double largest = 0;
+    for (int b = 0; b < NB; ++b) {
+        for (double v : h.h[receiver][(size_t)b]) totals[(size_t)b] += v;
+        largest = std::max(largest, totals[(size_t)b]);
+    }
+    for (int b = 0; b < NB; ++b) {
+        const auto& e = h.h[receiver][(size_t)b];
+        const double total = totals[(size_t)b];
+        if (total <= largest * 1e-5) continue;
+        double rem = total;
+        size_t k = 0, k5 = 0, k35 = 0;
+        for (; k < e.size(); ++k) {
+        rem -= e[k];
+        if (k5 == 0 && rem < 0.316 * total) k5 = k;     // -5 dB
+        if (k35 == 0 && rem < 3.16e-4 * total) k35 = k;  // -35 dB
+        if (rem < 1e-8 * total) break;  // 80 dB of the energy has passed
+        }
+        need = std::max(need, (double)k * h.binDur);
+        // A truncated or sparse trace underestimates the remaining energy.
+        // Extrapolate the measured -5..-35 dB segment to -80 dB from its actual onset.
+        if (k5 > 0 && k35 > k5)
+        need = std::max(need, ((double)k5 + 2.5 * (double)(k35 - k5)) * h.binDur);
+    }
+    }
+    len = std::max(len, need + 0.8);  // leave the maximum 0.6 s end fade beyond the target
+    return std::min(std::max(len,.2),20.);
+}
+
+double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled, const TailExecution& execution, int probeRays) {
     double len = sc.length;
     if (!sc.sources.empty() && !sc.receivers.empty() && !sc.walls.empty()) {
         Scene t = sc;
         t.length = 20.0;  // allow long-decay rooms to reach the target before the final fade
         const std::vector<Transducer> rc{t.receivers[0]};
-        // A 6000-ray probe often loses confidence during the initial build-up in
-        // absorbing halls, making a tiny slope error inflate the allocation to
-        // several seconds. Use the same order of ray budget as the live tail.
-        auto h = traceTail(t, t.sources[0], rc, erOrder, 48000, t.seed, false, cancelled);
-        finalizeTail(h,false); // preserve the legacy unity length probe exactly
-        double need = 0;
-        std::array<double, NB> totals{};
-        double largest = 0;
-        for (int b = 0; b < NB; ++b) {
-            for (double v : h.h[0][(size_t)b]) totals[(size_t)b] += v;
-            largest = std::max(largest, totals[(size_t)b]);
-        }
-        for (int b = 0; b < NB; ++b) {
-            const auto& e = h.h[0][(size_t)b];
-            const double total = totals[(size_t)b];
-            if (total <= largest * 1e-5) continue;
-            double rem = total;
-            size_t k = 0, k5 = 0, k35 = 0;
-            for (; k < e.size(); ++k) {
-                rem -= e[k];
-                if (k5 == 0 && rem < 0.316 * total) k5 = k;     // -5 dB
-                if (k35 == 0 && rem < 3.16e-4 * total) k35 = k;  // -35 dB
-                if (rem < 1e-8 * total) break;  // 80 dB of the energy has passed
-            }
-            need = std::max(need, (double)k * h.binDur);
-            // A truncated or sparse trace underestimates the remaining energy.
-            // Extrapolate the measured -5..-35 dB segment to -80 dB from its actual onset.
-            if (k5 > 0 && k35 > k5)
-                need = std::max(need, ((double)k5 + 2.5 * (double)(k35 - k5)) * h.binDur);
-        }
-        len = std::max(len, need + 0.8);  // leave the maximum 0.6 s end fade beyond the target
+        auto h = traceTail(t, t.sources[0], rc, erOrder, probeRays, t.seed, false, cancelled, execution);
+        return tailSecondsFromTrace(h, len);
     }
     return std::min(std::max(len, 0.2), 20.0);
 }
@@ -1047,12 +1099,23 @@ void fadeTailEnd(std::vector<std::vector<float>>& ir, size_t n, double sr) {
     }
 }
 
-void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf) {
+static void checkTailExecution(const TailExecution& e) {
+    if(e.cancelled&&e.cancelled())throw std::runtime_error("Tail rebuild cancelled");
+}
+template<class F> static void tailFor(const TailExecution& e,size_t n,F fn){
+    auto checked=[&](size_t i){checkTailExecution(e);fn(i);};
+    if(e.pool)e.pool->parallelFor(n,e.workers,checked);
+    else for(size_t i=0;i<n;++i)checked(i);
+    checkTailExecution(e);
+}
+void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf, const TailExecution& execution) {
     const int smoothK = 3;
     const double binSamples = hist.binDur * sc.sr;
     const size_t nBins = hist.nBins;
-    for (size_t r = 0; r < buf.size(); ++r)
-        for (int b = 0; b < NB; ++b) {
+    const size_t totalSamples = buf.empty() ? 0 : buf.size() * buf[0][0].size();
+    const TailExecution runExec = totalSamples < 262144 ? TailExecution{nullptr, 1, execution.cancelled} : execution;
+    tailFor(runExec,buf.size()*NB,[&](size_t job){
+            const size_t r=job/NB;const int b=(int)(job%NB);
             const size_t N = buf[r][b].size();
             std::vector<double> sm(nBins, 0.0);
             for (size_t k = 0; k < nBins; ++k) {
@@ -1069,37 +1132,53 @@ void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf)
             std::mt19937_64 rng((uint64_t)seed * 104729ull + r * 131 + b * 7 + 1);
             std::normal_distribution<double> Nd(0, 1);
             for (size_t i = 0; i < N; ++i) {
+                if(i%4096==0)checkTailExecution(runExec);
+                const double z = Nd(rng);
                 double pos = (double)i / binSamples - 0.5;
                 long k0 = (long)std::floor(pos);
                 double f = pos - k0;
                 double v0 = k0 >= 0 && k0 < (long)nBins ? sm[k0] : 0.0;
                 double v1 = k0 + 1 >= 0 && k0 + 1 < (long)nBins ? sm[k0 + 1] : 0.0;
                 double var = v0 * (1 - f) + v1 * f;
-                if (var > 0) buf[r][b][i] += std::sqrt(var) * Nd(rng);
+                if (var > 0) buf[r][b][i] += std::sqrt(var) * z;
             }
-        }
+        });
 }
 
-std::vector<std::vector<float>> combineBands(const BandBuf& buf, double sr) {
+std::vector<std::vector<float>> combineBands(const BandBuf& buf, double sr, const TailExecution& execution) {
     const int taps = 2047, delay = (taps - 1) / 2;
     const size_t R = buf.size(), N = buf[0][0].size();
     auto bands = makeBandFilters(sr, taps);
     size_t FN = nextPow2(N + taps);
+    const TailExecution runExec = FN < 65536 ? TailExecution{nullptr, 1, execution.cancelled} : execution;
     std::vector<std::vector<cd>> Hf(NB, std::vector<cd>(FN));
-    for (int b = 0; b < NB; ++b) {
+    tailFor(runExec,NB,[&](size_t b){
         for (int n = 0; n < taps; ++n) Hf[b][n] = bands[b][n];
         fft(Hf[b], false);
-    }
+    });
     std::vector<std::vector<float>> out(R, std::vector<float>(N));
     for (size_t r = 0; r < R; ++r) {
-        std::vector<cd> acc(FN, cd(0)), tmp(FN);
-        for (int b = 0; b < NB; ++b) {
-            std::fill(tmp.begin(), tmp.end(), cd(0));
-            for (size_t i = 0; i < N; ++i) tmp[i] = buf[r][b][i];
-            fft(tmp, false);
-            for (size_t i = 0; i < FN; ++i) acc[i] += tmp[i] * Hf[b][i];
+        // FFTs are independent. Merge bands in the ORIGINAL b/i order;
+        // partial histogram or band sums would change the legacy low bits.
+        const size_t budget=128u*1024u*1024u;
+        const unsigned width=(unsigned)std::max<size_t>(1,std::min<size_t>(NB,
+            std::min<size_t>(runExec.workers,budget/std::max<size_t>(1,FN*sizeof(cd)))));
+        std::vector<cd> acc(FN,cd(0));
+        std::vector<std::vector<cd>> tmp(width,std::vector<cd>(FN));
+        for(int first=0;first<NB;first+=(int)width){
+            const size_t count=std::min<size_t>(width,NB-first);
+            tailFor(runExec,count,[&](size_t j){
+                auto& v=tmp[j];std::fill(v.begin(),v.end(),cd(0));
+                for(size_t i=0;i<N;++i)v[i]=buf[r][first+j][i];
+                fft(v,false);
+            });
+            for(size_t j=0;j<count;++j){const size_t b=first+j;
+                for(size_t i=0;i<FN;++i)acc[i]+=tmp[j][i]*Hf[b][i];
+            }
+            checkTailExecution(runExec);
         }
         fft(acc, true);
+        checkTailExecution(execution);
         for (size_t i = 0; i + delay < FN && i < N; ++i) out[r][i] = (float)acc[i + delay].real();
     }
     return out;

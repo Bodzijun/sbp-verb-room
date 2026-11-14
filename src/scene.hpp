@@ -630,9 +630,9 @@ inline void compactMaterials(Scene& s) {
 }
 
 // Text form of a scene that parseScene() reads back (every referenced material is written once; names are tokens).
-inline std::string serializeScene(const Scene& s) {
+inline std::string serializeScene(const Scene& s,int significantDigits=6) {
     std::ostringstream o;
-    o.precision(6);
+    o.precision(significantDigits);
     auto tok = [](std::string n) {
         for (char& c : n) if (c == ' ' || c == '\t' || c == '#') c = '_';
         return n.empty() ? std::string("mat") : n;

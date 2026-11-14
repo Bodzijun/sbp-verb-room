@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <iomanip>
+#include <limits>
+#include <locale>
 
 #include "EditorSession.h"
 #include "InputOrder.h"
@@ -86,6 +89,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
     add("duck","Duck amount",0,24,0,"dB");
     add("duckRelease","Duck release",50,2000,300,"ms");
     add("makeup", "Makeup", 0.f, 36.f, 0.f, "dB");
+    for(int o=0;o<=kMaxSources;++o)
+        p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{VerbProcessor::pathParamId(o),1},
+            (o==kListener?juce::String("Listener"):"Source "+juce::String(o+1))+" Path position",juce::NormalisableRange<float>(0.f,1.f),0.f));
     return {p.begin(), p.end()};
 }
 
@@ -99,6 +105,7 @@ VerbProcessor::VerbProcessor()
       apvts(*this, nullptr, "VerbState", makeLayout()) {
     for (int o = 0; o <= verbp::kMaxSources; ++o)
         for (int k = 0; k < (o == verbp::kListener ? 4 : 5); ++k) pv[o][k] = apvts.getRawParameterValue(verbp::paramId(o, k));
+    for(int o=0;o<=verbp::kMaxSources;++o) pathParams[o]=apvts.getRawParameterValue(pathParamId(o));
     sizeParam=apvts.getRawParameterValue("size");predelayParam=apvts.getRawParameterValue("predelay");
     widthParam=apvts.getRawParameterValue("stereoWidth");freezeParam=apvts.getRawParameterValue("freeze");
     duckParam=apvts.getRawParameterValue("duck");duckReleaseParam=apvts.getRawParameterValue("duckRelease");
@@ -247,6 +254,14 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     }
     for (int k = 0; k < 4; ++k) cur[verbp::kListener][k] = pv[verbp::kListener][k]->load(std::memory_order_relaxed);
     cur[verbp::kListener][2] = std::min(std::max(cur[verbp::kListener][2], 0.0), zTop);
+    for(int o=0;o<=verbp::kMaxSources;++o) {
+        const auto& path=pathMailboxes[(size_t)o].consume();
+        if(!path.enabled || (o>=NS && o!=verbp::kListener))continue;
+        double yaw=0;const auto q=path.evaluate(pathParams[o]->load(std::memory_order_relaxed),&yaw);
+        for(int k=0;k<3;++k)cur[o][k]=q[(size_t)k];
+        cur[o][2]=std::clamp(cur[o][2],0.0,zTop);
+        if(path.orient)cur[o][3]=std::remainder(cur[o][3]+yaw,360.0);
+    }
     const uint64_t ser = loadSerial.load();
     const bool newEngine = (ser != serialSeen);
     const double appliedSize=engineSize.load();
@@ -591,6 +606,17 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
         out.setProperty("micPattern", outCfg.micPattern, nullptr);
         st.appendChild(out, nullptr);
     }
+    st.removeChild(st.getChildWithName("MovementPaths"),nullptr);
+    juce::ValueTree paths("MovementPaths");
+    for(int o=0;o<=verbp::kMaxSources;++o) {
+        const auto path=getMovementPath(o);if(path.points.empty())continue;
+        juce::ValueTree v("Path");v.setProperty("object",o,nullptr);
+        v.setProperty("enabled",path.enabled,nullptr);v.setProperty("closed",path.closed,nullptr);
+        v.setProperty("smooth",path.smooth,nullptr);v.setProperty("orient",path.orient,nullptr);v.setProperty("laps",path.laps,nullptr);
+        for(const auto& q:path.points){juce::ValueTree pt("Point");for(int k=0;k<3;++k){std::ostringstream number;number.imbue(std::locale::classic());number<<std::setprecision(std::numeric_limits<double>::max_digits10)<<q[(size_t)k];pt.setProperty(k==0?"x":k==1?"y":"z",juce::String(number.str()),nullptr);}v.appendChild(pt,nullptr);}
+        paths.appendChild(v,nullptr);
+    }
+    if(paths.getNumChildren())st.appendChild(paths,nullptr);
     if (auto xml = st.createXml()) copyXmlToBinary(*xml, dest);
 }
 
@@ -674,6 +700,19 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
     // Invalidate a finishing geometry request BEFORE replacing parameter state.
     // Geometry imports never write mode; only this state migration selects legacy Creative.
     { juce::ScopedLock l(reqLock); hasReq=false; defaultsOwed=false; reqSerial.fetch_add(1); }
+    for(int o=0;o<=verbp::kMaxSources;++o) {
+        verbp::MovementPath path;
+        const auto v=st.getChildWithName("MovementPaths").getChildWithProperty("object",o);
+        if(v.isValid()) {
+            path.enabled=(bool)v.getProperty("enabled",true);path.closed=(bool)v.getProperty("closed",false);
+            path.smooth=(bool)v.getProperty("smooth",false);path.orient=(bool)v.getProperty("orient",false);path.laps=std::clamp((int)v.getProperty("laps",1),1,64);
+            auto coordinate=[](const juce::var& value){if(!value.isString())return (double)value;std::istringstream number(value.toString().toStdString());number.imbue(std::locale::classic());double result=std::numeric_limits<double>::quiet_NaN();number>>result;return result;};
+            for(auto pt:v) { if(path.points.size()>64)break;path.points.push_back({coordinate(pt.getProperty("x")),coordinate(pt.getProperty("y")),coordinate(pt.getProperty("z"))}); }
+        }
+        if(!verbp::validPath(path))path={};
+        setMovementPath(o,path);
+        if(!st.getChildWithProperty("id",pathParamId(o)).isValid()) {juce::ValueTree p("PARAM");p.setProperty("id",pathParamId(o),nullptr);p.setProperty("value",0.f,nullptr);st.appendChild(p,nullptr);}
+    }
     apvts.replaceState(st);
     const juce::String text = st.getProperty("sceneText").toString(), name = st.getProperty("sceneName").toString();
     if (text.isNotEmpty()) loadSceneText(text, name, false);
@@ -691,6 +730,7 @@ void VerbProcessor::loadRoomWithSetup(const juce::String& text, const juce::Stri
 }
 
 void VerbProcessor::loadSceneText(const juce::String& text, const juce::String& name, bool applyDefaults, bool keepPendingDefaults) {
+    if(applyDefaults)for(int o=0;o<=verbp::kMaxSources;++o)setMovementPath(o,{});
     queueScene(text, name, applyDefaults, keepPendingDefaults, false, 0);
 }
 
@@ -1141,8 +1181,49 @@ bool VerbProcessor::isWebTailCurrent() const {
     return d->baseRays == quality.rays && d->adaptive == quality.adaptive;
 }
 
+bool VerbProcessor::startPathBake(int object) {
+    if(getLoadState()!=2||object < -1||object>verbp::kListener)return false;
+    if(object>=0){auto path=getMovementPath(object);if(!path.enabled||path.points.size()<2)return false;}
+    webBakePercent=0;webBakeCancel=false;webBakeStart=object;wake.signal();return true;
+}
+void VerbProcessor::cancelPathBake(){webBakeStart=-2;webBakeCancel=true;wake.signal();}
+juce::var VerbProcessor::pathBakeStatus() const {juce::ScopedLock lock(webBakeLock);return webBakeStatus;}
 void VerbProcessor::publishWebDiagnostics() {
     if (!bundle) { webTailCurrent = false; return; }
+    // E9 control-side descriptions. The PathMailbox remains audio-only SPSC.
+    std::vector<verb::BakedPath> paths;
+    const auto listenerPath=getMovementPath(verbp::kListener);
+    int activeSource=-1,sourcePaths=0;for(size_t j=0;j<bundle->cfg.size();++j){auto p=getMovementPath((int)j);if(p.enabled&&p.points.size()>=2){activeSource=(int)j;++sourcePaths;}}
+    const bool listenerActive=listenerPath.enabled&&listenerPath.points.size()>=2;
+    const double scale=engineSize.load()*.01,top=webMaximumZ();
+    auto appendPath=[&](const verbp::MovementPath& raw,int object,int logical,double ox,double oy,double oz){
+        verbp::CompiledPath compiled;compiled.build(raw);compiled.laps=1;verb::BakedPath p;p.object=object;p.group=logical;p.closed=compiled.closed;
+        const double baseYaw=pv[logical<0?verbp::kListener:logical][3]->load();
+        for(size_t j=0;j<compiled.points.size();++j){double tangent=0;compiled.evaluate(compiled.length()>0?compiled.lengths[j]/compiled.length():0,&tangent);const auto&q=compiled.points[j];double yaw=std::remainder(baseYaw+(compiled.orient?tangent:0),360.),a=yaw*verb::kPi/180.;
+            p.poses.push_back({(q[0]+std::cos(a)*ox-std::sin(a)*oy)*scale,(q[1]+std::sin(a)*ox+std::cos(a)*oy)*scale,std::clamp(std::clamp(q[2],0.,top)+oz,0.,top)*scale,yaw});p.distance.push_back(compiled.lengths[j]*scale);}
+        if(!p.distance.empty()&&p.distance.back()>0)paths.push_back(std::move(p));
+    };
+    if(listenerActive)appendPath(listenerPath,-1,-1,0,0,0);
+    for(size_t logical=0;logical<bundle->cfg.size();++logical){const auto raw=getMovementPath((int)logical);if(!raw.enabled||raw.points.size()<2)continue;for(size_t j=0;j<bundle->points.size();++j)if(bundle->points[j].source==(int)logical)appendPath(raw,(int)j,(int)logical,ptOff[j][0].load(),ptOff[j][1].load(),ptOff[j][2].load());}
+    bundle->engine->setBakedPaths(paths);
+    const int object=listenerActive&&sourcePaths==0?verbp::kListener:!listenerActive&&sourcePaths==1?activeSource:-1;
+    if(webBakeCancel.exchange(false)){webBakeStart=-2;bundle->engine->cancelPathBake();}
+    else {const int requested=webBakeStart.exchange(-2);if(requested!=-2){if(object>=0)webBakeTouched[(size_t)object]=true;bundle->engine->requestPathBake();}}
+    auto bake=bundle->engine->bakeStats();webBakePercent=bake.percent;
+    const char* bakeStateText="notBaked";juce::String reason;
+    switch(bake.state){
+        case verb::Engine::BakeState::Baking:bakeStateText="baking";reason=bake.waitReason==14?"Waiting for poses to settle":bake.waitReason?"Waiting for settled rebuild":(bake.percent<45?"Tracing stations":"Refining path")+juce::String(" · ")+juce::String(bake.done)+"/"+juce::String(bake.total)+" stations";break;
+        case verb::Engine::BakeState::Baked:bakeStateText="baked";break;
+        case verb::Engine::BakeState::Approximate:bakeStateText="approximate";reason=juce::String(bake.discontinuities)+" intervals above tolerance";break;
+        case verb::Engine::BakeState::Outdated:bakeStateText=object>=0&&webBakeTouched[(size_t)object]?"outdated":"notBaked";reason=juce::String(bakeStateText)=="outdated"?"Path changed — bake again":"";break;
+        case verb::Engine::BakeState::Cancelled:bakeStateText="cancelled";reason="Cancelled";break;
+        case verb::Engine::BakeState::Blocked:bakeStateText="blocked";reason=paths.empty()?"Enable a path before baking":"Bake needs one moving object — disable listener or other source paths";break;
+        case verb::Engine::BakeState::Failed:bakeStateText="failed";reason=bake.waitReason==15?"Bake failed - resource or tracing error":"Late energy unavailable - bake could not finish";break;
+        default:break;
+    }
+    juce::String name=object==verbp::kListener?"Listener":object>=0&&object<(int)bundle->cfg.size()?juce::String(bundle->cfg[(size_t)object].name):"Multiple paths";
+    auto* status=new juce::DynamicObject();status->setProperty("state",bakeStateText);status->setProperty("object",object);status->setProperty("name",name);status->setProperty("percent",bake.percent);status->setProperty("reason",reason);status->setProperty("done",bake.done);status->setProperty("total",bake.total);status->setProperty("workers",bake.workers);
+    {juce::ScopedLock lock(webBakeLock);webBakeStatus=juce::var(status);}
     const auto modeled = bundle->engine->sceneSnapshot();
     if (std::atomic_load(&webModeledScene) != modeled) { std::atomic_store(&webModeledScene, modeled); ++webGeometrySerial; }
     std::atomic_store(&webTailDiagnostics, bundle->engine->tailDiagnostics());
@@ -1349,6 +1430,7 @@ void VerbProcessor::run() {
             {
                 juce::SpinLock::ScopedLockType l(engineLock);
                 bundle.swap(nb);
+                webBakeTouched.fill(false);webBakeStart=-2;webBakeCancel=false;webBakePercent=0;
                 engineSize=requestedSize;engineAbsorption=ec.absorptionScale; appliedGeometryEpoch=geometryEpoch.load();
                 updateBounds(sc);
                 ++loadSerial;
@@ -1434,11 +1516,19 @@ verb::Scene VerbProcessor::getEnergyScene(int source, bool webSnapshot) const {
             && conf.oy.size() > (size_t)pm.channel && conf.oz.size() > (size_t)pm.channel) {
             ox = conf.ox[(size_t)pm.channel]; oy = conf.oy[(size_t)pm.channel]; oz = conf.oz[(size_t)pm.channel];
         }
+        double sx = pv[s][0]->load(), sy = pv[s][1]->load(), sz = pv[s][2]->load(), saz = pv[s][3]->load();
+        const auto sp = getMovementPath(s);
+        if (sp.enabled && sp.points.size() >= 2) {
+            verbp::CompiledPath csp; csp.build(sp);
+            double yaw = 0; const auto q = csp.evaluate(pathParams[s]->load(), &yaw);
+            sx = q[0]; sy = q[1]; sz = q[2];
+            if (sp.orient) saz = std::remainder(saz + yaw, 360.0);
+        }
         verb::Transducer t; t.name = conf.name;
-        t.azimuthDeg = pv[s][3]->load(); t.pattern = conf.pattern; t.gainDb = pv[s][4]->load();
+        t.azimuthDeg = saz; t.pattern = conf.pattern; t.gainDb = pv[s][4]->load();
         const double a = t.azimuthDeg * verb::kPi / 180., ca = std::cos(a), sa = std::sin(a);
-        t.pos = {pv[s][0]->load() + ca * ox - sa * oy, pv[s][1]->load() + sa * ox + ca * oy,
-            std::clamp((double)pv[s][2]->load() + oz, 0., top)};
+        t.pos = {sx + ca * ox - sa * oy, sy + sa * ox + ca * oy,
+            std::clamp(sz + oz, 0., top)};
         t.pos=t.pos*sf;
         sc.sources.push_back(t);
     }
@@ -1575,7 +1665,7 @@ bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& e
         if (id.isVoid()) continue;
         auto saved = st.getChildWithProperty("id", id);
         const auto name = id.toString();
-        if (!saved.isValid() && (name == "mode" || name == "absorption" || name == "decayLow" || name == "decayMid" || name == "decayHigh" || name == "size" || name == "predelay" || name == "stereoWidth" || name == "freeze" || name == "duck" || name == "duckRelease" || name == "makeup")) continue;
+        if (!saved.isValid() && (name == "mode" || name == "absorption" || name == "decayLow" || name == "decayMid" || name == "decayHigh" || name == "size" || name == "predelay" || name == "stereoWidth" || name == "freeze" || name == "duck" || name == "duckRelease" || name == "makeup" || name.endsWith("path"))) continue;
         if (!saved.isValid() || !saved.hasProperty("value") || !std::isfinite((double)saved.getProperty("value"))) {
             error = "The preset is missing a valid parameter: " + id.toString();
             return false;
@@ -1723,3 +1813,12 @@ void VerbProcessor::runExport(juce::File dir) {
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new VerbProcessor(); }
+
+verbp::MovementPath VerbProcessor::getMovementPath(int object) const {
+    juce::ScopedLock lock(pathLock);return object>=0 && object<=verbp::kMaxSources?movementPaths[(size_t)object]:verbp::MovementPath{};
+}
+bool VerbProcessor::setMovementPath(int object,const verbp::MovementPath& path) {
+    if(object<0 || object>verbp::kMaxSources || !verbp::validPath(path))return false;
+    {juce::ScopedLock lock(pathLock);movementPaths[(size_t)object]=path;pathMailboxes[(size_t)object].publish(path);}
+    bumpRevision();updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));return true;
+}

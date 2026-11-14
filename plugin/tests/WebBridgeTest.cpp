@@ -67,7 +67,11 @@ int main() {
 #if VERB_WEB_UI_ENABLED
     if (juce::SystemStats::getEnvironmentVariable("VERB_T6_LIVE", {}).isNotEmpty()) return runLivePointerHarness(p);
 #endif
-    EditorBridge bridge(p, [](const juce::String& channel, const juce::var& value) { if (channel == "verb.message") record(value); });
+    juce::var lastParamSnapshot;
+    EditorBridge bridge(p, [&](const juce::String& channel, const juce::var& value) {
+        if (channel == "verb.message") record(value);
+        else if (channel == "verb.parameters") lastParamSnapshot = value;
+    });
     int serial = 0;
     const auto send = [&](const juce::var& payload, const juce::String& base = {}, const juce::String& tx = {}) {
         auto m = obj({{"schemaVersion", 1}, {"sessionId", "test-live"}, {"kind", "command"}, {"requestId", "test-" + juce::String(++serial)}, {"baseRevision", base.isNotEmpty() ? base : decimal(p.getRevision())}, {"payload", payload}});
@@ -79,7 +83,7 @@ int main() {
     for (const auto& m : *hello.getArray()) record(m);
     check(hello.isArray() && prop((*hello.getArray())[0], "kind").toString() == "snapshot", "ready returns full validated snapshot");
     const auto snap = prop((*hello.getArray())[0], "payload");
-    check((int)prop(prop(prop(snap,"parameters"),"descriptors"),"count") == 250, "snapshot contains all 250 live APVTS descriptors (legacy 243 + E1 6)");
+    check((int)prop(prop(prop(snap,"parameters"),"descriptors"),"count") == 283, "snapshot contains all 283 live APVTS descriptors including P1");
     juce::File("out/T4/live-snapshot.json").replaceWithText(juce::JSON::toString((*hello.getArray())[0]));
     auto* mix = p.apvts.getParameter("mix"); HostListener listener; mix->addListener(&listener);
     const auto gesture = bridge.parameterBatch(array({obj({{"type","begin"},{"id","mix"}}),obj({{"type","change"},{"id","mix"},{"value",37.5}}),obj({{"type","end"},{"id","mix"}})}));
@@ -174,6 +178,9 @@ int main() {
     check(p.takeWebInputPeak(0) >= 1.f && p.inputPeak(0) == 0.f, "web meter preserves impulse peak across silent blocks; native meter keeps last block semantics");
     check(stage2AudioAllocations==0, "active bridge processBlock has zero allocations (shared Stage2 guard)");
     check(impulsePeak > 0 && std::isfinite(impulsePeak), "loaded/reloaded room emits finite nonzero impulse");
+    {verbp::MovementPath path;double x=p.apvts.getRawParameterValue("s1x")->load(),y=p.apvts.getRawParameterValue("s1y")->load(),z=p.apvts.getRawParameterValue("s1z")->load();path.points={{{x,y,z}},{{x+.2,y,z}}};check(p.setMovementPath(0,path),"E9b native bridge path accepted");const auto revision=p.getRevision();const auto depth=p.getEditorSession().undoDepth();
+        auto reply=command(R"({"op":"path.bake","object":0})");check(prop((*reply.getArray())[0],"kind").toString()=="ack"&&p.getRevision()==revision&&p.getEditorSession().undoDepth()==depth,"E9b native bake ack changes no revision or undo");
+        reply=command(R"({"op":"path.bakeCancel"})");check(prop((*reply.getArray())[0],"kind").toString()=="ack","E9b native cancel ack");const auto until=juce::Time::getMillisecondCounterHiRes()+3000;while(prop(p.pathBakeStatus(),"state").toString()!="cancelled"&&juce::Time::getMillisecondCounterHiRes()<until){block.clear();stage2Process(p,block,midi);juce::MessageManager::getInstance()->runDispatchLoopUntil(5);}bridge.tick(true,2990);bool found=false;for(const auto&m:captured){auto payload=prop(m,"payload");if(prop(payload,"event").toString()=="status.load"&&prop(prop(payload,"pathBake"),"state").toString()=="cancelled")found=true;}check(found,"E9b runtime bake state/cancel reason delivered in typed status event");p.setMovementPath(0,{});}
     bridge.tick(true,3000); const int beforeHidden=captured.size(); bridge.tick(false,3100); bridge.tick(false,5000); check(captured.size()==beforeHidden,"hidden editor emits no telemetry");
     const auto currentDeadline=juce::Time::getMillisecondCounterHiRes()+5000;
     while(!p.isWebSceneCurrent() && juce::Time::getMillisecondCounterHiRes()<currentDeadline) juce::MessageManager::getInstance()->runDispatchLoopUntil(10);
@@ -197,6 +204,64 @@ int main() {
     for(const auto& m:*restored.getArray()){record(m);if(prop(prop(m,"payload"),"event").toString()=="analysis.result")replayed=true;}
     check(replayed,"hello after hidden page replays the real Energy descriptor");
     command(R"({"op":"analysis.cancel"})"); command(R"({"op":"rt60.cancel"})");
+    // P1b bridge checks: lpath descriptor group, laps in snapshot/command, and bidirectional path automation.
+    {
+        const auto desc = prop(prop(prop(prop((*hello.getArray())[0], "payload"), "parameters"), "descriptors"), "parameters");
+        juce::String lpathGroup, s1pathName, s2pathName, lpathName;
+        if (auto* arr = desc.getArray()) {
+            for (const auto& d : *arr) {
+                const auto id = prop(d, "id").toString();
+                if (id == "lpath") { lpathGroup = prop(d, "group").toString(); lpathName = prop(d, "name").toString(); }
+                if (id == "s1path") s1pathName = prop(d, "name").toString();
+                if (id == "s2path") s2pathName = prop(d, "name").toString();
+            }
+        }
+        check(lpathGroup == "listener", "lpath parameter descriptor belongs to listener group");
+        check(s1pathName.containsIgnoreCase("Source 1 path") && s2pathName.containsIgnoreCase("Source 2 path") && lpathName.containsIgnoreCase("Listener path"), "path parameters expose readable host names");
+        const auto addSrcRes = command(R"({"op":"source.add"})");
+        check(prop((*addSrcRes.getArray())[0], "kind").toString() == "ack", "source.add for Source 2 path test");
+        const auto setPathRes = command(R"({"op":"path.set","object":32,"points":[[1,2,1.5],[5,2,1.5],[5,6,1.5]],"enabled":true,"closed":true,"laps":3})");
+        check(prop((*setPathRes.getArray())[0], "kind").toString() == "ack", "path.set accepts laps");
+        const auto setSrc2Res = command(R"({"op":"path.set","object":1,"points":[[2,2,1.5],[6,2,1.5]],"enabled":true})");
+        check(prop((*setSrc2Res.getArray())[0], "kind").toString() == "ack", "path.set accepts Source 2 path");
+        const auto postPathSnap = bridge.handle(obj({{"schemaVersion",1},{"sessionId","test-live"},{"kind","hello"},{"payload",obj({{"supportedVersions",array({1})},{"ready",true}})}}));
+        const auto pathsProp = prop(prop(prop(prop((*postPathSnap.getArray())[0], "payload"), "document"), "paths")[32], "laps");
+        check((int)pathsProp == 3, "document snapshot exposes listener path laps=3");
+
+        auto* lpathParam = p.apvts.getParameter("lpath");
+        auto* s2pathParam = p.apvts.getParameter("s2path");
+        HostListener pathHost, src2Host;
+        lpathParam->addListener(&pathHost);
+        s2pathParam->addListener(&src2Host);
+        const auto batchRes = bridge.parameterBatch(array({
+            obj({{"type","begin"},{"id","lpath"}}),
+            obj({{"type","change"},{"id","lpath"},{"value",0.25}}),
+            obj({{"type","end"},{"id","lpath"}}),
+            obj({{"type","begin"},{"id","s2path"}}),
+            obj({{"type","change"},{"id","s2path"},{"value",0.625}}),
+            obj({{"type","end"},{"id","s2path"}})
+        }));
+        lpathParam->removeListener(&pathHost);
+        s2pathParam->removeListener(&src2Host);
+        check((bool)prop(batchRes, "ok"), "UI parameterBatch updates lpath and s2path");
+        check(pathHost.begins == 1 && pathHost.changes == 1 && pathHost.ends == 1 && std::abs(lpathParam->getValue() - 0.25f) < 1e-4f, "UI lpath gesture notifies host automation");
+        check(src2Host.begins == 1 && src2Host.changes == 1 && src2Host.ends == 1 && std::abs(s2pathParam->getValue() - 0.625f) < 1e-4f, "UI s2path gesture notifies host automation");
+
+        lastParamSnapshot = juce::var();
+        lpathParam->setValueNotifyingHost(0.5f / 3.0f);
+        s2pathParam->setValueNotifyingHost(0.375f);
+        bridge.tick(true, juce::Time::getMillisecondCounterHiRes());
+        const double emittedLpath = (double)prop(prop(lastParamSnapshot, "values"), "lpath");
+        const double emittedS2path = (double)prop(prop(lastParamSnapshot, "values"), "s2path");
+        check(lastParamSnapshot.isObject() && std::abs(emittedLpath - 0.5 / 3.0) < 1e-4 && std::abs(emittedS2path - 0.375) < 1e-4, "host lpath and s2path automation emit verb.parameters to UI");
+        lpathParam->setValueNotifyingHost(0.f);
+        s2pathParam->setValueNotifyingHost(0.f);
+        bridge.tick(true, juce::Time::getMillisecondCounterHiRes() + 40);
+        const auto clrRes = command(R"({"op":"path.clear","object":32})");
+        const auto clrSrc2Res = command(R"({"op":"path.clear","object":1})");
+        const auto rmSrc2Res = command(R"({"op":"source.remove","index":1})");
+        check(prop((*clrRes.getArray())[0], "kind").toString() == "ack" && prop((*clrSrc2Res.getArray())[0], "kind").toString() == "ack" && prop((*rmSrc2Res.getArray())[0], "kind").toString() == "ack", "path.clear cleans up listener and source 2 test paths");
+    }
     juce::File("out/T4/bridge-messages.json").replaceWithText(juce::JSON::toString(captured));
     std::printf("web_bridge: %d pass, %d fail, %d validated envelopes; %.3f s; snapshot %zu bytes\n",passes,fails,checked,(juce::Time::getMillisecondCounterHiRes()-started)/1000.,juce::JSON::toString((*hello.getArray())[0],true).getNumBytesAsUTF8());
 #if VERB_WEB_UI_ENABLED

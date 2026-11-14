@@ -1,3 +1,4 @@
+#include "bake_pool.hpp"
 #include "BoundedDiffraction.h"
 #include "EditorBridge.h"
 #include "WebContractDefaults.h"
@@ -52,7 +53,9 @@ juce::var EditorBridge::document() const {
     double home[4]; const auto scene = proc.getDisplayScene(home); juce::Array<juce::var> sources;
     for (const auto& s : proc.getSources()) sources.add(sourceJson(s));
     const auto output = proc.getOutputCfg(); const auto tail = proc.getTailSettings(); const auto layers = proc.getLayerModes();
-    return obj({{"sceneName", proc.getSceneName()}, {"scene", sceneJson(scene, home)}, {"sources", sources}, {"output", obj({{"layout", output.layout}, {"radiusM", output.radius}, {"micPattern", output.micPattern}})},
+    juce::Array<juce::var> paths;
+    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);juce::Array<juce::var> pts;for(auto& q:p.points)pts.add(array({q[0],q[1],q[2]}));paths.add(obj({{"points",pts},{"enabled",p.enabled},{"closed",p.closed},{"smooth",p.smooth},{"orient",p.orient},{"laps",p.laps}}));}
+    return obj({{"paths",paths},{"sceneName", proc.getSceneName()}, {"scene", sceneJson(scene, home)}, {"sources", sources}, {"output", obj({{"layout", output.layout}, {"radiusM", output.radius}, {"micPattern", output.micPattern}})},
         {"tail", obj({{"baseRays", tail.rays}, {"adaptive", tail.adaptive}})}, {"editorFlags", obj({{"navLocked", proc.navigationLocked()}, {"outlinerVisible", proc.outlinerVisible()}, {"mixerCompact", proc.mixerCompactEnabled()}, {"inputMeters", proc.inputMetersEnabled()}, {"keepRouting", proc.keepRoutingEnabled()},
         {"layerModes", obj({{"walls", layers[0]}, {"floors", layers[1]}, {"ceilings", layers[2]}, {"plates", layers[3]}})}})}});
 }
@@ -280,7 +283,7 @@ void EditorBridge::tick(bool isVisible, double now) {
     if (!pending) rebuildPendingSince = -1;
     else if (rebuildPendingSince < 0) rebuildPendingSince = now;
     if (emit && (resumed || previousTailCurrent != tailCurrent)) emit("verb.parameters", parameters.snapshot(tailCurrent));
-    if (wants("status")) emitEvent(obj({{"event", "status.load"}, {"state", proc.getLoadState()}, {"status", proc.getStatus()}, {"sceneSerial", decimal(proc.getSceneSerial())}, {"loadSerial", decimal(proc.getLoadSerial())}, {"tailCurrent", tailCurrent}, {"rebuilding", pending && now - rebuildPendingSince >= 150}, {"cpu", cachedCpu}}));
+    if (wants("status")) emitEvent(obj({{"event", "status.load"}, {"state", proc.getLoadState()}, {"status", proc.getStatus()}, {"sceneSerial", decimal(proc.getSceneSerial())}, {"loadSerial", decimal(proc.getLoadSerial())}, {"tailCurrent", tailCurrent}, {"rebuilding", pending && now - rebuildPendingSince >= 150}, {"pathBakePercent",proc.pathBakePercent()}, {"pathBake",proc.pathBakeStatus()}, {"cpu", cachedCpu}}));
     if (now - lastSlow >= 1000) {
         lastSlow = now;
         // Immutable scene-worker publications; neither meter nor curve polling takes engineLock.
@@ -330,6 +333,7 @@ void EditorBridge::startAnalysis(const juce::var& p) {
     analysisCancel = false; analysisProgress = 0; analysisRunning = true;
     { std::lock_guard<std::mutex> lock(analysisMutex); analysisPending.reset(); analysisError.clear(); }
     analysisWorker = std::thread([this, scene = std::move(scene), options] {
+        verb::BakePool::lowerCurrentThread(true);
         std::shared_ptr<const verb::EnergyMap> result; juce::String why;
         try { result = std::make_shared<const verb::EnergyMap>(verb::analyzeEnergyMap(scene, options, [this] { return analysisCancel.load(); }, [this](double p) { analysisProgress = p; })); }
         catch (const std::exception& e) { why = e.what(); }
@@ -398,7 +402,9 @@ juce::var EditorBridge::reflectionPaths(const juce::var& request) {
         const verb::Geo geo(scene);
         const double size=proc.webAppliedSize()*.01;
         const double top=scene.ceilMat<0?30.*size:scene.height,c=verb::speedOfSound(scene.tempC);
-        const verb::Vec3 receiver=verb::Vec3{proc.apvts.getRawParameterValue("lx")->load(),proc.apvts.getRawParameterValue("ly")->load(),std::clamp((double)proc.apvts.getRawParameterValue("lz")->load(),0.,top/size)}*size;
+        verb::Vec3 receiver=verb::Vec3{proc.apvts.getRawParameterValue("lx")->load(),proc.apvts.getRawParameterValue("ly")->load(),std::clamp((double)proc.apvts.getRawParameterValue("lz")->load(),0.,top/size)}*size;
+        const auto lp=proc.getMovementPath(verbp::kListener);
+        if(lp.enabled && lp.points.size()>=2){verbp::CompiledPath clp;clp.build(lp);const auto q=clp.evaluate(proc.apvts.getRawParameterValue(VerbProcessor::pathParamId(verbp::kListener))->load());receiver=verb::Vec3{q[0],q[1],std::clamp(q[2],0.,top/size)}*size;}
         const double earlyDb=proc.apvts.getRawParameterValue("mode")->load()>=.5f?proc.apvts.getRawParameterValue("early")->load():0.;
         const auto configs=proc.getSources();std::vector<int> channels;
         for(const auto& pm:verbp::buildPoints(configs))if(pm.source==source)channels.push_back(pm.channel);

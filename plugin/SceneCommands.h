@@ -25,6 +25,7 @@
 namespace verbp {
 
 struct Model {
+    std::array<MovementPath,kMaxSources+1> paths;
     verb::Scene scene;
     std::vector<SourceCfg> sources;
     OutputCfg output;
@@ -38,7 +39,7 @@ struct Fail {
 };
 
 // ---- keyed changes ----
-enum class KeyType { Surface, SurfaceList, Height, Air, Clutter, Rough, Diffraction, Source, SourceList, Output, Tail, Param };
+enum class KeyType { Surface, SurfaceList, Height, Air, Clutter, Rough, Diffraction, Source, SourceList, Output, Tail, Param, Path };
 struct Key {
     KeyType type = KeyType::Height;
     int kind = 0;   // Surface / SurfaceList: 1 wall, 2 floor, 3 ceiling, 4 floor zone, 5 ceiling zone
@@ -68,7 +69,7 @@ struct AirSnap { double tempC = 20, humidity = 50; };
 struct RoughSnap { double roughness = 0; int seed = 1; };
 struct DiffSnap { bool on = true; };
 using Snap = std::variant<SurfaceSnap, std::vector<SurfaceSnap>, HeightSnap, AirSnap, verb::ClutterCfg, RoughSnap, DiffSnap, SourceCfg,
-                          std::vector<SourceCfg>, OutputCfg, TailSettings, float>;
+                          std::vector<SourceCfg>, OutputCfg, TailSettings, float, MovementPath>;
 
 struct KeyChange {
     Key key;

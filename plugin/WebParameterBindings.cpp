@@ -26,7 +26,7 @@ juce::var WebParameterBindings::descriptors() const {
             {"modeClass", id == "mode" ? "modeSelector" : creativeOnly(id) ? "creativeOnly" : "always"}});
         auto* o = d.getDynamicObject();
         const bool source = id.startsWithChar('s') && id.substring(1, 2).containsOnly("123456789");
-        const bool listener = id == "lx" || id == "ly" || id == "lz" || id == "laz";
+        const bool listener = id == "lx" || id == "ly" || id == "lz" || id == "laz" || id == "lpath";
         const char* group = source ? (id.endsWith("mute") ? "sourceMute" : id.endsWith("solo") ? "sourceSolo" : id.endsWith("g") ? "sourceGain" : "sourcePosition")
             : listener ? "listener" : id == "mode" ? "mode" : (id == "gain" || id == "makeup") ? "output" : id == "absorption" ? "absorption" : id.startsWith("solo") ? "solo" : creativeOnly(id) ? "creative" : "mix";
         o->setProperty("group", group);
@@ -39,7 +39,7 @@ juce::var WebParameterBindings::descriptors() const {
             o->setProperty("type", "float"); o->setProperty("relay", "slider"); o->setProperty("min", r.start); o->setProperty("max", r.end); o->setProperty("step", r.interval); o->setProperty("decimals", 3);
             const bool centre = id == "absorption" || id.startsWith("decay") || id=="predelay" || id=="stereoWidth" || id=="freeze" || id=="duck" || id=="duckRelease";
             o->setProperty("skew", centre ? obj({{"type", "centre"}, {"centre", 1.0}}) : obj({{"type", "none"}}));
-            o->setProperty("unit", source || listener ? (id.endsWith("az") ? "deg" : id.endsWith("g") ? "dB" : "m") : id == "gain" || id == "makeup" || id == "early" || id == "tail" || id=="duck" ? "dB" : id=="predelay" || id=="duckRelease"?"ms":id == "mix" || id=="size" || id=="stereoWidth" ? "%" : "");
+            o->setProperty("unit", id.endsWith("path") ? "" : source || listener ? (id.endsWith("az") ? "deg" : id.endsWith("g") ? "dB" : "m") : id == "gain" || id == "makeup" || id == "early" || id == "tail" || id=="duck" ? "dB" : id=="predelay" || id=="duckRelease"?"ms":id == "mix" || id=="size" || id=="stereoWidth" ? "%" : "");
         }
         list.add(d);
     }
