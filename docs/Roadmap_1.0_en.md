@@ -50,15 +50,22 @@ need testers.
 
 ## Where we are
 
-**Released: 0.1.16** (classic interface) — smoother late tail, Physical / Creative modes, absorption scale and an
-RT60 target assistant, editor improvements. Windows, macOS (universal) and Linux packages.
+**Latest release: 0.1.16** (classic interface). **Version 0.2.0 is ready and being finished** for Windows and macOS
+(universal); downloads will be posted on the project's Ko-fi page. It is a large step from 0.1.16:
 
-**Built and in testing for the next version:**
-
-- A new interface: resizable, with a 3D room editor, material inspector, dimensions and scale, CPU load meter.
-- New creative controls: Size, Pre-delay, Stereo width, Ducking, and a Freeze that really holds the tail.
-- Engine fixes: a sealed room is now really sealed (no sound leaking through closed corners or through walls into the
-  tail), correct tail level near walls, bounded real-time cost of the diffraction search.
+- **A new interface:** resizable, with a 3D room editor, material inspector, dimensions and scale, outliner, decay
+  curves, energy map and a CPU load meter. The classic interface stays available. On macOS this is its first release
+  and it needs testers.
+- **Movement paths:** draw a path for a source or the listener and automate one position parameter. Path timing
+  (start / end, per-point time, easing), laps and closed paths, groups that move together, orientation (along the path
+  or looking at another object, also between moving objects), a timeline panel, and **baked tails** along a path that
+  are computed in the background.
+- **Ambisonics:** AmbiX output in 1st, 2nd and 3rd order.
+- **Source directivity** from user-supplied data files, profile folders and aiming.
+- **New creative controls:** Size, Pre-delay, Stereo width, Ducking, and a Freeze that really holds the tail.
+- **Engine fixes:** a sealed room is now really sealed (no sound leaking through closed corners or through walls into
+  the tail), correct tail level near walls, bounded real-time cost of the diffraction search, a smoother late tail.
+- **Position automation through silence:** an optional "keep processing" setting.
 
 ![The new interface (in testing): energy map of a symphony hall, decay curves per band, room size](images/new_ui_main_energy.png)
 
@@ -76,16 +83,16 @@ RT60 target assistant, editor improvements. Windows, macOS (universal) and Linux
 
 We would like to call the next major version 1.0 when the following is in place. Order may change.
 
-**1. Movement that sounds right (in progress)**
+**1. Movement that sounds right (largely done in 0.2.0)**
 - Smooth changes while the listener or a source moves; one accurate update when it stops.
 - Soft shadow edges for reflected sound and for horizontal edges (a bonnet, a table), so sound does not appear in steps
   when you come round a corner.
 - Smooth hand-over of reflections where surfaces meet (a bonnet joined to the body, wall corners).
 - Repeatable offline render: two bounces of the same project are identical.
 - Movement paths: draw a path for a source or the listener in the viewport and automate one "position on path"
-  parameter instead of X/Y/Z separately (requested by a tester).
-- Later: pre-computed ("baked") tails along a path — possible exactly because the plug-in then knows the trajectory
-  in advance.
+  parameter instead of X/Y/Z separately (requested by a tester). **Done in 0.2.0**, together with pre-computed
+  ("baked") tails along a path, timing, groups and orientation.
+- Still to do: orientation of objects at sharp path corners, and more tests with other hosts.
 
 **2. Lower CPU for big scenes**
 - Spreading the convolution work evenly across audio blocks.
@@ -96,8 +103,9 @@ We would like to call the next major version 1.0 when the following is in place.
 - Automation slots for materials: assign a slot to a material or a group of surfaces and automate it.
 
 **4. More realism**
-- Instrument and loudspeaker directivity from user-supplied data files.
-- Directional tail, binaural and Ambisonics output.
+- Instrument and loudspeaker directivity from user-supplied data files (**done in 0.2.0**).
+- Ambisonics output: **AmbiX up to 3rd order is in 0.2.0**; a directional tail is experimental; binaural output is still
+  to come.
 - Low-frequency room modes.
 
 **5. Easier room drawing**
@@ -107,7 +115,7 @@ We would like to call the next major version 1.0 when the following is in place.
 - After 1.0: full 3D meshes with sloped surfaces.
 
 **6. Product basics**
-- The new interface on macOS and Linux; stable automated tests on all three platforms.
+- The new interface on macOS (first release in 0.2.0) and Linux; stable automated tests on all three platforms.
 - Installers, signing, a manual, more ready-made rooms.
 - Other plug-in formats (CLAP, AU) if there is demand.
 
