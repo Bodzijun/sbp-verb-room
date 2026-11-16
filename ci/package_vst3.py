@@ -43,16 +43,28 @@ def main():
     shutil.copy2(source / "LICENSE", stage / "LICENSE")
     shutil.copytree(source / "docs", stage / "docs")
     shutil.copytree(source / "presets", stage / "Presets")
-    info = {"version": version, "platform": args.platform, "commit": commit,
-            "avx2_required": False, "apple_notarized": False if expected_os == "Darwin" else None}
+    web_on = re.search(r"^VERB_WEB_UI:BOOL=(.+)$", cache, re.MULTILINE)
+    web_on = bool(web_on) and web_on.group(1).strip().upper() in ("ON", "TRUE", "1", "YES")
+    # Web UI backend compiled in: system WKWebView on macOS; Linux is built without a web UI (classic interface only).
+    web_backend = "WKWebView" if (expected_os == "Darwin" and web_on) else "none"
+    info = {"version": version, "platform": args.platform, "commit": commit, "web": web_backend,
+            "avx2_required": False, "apple_notarized": False if expected_os == "Darwin" else None,
+            "apple_signing": "ad-hoc" if expected_os == "Darwin" else None}
     (stage / "BUILDINFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
     if expected_os == "Darwin":
         instructions = (
             "macOS Universal (arm64 + x86_64), deployment target macOS 11.\n"
             "Close your DAW and copy the whole Verb Room.vst3 bundle to\n"
             "~/Library/Audio/Plug-Ins/VST3/ or /Library/Audio/Plug-Ins/VST3/.\n"
-            "This test build is ad-hoc signed, not Developer ID signed or Apple-notarized.\n"
-            "macOS may block a downloaded plug-in. This package is for compatibility testing.\n"
+            "This build is ad-hoc signed, not Developer ID signed or Apple-notarized.\n"
+            "macOS may block a downloaded plug-in. To allow it, right-click the .vst3 in Finder and choose Open,\n"
+            "or run in Terminal (adjust the path):\n"
+            "  xattr -dr com.apple.quarantine \"/Library/Audio/Plug-Ins/VST3/Verb Room.vst3\"\n"
+            + ("The new web interface (system WKWebView) opens by default.\n" if web_backend != "none" else "The classic interface is used.\n") +
+            "To use the classic interface: open the Theme menu and press 'Classic UI' (remembered),\n"
+            "or start the host with the environment variable VERB_UI=classic.\n"
+            "Preference file: ~/Library/SBP/VerbRoom/editor.ini (delete it to restore the default).\n"
+            "The web interface on macOS is a first release; please report macOS version, Mac model and host.\n"
         )
         archive = output / f"{name}.zip"
     else:

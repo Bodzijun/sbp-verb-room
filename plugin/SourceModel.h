@@ -5,9 +5,14 @@
 // voice that sits on a stereo track arrives identically in every channel; played from two places it would add
 // coherently and cause position-dependent phase holes).
 #pragma once
+#include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "directivity.hpp"
 
 namespace verbp {
 
@@ -44,6 +49,14 @@ struct SourceCfg {
     bool sum = false;     // multichannel only: average all channels into one point at the centre
     double spread = 0.5;  // radius of the circle the channels are placed on, metres
     double pattern = 0.0;  // directivity: 0 omni, 0.5 cardioid, 1 figure-8 (faces the source azimuth)
+    std::string instrument = "none";       // "none", built-in directivity id, or "custom"
+    double instrumentAmount = 1.0;         // 0..1 power-preserving blend with omnidirectional
+    double aimAzDeg = 0.0, aimElDeg = 0.0, aimRollDeg = 0.0;  // per-source profile orientation correction
+    std::string customDirectivityData;     // size-capped (<= 64 KB) embedded .verbdir text for portable project state
+    std::string customDirectivityName;     // display name for custom profile
+    std::string customDirectivityPath;     // optional path on disk (for reload / missing-file diagnostics)
+    std::string directivityWarning;        // non-empty when custom file is missing/damaged or id is unavailable
+    std::shared_ptr<const verb::DirectivityProfile> directivity;
     // Free points: every channel is an independent point; its offset from the source centre (in the source's own
     // frame: x forward along the azimuth, y to the left, z up) is stored here and can be dragged on the map.
     bool freePoints = false;
@@ -55,6 +68,82 @@ struct SourceCfg {
     }
     int lfeChannel() const { return sourceFormats()[(size_t)format].lfe; }
 };
+
+inline void resolveSourceDirectivity(SourceCfg& c) {
+    c.instrumentAmount = std::isfinite(c.instrumentAmount) ? std::min(std::max(c.instrumentAmount, 0.0), 1.0) : 1.0;
+    c.aimAzDeg = std::isfinite(c.aimAzDeg) ? std::min(std::max(c.aimAzDeg, -180.0), 180.0) : 0.0;
+    c.aimElDeg = std::isfinite(c.aimElDeg) ? std::min(std::max(c.aimElDeg, -90.0), 90.0) : 0.0;
+    c.aimRollDeg = std::isfinite(c.aimRollDeg) ? std::min(std::max(c.aimRollDeg, -180.0), 180.0) : 0.0;
+    c.directivityWarning.clear();
+    if (c.instrument.empty() || c.instrument == "none") {
+        c.instrument = "none";
+        c.aimAzDeg = 0.0;
+        c.aimElDeg = 0.0;
+        c.aimRollDeg = 0.0;
+        c.directivity.reset();
+        return;
+    }
+    if (c.instrument == "custom") {
+        if (!c.customDirectivityData.empty()) {
+            if (c.customDirectivityData.size() > verb::kMaxVerbdirBytes) {
+                c.directivity.reset();
+                c.directivityWarning = "Custom directivity exceeds 64 KB size cap; degraded to omnidirectional.";
+                return;
+            }
+            std::string err;
+            verb::DirectivityProfile prof;
+            if (!verb::parseVerbdir(c.customDirectivityData, prof, err)) {
+                c.directivity.reset();
+                c.directivityWarning = "Custom directivity invalid (" + err + "); degraded to omnidirectional.";
+                return;
+            }
+            if (!c.customDirectivityName.empty()) prof.name = c.customDirectivityName;
+            c.directivity = std::make_shared<const verb::DirectivityProfile>(std::move(prof));
+            return;
+        }
+        if (!c.customDirectivityPath.empty()) {
+            std::ifstream in(c.customDirectivityPath, std::ios::binary);
+            if (!in) {
+                c.directivity.reset();
+                c.directivityWarning = "Missing user directivity file '" + c.customDirectivityPath + "'; degraded to omnidirectional.";
+                return;
+            }
+            std::string text;
+            char buf[4096];
+            while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
+                text.append(buf, (size_t)in.gcount());
+                if (text.size() > verb::kMaxVerbdirBytes) {
+                    c.directivity.reset();
+                    c.directivityWarning = "Directivity file exceeds 64 KB size cap; degraded to omnidirectional.";
+                    return;
+                }
+            }
+            std::string err;
+            verb::DirectivityProfile prof;
+            if (!verb::parseVerbdir(text, prof, err)) {
+                c.directivity.reset();
+                c.directivityWarning = "Invalid directivity file (" + err + "); degraded to omnidirectional.";
+                return;
+            }
+            c.customDirectivityData = std::move(text);
+            if (!c.customDirectivityName.empty()) prof.name = c.customDirectivityName;
+            c.directivity = std::make_shared<const verb::DirectivityProfile>(std::move(prof));
+            return;
+        }
+        c.directivity.reset();
+        c.directivityWarning = "Missing custom directivity data; degraded to omnidirectional.";
+        return;
+    }
+    c.directivity = verb::findBuiltinDirectivity(c.instrument);
+    if (!c.directivity) {
+        c.directivityWarning = "Directivity profile '" + c.instrument + "' unavailable; degraded to omnidirectional.";
+    }
+}
+
+// When a source's directivity profile is missing or damaged, degrade to omnidirectional (pattern = 0.0).
+inline double effectiveAnalyticPattern(const SourceCfg& c) {
+    return !c.directivityWarning.empty() ? 0.0 : c.pattern;
+}
 
 // Offset of one channel on the format's circle (source frame).
 inline void layoutOffset(const SourceCfg& c, int ch, float& x, float& y) {

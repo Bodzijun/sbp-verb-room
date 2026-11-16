@@ -1,0 +1,74 @@
+:root{
+color-scheme:dark;
+--accent:#21b99b;
+--bg:#101518;
+--panel:#161d21;
+--panel2:#1b2429;
+--border:#344149;
+--text:#d4e5ec;
+--muted:#8dabb9;
+--warning:#e3af72;
+--selection:#e2b575;
+--viewport:#100e0b;
+--font:11px 'Segoe UI',-apple-system,BlinkMacSystemFont,Arial,sans-serif}
+*{
+box-sizing:border-box}
+html,body{
+margin:0;
+width:100%;
+height:100%;
+background:var(--bg);
+color:var(--text);
+font:var(--font)}
+body{
+min-width:900px;
+min-height:600px}
+button,input,select{
+font:inherit}
+button,summary,input,select{
+color:var(--text)}
+button,input,select{
+border:1px solid var(--border);
+border-radius:3px;
+background:#202a30}
+button{
+cursor:pointer}
+button:hover{
+border-color:var(--accent)}
+button:disabled{
+cursor:default;
+opacity:.45}
+button:focus-visible,input:focus-visible,select:focus-visible,canvas:focus-visible,[tabindex]:focus-visible,summary:focus-visible{
+outline:1px solid var(--accent);
+outline-offset:-1px}
+.panel{
+background:linear-gradient(130deg,#192126,#151b1f);
+border:1px solid var(--border);
+border-radius:3px}
+h3{
+margin:0 0 8px;
+font-weight:500;
+font-size:11px;
+letter-spacing:.08em;
+color:#b5cfda}
+p{
+margin:5px 0}
+.note{
+font-size:11px;
+color:var(--muted);
+line-height:1.5}
+.warning{
+color:var(--warning)}
+.scroll{
+overflow:auto;
+scrollbar-width:thin;
+scrollbar-color:#4c6470 transparent}
+.scroll::-webkit-scrollbar{
+width:6px;
+height:6px}
+.scroll::-webkit-scrollbar-thumb{
+background:#4c6470;
+border-radius:5px}
+small{
+font-size:11px;
+color:var(--muted)}

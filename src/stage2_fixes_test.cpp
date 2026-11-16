@@ -2,6 +2,7 @@
 #include "geometry.hpp"
 #include "../plugin/TestRoomSelection.h"
 #include "../plugin/RoomLibrary.h"
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -114,8 +115,8 @@ static void lengthAndCancellation() {
         const double cached=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
         check(cached<.5,"repeated scene/absorption length probe is cached (<0.5 s, excluding unrelated IR synthesis)");
         auto edited=s;edited.humidity+=.314159;
-        const auto begin=std::chrono::steady_clock::now();bool cancelled=false;
-        try {e.setScene(edited,.973,[&]{return std::chrono::steady_clock::now()-begin>std::chrono::milliseconds(30);});}
+        const auto begin=std::chrono::steady_clock::now();bool cancelled=false;std::atomic<int> cancelPolls{0};
+        try {e.setScene(edited,.973,[&]{return ++cancelPolls>8||std::chrono::steady_clock::now()-begin>std::chrono::milliseconds(30);});}
         catch(const std::runtime_error&){cancelled=true;}
         const double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
         std::printf("Probe cancellation %.6f s; cached construction %.6f s\n",elapsed,cached);

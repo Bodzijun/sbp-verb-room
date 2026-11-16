@@ -932,6 +932,9 @@ void VerbEditor::refreshOutputs() {
     if (o.layout >= 0 && verb::layoutDefs()[(size_t)std::min((size_t)o.layout, verb::layoutDefs().size() - 1)].channels > trackOut)
         info += "\nThe layout has more channels than the track can carry: only the first " + juce::String(trackOut) + " are rendered.";
     outInfoLabel.setText(info, juce::dontSendNotification);
+    const bool am = verb::isAmbisonicLayout((verb::Layout)proc.effectiveLayout());
+    micBox.setEnabled(!am);
+    radiusRow.slider.setEnabled(!am);
     updatingUI = false;
 }
 
@@ -1690,7 +1693,8 @@ void VerbEditor::paint(juce::Graphics& g) {
             g.drawEllipse(cp.x - rpx, cp.y - rpx, 2 * rpx, 2 * rpx, 1.f);
         }
         auto arr = verb::makeReceiverArray((verb::Layout)proc.effectiveLayout(), {0, 0, 0}, micR, std::max(1, proc.numOutputChannels()));
-        verb::applyMicPattern(arr, (verb::MicPattern)proc.getOutputCfg().micPattern, proc.getOutputCfg().radius);  // human ears: the capsules move to the ears
+        if (!verb::isAmbisonicLayout((verb::Layout)proc.effectiveLayout()))
+            verb::applyMicPattern(arr, (verb::MicPattern)proc.getOutputCfg().micPattern, proc.getOutputCfg().radius);  // human ears: the capsules move to the ears
         for (auto& r : arr) {
             if (r.gainDb < -100) continue;  // LFE placeholder
             const auto p = view.toScreen(lis[0] + r.pos.x * c2 - r.pos.y * s2, lis[1] + r.pos.x * s2 + r.pos.y * c2);

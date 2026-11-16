@@ -376,6 +376,7 @@ static void testEveryCommandApplyUndoRedo(Rig& r) {
         {"source.setPointOffset", R"({"op":"source.setPointOffset","index":0,"channel":1,"offsetM":[0.25,0.5,0.125]})"},
         {"source.remove", R"({"op":"source.remove","index":1})"},
         {"output.set", R"({"op":"output.set","layout":2,"micPattern":7})"},
+        {"output.set (AmbiX 3rd order)", R"({"op":"output.set","layout":11})"},
         {"tail.setQuality", R"({"op":"tail.setQuality","baseRays":12000,"adaptive":true})"},
         {"listener.set", R"({"op":"listener.set","xM":2,"yM":2.5,"yawDeg":45})"},
         {"surface.delete", R"({"op":"surface.delete","refs":[{"kind":"wall","index":4}]})"},
@@ -590,6 +591,7 @@ static void testRejections(Rig& r) {
     expectErr("invalid: removing a source that does not exist", R"({"op":"source.remove","index":9})", "invalid");
     expectErr("invalid: only a ceiling can be opened (ref = floor)", R"({"op":"room.setOpening","ref":{"kind":"floor","index":0},"open":true})", "invalid");
     expectErr("invalid: no fields", R"({"op":"room.setAir"})", "invalid");
+    expectErr("invalid: output layout after the last format", R"({"op":"output.set","layout":12})", "invalid");
     expectErr("invalid: baseRevision missing in a mutation", R"({"op":"room.setHeight","heightM":3})", "invalid", "-");
     expectErr("unsupported: unknown op", R"({"op":"room.explode"})", "unsupported");
     expectErr("unsupported: history.redo (capability false in contract v1)", R"({"op":"history.redo"})", "unsupported");

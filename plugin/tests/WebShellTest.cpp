@@ -154,7 +154,7 @@ static void partA(const juce::File& scratch) {
     s.prefFileOverride = scratch.getChildFile("pref/editor.ini");
     s.prefFileOverride.deleteFile();
     setEnv("VERB_UI", nullptr);
-    check(preferredUi() == UiChoice::native, "no env, no file -> native (the default)");
+    check(preferredUi() == UiChoice::web, "no env, no file -> web (the default since 0.2.0)");
     setPreferredUi(UiChoice::web);
     check(preferredUi() == UiChoice::web && s.prefFileOverride.loadFileAsString().contains("ui=web"), "stored preference ui=web -> web");
     setEnv("VERB_UI", "native");
@@ -177,9 +177,11 @@ static void partB(const juce::File& scratch) {
     s.udfRootOverride = scratch.getChildFile("udf-b");
     setEnv("VERB_UI", nullptr);
     auto p = makeProcessor();
-    {
+    {   // the default is the web editor since 0.2.0; without a usable runtime it falls back to the native editor (no browser is started here)
+        s.forceRuntimeMissing = true;
         EditorPtr e(p->createEditor());
-        check(dynamic_cast<VerbEditor*>(e.get()) != nullptr && asWeb(e) == nullptr, "VERB_UI unset: createEditor() returns the native VerbEditor itself");
+        s.forceRuntimeMissing = false;
+        check(dynamic_cast<VerbEditor*>(e.get()) != nullptr && asWeb(e) == nullptr, "VERB_UI unset, runtime missing: createEditor() falls back to the native VerbEditor itself");
         check(e->getWidth() == 1160 && e->getHeight() == 760, "the native editor keeps its size 1160x760");
     }
     setEnv("VERB_UI", "native");
@@ -788,10 +790,11 @@ static void partE(const juce::File& scratch) {
     // --- a plain classic editor is the host's top-level editor: remember the choice and say so, never touch the window
     {
         setEnv("VERB_UI", nullptr);
+        verbweb::setPreferredUi(verbweb::UiChoice::native);  // since 0.2.0 the default is the web editor; start from a stored classic choice
         auto p = makeProcessor();
         EditorPtr e(p->createEditor());
         auto* v = dynamic_cast<VerbEditor*>(e.get());
-        check(v != nullptr, "no preference -> createEditor() is the classic editor (the default is unchanged)");
+        check(v != nullptr, "stored preference ui=native -> createEditor() is the classic editor");
         if (v != nullptr) {
             show(*e);
             pump(150);

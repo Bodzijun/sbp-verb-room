@@ -3,16 +3,22 @@ set(VERB_PLUGIN_SOURCES PluginProcessor.cpp PluginEditor.cpp EnergyMapView.cpp E
 # ---- Opt-in WebView2 editor shell (task T1, docs/WebView_build_uk.md) -------------------------------------------------
 # VERB_WEB_UI=ON builds the WebView editor code into the VST3 (Windows only). The native editor stays the default; the
 # web editor is chosen at run time (env VERB_UI=web or the stored preference). VERB_WEB_UI=OFF builds exactly as before.
-option(VERB_WEB_UI "Build the opt-in WebView2 editor shell into the plugin (Windows only)" ON)
+option(VERB_WEB_UI "Build the web editor into the plugin (Windows: WebView2, needs the SDK; macOS: system WKWebView)" ON)
 set(VERB_WEBVIEW2_SDK_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2" CACHE PATH
     "Directory that contains the unpacked Microsoft.Web.WebView2.<version> NuGet package")
 set(VERB_WEB_DIR "${CMAKE_SOURCE_DIR}/web-ui" CACHE PATH
     "Directory embedded into the plugin as the web UI (T1: the shell page; later the built web-ui)")
 set(VERB_WEB_UI_ACTIVE OFF)
-if(VERB_WEB_UI AND WIN32)
+set(VERB_WEB_UI_WIN OFF)   # web editor active on Windows (WebView2): the Windows-only test targets depend on it
+if(VERB_WEB_UI AND APPLE)
+  # macOS: JUCE uses the system WKWebView, no SDK and no extra dependency. Linux stays on the classic UI (no WebKitGTK).
+  set(VERB_WEB_UI_ACTIVE ON)
+  message(STATUS "Verb Room: web editor enabled (macOS WKWebView backend)")
+elseif(VERB_WEB_UI AND WIN32)
   file(GLOB VERB_WEBVIEW2_HEADERS "${VERB_WEBVIEW2_SDK_DIR}/*Microsoft.Web.WebView2*/build/native/include/WebView2.h")
   if(VERB_WEBVIEW2_HEADERS)
     set(VERB_WEB_UI_ACTIVE ON)
+    set(VERB_WEB_UI_WIN ON)
     set(JUCE_WEBVIEW2_PACKAGE_LOCATION "${VERB_WEBVIEW2_SDK_DIR}")
     message(STATUS "Verb Room: WebView2 editor shell enabled (SDK in ${VERB_WEBVIEW2_SDK_DIR})")
   else()
@@ -35,12 +41,17 @@ if(VERB_WEB_UI_ACTIVE)
               -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateEmbedded.cmake"
       DEPENDS ${VERB_WEB_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/GenerateEmbedded.cmake"
       COMMENT "Embedding ${VERB_WEB_DIR} into the plugin")
-  set(VERB_WEB_SOURCES VerbWebEditor.cpp WebResources.cpp WebRuntimeProbe.cpp "${VERB_WEB_GENERATED}")
-  set(VERB_WEBVIEW_PLUGIN_ARGS NEEDS_WEBVIEW2 TRUE)
+  set(VERB_WEB_SOURCES VerbWebEditor.cpp WebResources.cpp "${VERB_WEB_GENERATED}")
+  if(WIN32)
+    list(APPEND VERB_WEB_SOURCES WebRuntimeProbe.cpp)   # WebView2 runtime probe: Windows only
+    set(VERB_WEBVIEW_PLUGIN_ARGS NEEDS_WEBVIEW2 TRUE)
+  endif()
 endif()
 # Definitions shared by every target that contains the web editor (JUCE modules must see one consistent setting).
-set(VERB_WEB_DEFINITIONS JUCE_WEB_BROWSER=1 JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1 VERB_WEB_UI_ENABLED=1
-    "VERB_WEB_PLUGIN_VERSION=\"${PROJECT_VERSION}\"")
+set(VERB_WEB_DEFINITIONS JUCE_WEB_BROWSER=1 VERB_WEB_UI_ENABLED=1 "VERB_WEB_PLUGIN_VERSION=\"${PROJECT_VERSION}\"")
+if(WIN32)
+  list(APPEND VERB_WEB_DEFINITIONS JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1)   # no WebView2 macros on Apple
+endif()
 
 juce_add_plugin(VerbPlugin
     COMPANY_NAME "SBP"
@@ -130,8 +141,8 @@ add_test(NAME stage2_processor COMMAND VerbPluginTest)
 set_tests_properties(stage2_processor PROPERTIES ENVIRONMENT "VERB_STAGE2_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
 set_tests_properties(stage2_engine PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
 
-# WebView shell test (T1): resource provider, handshake, fallback, lifecycle. Built only with the web editor.
-if(VERB_WEB_UI_ACTIVE)
+# WebView shell test (T1): resource provider, handshake, fallback, lifecycle. Built only with the Windows web editor.
+if(VERB_WEB_UI_WIN)
   juce_add_console_app(VerbWebShellTest PRODUCT_NAME "VerbWebShellTest" NEEDS_WEBVIEW2 TRUE)
   # Preserve all T1 assertions against the original shell, independently of the production frontend.
   set(VERB_SHELL_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated/ShellEmbeddedFiles.cpp")
@@ -160,9 +171,14 @@ if(VERB_WEB_UI_ACTIVE)
 endif()
 
 # T4 JS-less bridge harness: same JSON entrypoint as the live WebView.
-juce_add_console_app(VerbWebBridgeTest PRODUCT_NAME "VerbWebBridgeTest" ${VERB_WEBVIEW_PLUGIN_ARGS})
-target_sources(VerbWebBridgeTest PRIVATE tests/WebBridgeTest.cpp ${VERB_PLUGIN_SOURCES} ${VERB_WEB_SOURCES})
-if(VERB_WEB_UI_ACTIVE)
+if(VERB_WEB_UI_WIN)
+  juce_add_console_app(VerbWebBridgeTest PRODUCT_NAME "VerbWebBridgeTest" ${VERB_WEBVIEW_PLUGIN_ARGS})
+  target_sources(VerbWebBridgeTest PRIVATE tests/WebBridgeTest.cpp ${VERB_PLUGIN_SOURCES} ${VERB_WEB_SOURCES})
+else()
+  juce_add_console_app(VerbWebBridgeTest PRODUCT_NAME "VerbWebBridgeTest")
+  target_sources(VerbWebBridgeTest PRIVATE tests/WebBridgeTest.cpp ${VERB_PLUGIN_SOURCES})
+endif()
+if(VERB_WEB_UI_WIN)
   target_compile_definitions(VerbWebBridgeTest PRIVATE ${VERB_WEB_DEFINITIONS})
   target_include_directories(VerbWebBridgeTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 else()
@@ -176,3 +192,30 @@ add_test(NAME e1_processor COMMAND VerbPluginTest)
 set_tests_properties(e1_processor PROPERTIES ENVIRONMENT "VERB_E1_ONLY=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 600)
 add_test(NAME e1_neutral_null COMMAND VerbPluginTest)
 set_tests_properties(e1_neutral_null PROPERTIES ENVIRONMENT "VERB_E1_NULL=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 600)
+
+# Path / orientation / Ambisonics / keep-alive suites (E9..E28). Each is selected by an environment variable of VerbPluginTest.
+# Suites that read test scenes from out/ or test/ (not part of a clean checkout) are registered only when those files exist.
+foreach(suite E9 E16 E17 E18 E19 E21 E23 E28)
+  set(need_fixture FALSE)
+  if(suite STREQUAL "E9" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/out/E9b/owner-repro-demo-motion.verbroom")
+    set(need_fixture TRUE)
+  endif()
+  if(suite STREQUAL "E28" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/test/Bake bag.verbroom")
+    set(need_fixture TRUE)
+  endif()
+  if(need_fixture)
+    message(STATUS "Test ${suite}_suite not registered: its fixture scene is not in this checkout")
+  else()
+    add_test(NAME ${suite}_suite COMMAND VerbPluginTest)
+    set_tests_properties(${suite}_suite PROPERTIES ENVIRONMENT "VERB_ONLY_${suite}=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
+  endif()
+endforeach()
+
+# E13 source profile state, bridge, undo/redo and acoustic integration.
+juce_add_console_app(VerbDirectivityTest PRODUCT_NAME "VerbDirectivityTest")
+target_sources(VerbDirectivityTest PRIVATE tests/E13Verification.cpp ${VERB_PLUGIN_SOURCES})
+target_include_directories(VerbDirectivityTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(VerbDirectivityTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(VerbDirectivityTest PRIVATE verbcore juce::juce_audio_utils juce::juce_recommended_config_flags)
+add_test(NAME directivity_integration COMMAND VerbDirectivityTest)
+set_tests_properties(directivity_integration PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 240)

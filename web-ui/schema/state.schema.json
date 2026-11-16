@@ -1,0 +1,1118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verbroom.invalid/web-ui/schema/state.schema.json",
+  "title": "Verb Room WebView contract v1: structural state snapshot",
+  "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/SnapshotPayload",
+  "$defs": {
+    "SurfaceTag": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Name"
+        },
+        "group": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Name"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "locked": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "group",
+        "hidden",
+        "locked"
+      ],
+      "description": "verb::SurfaceTag (scene.hpp:150). Persisted today via '#@verbroom-editor-v1' comments."
+    },
+    "Material": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "classId": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "alpha": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Band7"
+        },
+        "tau": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Band7"
+        },
+        "scatterLF": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "scatterHF": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "classId",
+        "alpha",
+        "tau",
+        "scatterLF",
+        "scatterHF"
+      ],
+      "description": "Bands 125/250/500/1000/2000/4000/8000 Hz. alpha+tau<=1. scatterHF null = legacy inherit (scene.hpp:39)."
+    },
+    "Wall": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec2"
+        },
+        "b": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec2"
+        },
+        "zBottomM": {
+          "type": "number",
+          "minimum": 0
+        },
+        "zTopM": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "material": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "editor": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/SurfaceTag"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "a",
+        "b",
+        "zBottomM",
+        "zTopM",
+        "material",
+        "editor"
+      ],
+      "description": "zTopM null = full height (z1>=1e8)."
+    },
+    "Zone": {
+      "type": "object",
+      "properties": {
+        "vertices": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec2"
+          },
+          "minItems": 3,
+          "maxItems": 64
+        },
+        "heightM": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "material": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "editor": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/SurfaceTag"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "vertices",
+        "heightM",
+        "material",
+        "editor"
+      ],
+      "description": "heightM null = material patch, number = plate. material null only for ceiling zones (opening). Order is significant."
+    },
+    "Clutter": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "minLenM": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 20
+        },
+        "maxLenM": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 40
+        },
+        "minHeightM": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 30
+        },
+        "maxHeightM": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 60
+        },
+        "tlMinDb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60
+        },
+        "tlMaxDb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 60
+        },
+        "minDistM": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "seed": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "minLenM",
+        "maxLenM",
+        "minHeightM",
+        "maxHeightM",
+        "tlMinDb",
+        "tlMaxDb",
+        "minDistM",
+        "seed"
+      ],
+      "description": "minDistM persisted compatibly in optional ninth clutter token (T3)."
+    },
+    "Scene": {
+      "type": "object",
+      "properties": {
+        "heightM": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "tempC": {
+          "type": "number",
+          "minimum": -60,
+          "maximum": 70
+        },
+        "humidityPct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "floorMaterial": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ceilingMaterial": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materials": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Material"
+          },
+          "minItems": 1,
+          "maxItems": 512
+        },
+        "walls": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Wall"
+          },
+          "minItems": 0,
+          "maxItems": 128
+        },
+        "floorZones": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Zone"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "ceilingZones": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Zone"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "floorEditor": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/SurfaceTag"
+        },
+        "ceilingEditor": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/SurfaceTag"
+        },
+        "clutter": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Clutter"
+        },
+        "roughness": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "roughSeed": {
+          "type": "integer",
+          "minimum": -1000000,
+          "maximum": 1000000
+        },
+        "diffraction": {
+          "type": "boolean"
+        },
+        "preserved": {
+          "type": "object",
+          "properties": {
+            "sr": {
+              "type": "number"
+            },
+            "lengthS": {
+              "type": "number"
+            },
+            "order": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4
+            },
+            "rays": {
+              "type": "integer"
+            },
+            "seed": {
+              "type": "integer"
+            },
+            "detectRadiusM": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "sr",
+            "lengthS",
+            "order",
+            "rays",
+            "seed",
+            "detectRadiusM"
+          ],
+          "description": "Fields the UI does not edit but the round trip must keep."
+        },
+        "home": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "z": {
+              "type": "number"
+            },
+            "yawDeg": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "x",
+            "y",
+            "z",
+            "yawDeg"
+          ],
+          "description": "getDisplayScene(home): listener anchor of the loaded scene (read-only)."
+        },
+        "ceilingExtent": {
+          "enum": [
+            "walls",
+            "infinite"
+          ]
+        },
+        "ceilingFootprint": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "heightM",
+        "tempC",
+        "humidityPct",
+        "floorMaterial",
+        "ceilingMaterial",
+        "materials",
+        "walls",
+        "floorZones",
+        "ceilingZones",
+        "floorEditor",
+        "ceilingEditor",
+        "clutter",
+        "roughness",
+        "roughSeed",
+        "diffraction",
+        "preserved"
+      ]
+    },
+    "SourceCfg": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "format": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "channels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "firstIn": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "sum": {
+          "type": "boolean"
+        },
+        "spreadM": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "pattern": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "freePoints": {
+          "type": "boolean"
+        },
+        "offsetsM": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec3"
+          },
+          "minItems": 0,
+          "maxItems": 16
+        },
+        "instrument": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "instrumentAmount": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "aimAzDeg": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "aimElDeg": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "aimRollDeg": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "customDirectivityName": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "directivityWarning": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "polarSlices": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "minItems": 72,
+                "maxItems": 72
+              },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "format",
+        "channels",
+        "firstIn",
+        "sum",
+        "spreadM",
+        "pattern",
+        "freePoints",
+        "offsetsM"
+      ],
+      "description": "SourceCfg (SourceModel.h:39). firstIn is 0-based on the wire (UI shows +1). offsetsM empty unless freePoints was frozen."
+    },
+    "OutputCfg": {
+      "type": "object",
+      "properties": {
+        "layout": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 11
+        },
+        "radiusM": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "micPattern": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "layout",
+        "radiusM",
+        "micPattern"
+      ],
+      "description": "OutputCfg (PluginProcessor.h:27). layout -1 = match track. Ring channel count is NOT stored (follows host)."
+    },
+    "TailSettings": {
+      "type": "object",
+      "properties": {
+        "baseRays": {
+          "type": "integer",
+          "minimum": 8000,
+          "maximum": 384000
+        },
+        "adaptive": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "baseRays",
+        "adaptive"
+      ]
+    },
+    "EditorFlags": {
+      "type": "object",
+      "properties": {
+        "navLocked": {
+          "type": "boolean"
+        },
+        "outlinerVisible": {
+          "type": "boolean"
+        },
+        "mixerCompact": {
+          "type": "boolean"
+        },
+        "inputMeters": {
+          "type": "boolean"
+        },
+        "keepRouting": {
+          "type": "boolean"
+        },
+        "keepProcessing": {
+          "type": "boolean",
+          "description": "E21 optional: report an infinite tail so the host keeps calling the plugin during silence. Absent = off."
+        },
+        "layerModes": {
+          "type": "object",
+          "properties": {
+            "walls": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "floors": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "ceilings": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "plates": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "walls",
+            "floors",
+            "ceilings",
+            "plates"
+          ],
+          "description": "0 shown, 1 locked, 2 hidden. NEW in v1: today editor-only (PluginEditor.h:230-231). Absent => all 0."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "navLocked",
+        "outlinerVisible",
+        "mixerCompact",
+        "inputMeters",
+        "keepRouting"
+      ],
+      "description": "Project-state flags (PluginProcessor.cpp:387-391,468-472) + new optional layerModes."
+    },
+    "Document": {
+      "type": "object",
+      "properties": {
+        "sceneName": {
+          "type": "string"
+        },
+        "scene": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Scene"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/SourceCfg"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "output": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/OutputCfg"
+        },
+        "tail": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/TailSettings"
+        },
+        "editorFlags": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/EditorFlags"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "points": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": -200,
+                    "maximum": 200
+                  },
+                  "minItems": 3,
+                  "maxItems": 3
+                },
+                "maxItems": 64
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "closed": {
+                "type": "boolean"
+              },
+              "smooth": {
+                "type": "boolean"
+              },
+              "orient": {
+                "type": "boolean"
+              },
+              "lookAt": {
+                "type": "boolean"
+              },
+              "lookTarget": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32
+              },
+              "lookPos": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "minimum": -200,
+                  "maximum": 200
+                },
+                "minItems": 3,
+                "maxItems": 3
+              },
+              "orientOffset": {
+                "type": "number",
+                "minimum": -360,
+                "maximum": 360
+              },
+              "laps": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64
+              },
+              "group": {
+                "type": "integer",
+                "minimum": -1,
+                "maximum": 31
+              },
+              "start": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 99.99
+              },
+              "end": {
+                "type": "number",
+                "minimum": 0.01,
+                "maximum": 100
+              },
+              "times": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "maxItems": 64
+              },
+              "easings": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "linear",
+                    "easeIn",
+                    "easeOut",
+                    "easeInOut"
+                  ]
+                },
+                "maxItems": 64
+              }
+            },
+            "required": [
+              "points",
+              "enabled",
+              "closed",
+              "smooth",
+              "orient"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 33
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sceneName",
+        "scene",
+        "sources",
+        "output",
+        "tail",
+        "editorFlags"
+      ]
+    },
+    "Host": {
+      "type": "object",
+      "properties": {
+        "inputChannels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "outputChannels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "renderedChannels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        },
+        "effectiveLayout": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 11
+        },
+        "numPoints": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "sampleRate": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "inputChannels",
+        "outputChannels",
+        "renderedChannels",
+        "effectiveLayout",
+        "numPoints"
+      ]
+    },
+    "Load": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/LoadState"
+        },
+        "status": {
+          "type": "string"
+        },
+        "tailCurrent": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "status",
+        "tailCurrent"
+      ]
+    },
+    "Limits": {
+      "type": "object",
+      "properties": {
+        "maxWalls": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxFloorZones": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxCeilingZones": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxZoneVertices": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minZoneVertices": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxPlates": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxSources": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxPoints": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxInputs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxOutputs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxSourceChannels": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxNameLength": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxControlPayloadBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxDragPayloadBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxClutterUi": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxViewStateBytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "maxWalls",
+        "maxFloorZones",
+        "maxCeilingZones",
+        "maxZoneVertices",
+        "minZoneVertices",
+        "maxPlates",
+        "maxSources",
+        "maxPoints",
+        "maxInputs",
+        "maxOutputs",
+        "maxSourceChannels",
+        "maxNameLength"
+      ],
+      "description": "Engine/editor limits are verified in code; payload limits are NEW protocol guards."
+    },
+    "Jobs": {
+      "type": "object",
+      "properties": {
+        "export": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "message"
+          ]
+        },
+        "rt60": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "achievedS": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "requestedS": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "state"
+          ]
+        },
+        "analysis": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "jobId": {
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "idle",
+                    "running",
+                    "cancelling",
+                    "done",
+                    "error"
+                  ]
+                },
+                "progress": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "jobId",
+                "state"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "export",
+        "rt60"
+      ]
+    },
+    "SnapshotPayload": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Uint64String"
+        },
+        "loadSerial": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Uint64String"
+        },
+        "sceneSerial": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Uint64String"
+        },
+        "capabilities": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Capabilities"
+        },
+        "limits": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Limits"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "descriptors": {
+              "anyOf": [
+                {
+                  "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/DescriptorList"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "values": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/Values"
+            },
+            "effective": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/Effective"
+            },
+            "texts": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "values",
+            "effective"
+          ]
+        },
+        "document": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Document"
+        },
+        "host": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Host"
+        },
+        "load": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Load"
+        },
+        "preferences": {
+          "type": "object"
+        },
+        "jobs": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/Jobs"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "loadSerial",
+        "capabilities",
+        "limits",
+        "parameters",
+        "document",
+        "host",
+        "load"
+      ],
+      "description": "descriptors may be null when the client already holds the list of the same contractVersion/pluginVersion."
+    }
+  }
+}

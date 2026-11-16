@@ -19,6 +19,7 @@ inline thread_local bool profilingSoftLeg=false;
 
 struct Geo {
     const Scene& s;
+    CeilingPlan ceilingPlan;
     int W;  // wall count
     bool hasCeil;
     bool ampNonIncreasing = true;  // see the constructor: lets the search drop paths that are already too quiet
@@ -105,7 +106,7 @@ struct Geo {
         }
         return false;
     }
-    explicit Geo(const Scene& sc) : s(sc), W((int)sc.walls.size()), hasCeil(sc.ceilMat >= 0), H(sc.height) {
+    explicit Geo(const Scene& sc) : s(sc), ceilingPlan(sc), W((int)sc.walls.size()), hasCeil(sc.ceilMat >= 0), H(sc.height) {
         for (const auto& m : sc.mats)  // E3b: every transmission factor sqrt(tau) is in [0, 1] => path amplitudes never grow
             for (int b = 0; b < NB; ++b) ampNonIncreasing = ampNonIncreasing && m.tau[b] >= 0.0 && m.tau[b] <= 1.0;
         buildJunctions();
@@ -320,7 +321,7 @@ struct Geo {
                 if (z < tz) { const Vec3 a = M + nrm * eps, b = M - nrm * eps; ray(0, W, floorMatAt(s, a.x, a.y)); ray(kPi, W, floorMatAt(s, b.x, b.y)); }
                 else if (std::fabs(z - H) < tz) {
                     const Vec3 a = M + nrm * eps, b = M - nrm * eps;
-                    const int ma = ceilMatAt(s, a.x, a.y), mb = ceilMatAt(s, b.x, b.y);
+                    const int ma = ceilMatAt(s, a.x, a.y, &ceilingPlan), mb = ceilMatAt(s, b.x, b.y, &ceilingPlan);
                     if (ma >= 0) ray(0, W + 1, ma);
                     if (mb >= 0) ray(kPi, W + 1, mb);
                 }
@@ -440,7 +441,7 @@ struct Geo {
     const Material* matAt(int surf, double x, double y) const {
         if (surf < W) return &s.mats[(size_t)s.walls[(size_t)surf].mat];
         if (surf >= W + 2) return &s.mats[(size_t)plate(surf).mat];
-        const int m = surf == W ? floorMatAt(s, x, y) : ceilMatAt(s, x, y);
+        const int m = surf == W ? floorMatAt(s, x, y) : ceilMatAt(s, x, y, &ceilingPlan);
         return m >= 0 ? &s.mats[(size_t)m] : nullptr;
     }
 };
@@ -1788,9 +1789,52 @@ inline bool evalDiffSeq(const Geo& g, Vec3 S, Vec3 R, double c, bool needClear, 
     return true;
 }
 
+// Real spherical harmonic of an Ambisonic receiver: AmbiX convention (ACN order n*n+n+m, SN3D normalisation, no
+// Condon-Shortley phase), orders 0..3. (x, y, z) is the unit direction in the receiver frame (+x forward, +y left, +z up).
+// Closed forms (no vector evaluation): exactly evalRealSH() / sqrt(2n+1), see out/E23 checks.
+inline double shSN3D(int acn, double x, double y, double z) {
+    switch (acn) {
+        case 0: return 1.0;
+        case 1: return y;
+        case 2: return z;
+        case 3: return x;
+        case 4: return 1.7320508075688772 * x * y;
+        case 5: return 1.7320508075688772 * y * z;
+        case 6: return 0.5 * (3.0 * z * z - 1.0);
+        case 7: return 1.7320508075688772 * x * z;
+        case 8: return 0.8660254037844386 * (x * x - y * y);
+        case 9: return 0.7905694150420949 * y * (3.0 * x * x - y * y);
+        case 10: return 3.872983346207417 * x * y * z;
+        case 11: return 0.6123724356957945 * y * (5.0 * z * z - 1.0);
+        case 12: return 0.5 * z * (5.0 * z * z - 3.0);
+        case 13: return 0.6123724356957945 * x * (5.0 * z * z - 1.0);
+        case 14: return 1.9364916731037085 * z * (x * x - y * y);
+        case 15: return 0.7905694150420949 * x * (x * x - 3.0 * y * y);
+        default: return 0.0;
+    }
+}
+
+// Gain of an Ambisonic receiver towards world direction d: the direction is brought into the receiver frame by undoing the
+// receiver's azimuth (the listener yaw rotates the whole set about z); the elevation of the capsule is not used.
+inline double shReceiverGain(const Transducer& t, Vec3 d) {
+    double x = d.x, y = d.y;
+    if (t.azimuthDeg != 0.0) {
+        const double a = t.azimuthDeg * kPi / 180.0, ca = std::cos(a), sa = std::sin(a);
+        x = d.x * ca + d.y * sa;
+        y = -d.x * sa + d.y * ca;
+    }
+    return shSN3D(t.shIndex, x, y, d.z) * (t.gainDb == 0.0 ? 1.0 : std::pow(10.0, t.gainDb / 20.0));
+}
+
 // Directivity gain of every octave band (the pattern may change with frequency: `pattern` at 125 Hz, `patternHf` at 8 kHz).
 // The angle is evaluated once.
-inline void dirGainBands(const Transducer& t, Vec3 d, double* g /* NB values */) {
+inline void analyticDirGainBands(const Transducer& t, Vec3 d, double* g) {
+    if (t.shIndex >= 0) {  // Ambisonic receiver: the same signed gain in every band
+        const double v = shReceiverGain(t, d);
+        for (int b = 0; b < NB; ++b) g[b] = v;
+        return;
+    }
+    const double gdb = t.gainDb == 0.0 ? 1.0 : std::pow(10.0, t.gainDb / 20.0);
     const double a = t.azimuthDeg * kPi / 180.0;
     double c;
     if (t.elevationDeg == 0.0) {
@@ -1799,14 +1843,42 @@ inline void dirGainBands(const Transducer& t, Vec3 d, double* g /* NB values */)
         const double e = t.elevationDeg * kPi / 180.0, ce = std::cos(e);
         c = d.x * ce * std::cos(a) + d.y * ce * std::sin(a) + d.z * std::sin(e);
     }
-    const double gdb = t.gainDb == 0.0 ? 1.0 : std::pow(10.0, t.gainDb / 20.0);
     for (int b = 0; b < NB; ++b) {
         const double p = t.patternHf < 0 ? t.pattern : t.pattern + (t.patternHf - t.pattern) * ((double)b / (double)(NB - 1));
         g[b] = ((1 - p) + p * c) * gdb;
     }
 }
 
+inline void profileDirGainBands(const Transducer& t, Vec3 d, double* g /* NB values */) {
+    const double gdb = t.gainDb == 0.0 ? 1.0 : std::pow(10.0, t.gainDb / 20.0);
+    if (t.profile() != nullptr) {
+        double ux = 1.0, uy = 0.0, uz = 0.0;
+        worldToLocalDir(d.x, d.y, d.z, t.azimuthDeg, t.elevationDeg, ux, uy, uz);
+        applyProfileAim(t.aimAzDeg, t.aimElDeg, t.aimRollDeg, ux, uy, uz);
+        const auto gb = t.profile()->evalLocal(ux, uy, uz);
+        const double w = std::clamp(t.instrumentAmount, 0.0, 1.0);
+        if (w >= 1.0) {
+            for (int b = 0; b < NB; ++b) g[b] = gb[(size_t)b] * gdb;
+        } else if (w <= 0.0) {
+            for (int b = 0; b < NB; ++b) g[b] = gdb;
+        } else {
+            for (int b = 0; b < NB; ++b) {
+                const double p = gb[(size_t)b] * gb[(size_t)b];
+                g[b] = std::sqrt((1.0 - w) + w * p) * gdb;
+            }
+        }
+        return;
+    }
+    analyticDirGainBands(t,d,g);
+}
+
+inline void dirGainBands(const Transducer& t, Vec3 d, double* g) {
+    if (t.profile()) profileDirGainBands(t,d,g);
+    else analyticDirGainBands(t,d,g);
+}
+
 inline double dirGain(const Transducer& t, Vec3 d) {
+    if (t.shIndex >= 0) return shReceiverGain(t, d);
     const double a = t.azimuthDeg * kPi / 180.0;
     double c;
     if (t.elevationDeg == 0.0) {
@@ -1851,6 +1923,7 @@ struct SurfaceSideHist {
 // faceted hall, multi-chamber shell). False for free-standing baffle walls and outside poses.
 inline bool isInsideEnclosure(const Geo& g, Vec3 p) {
     if (g.W <= 0) return false;
+    if(!g.ceilingPlan.polygons.empty() && !g.ceilingPlan.contains(p.x,p.y)) return false;
     if (g.s.floorMat >= 0 || floorMatAt(g.s, p.x, p.y) >= 0) {
         if (p.z < -1e-6) return false;
     }

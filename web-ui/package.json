@@ -1,0 +1,14 @@
+{
+  "name": "verb-room-web-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node tests/browser.mjs",
+    "check:schemas": "python tests/validate.py",
+    "test:alignment": "node tests/alignment.mjs",
+    "shots:compare": "python scripts/contact-sheet.py"
+  }
+}

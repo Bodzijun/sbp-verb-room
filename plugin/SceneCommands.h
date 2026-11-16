@@ -64,7 +64,7 @@ struct SurfaceSnap {  // one wall / zone / floor / ceiling with its material BY 
     bool hasMat = false;  // false: open ceiling / open zone
     verb::SurfaceTag tag;
 };
-struct HeightSnap { double h = 3; };
+struct HeightSnap { double h = 3; bool ceilingInfinite = false; };
 struct AirSnap { double tempC = 20, humidity = 50; };
 struct RoughSnap { double roughness = 0; int seed = 1; };
 struct DiffSnap { bool on = true; };

@@ -1,6 +1,6 @@
 #pragma once
 // WebView (WebView2) editor shell of Verb Room, task T1 of docs/WebView_UI_plan_uk.md.
-// The native editor (VerbEditor) stays the default; this editor is opt-in (see preferredUi()).
+// The web editor is the default since 0.2.0 where it can run; the native editor (VerbEditor) is the fallback (see preferredUi()).
 // The shell shows an embedded offline page, answers the `ready` handshake and a `ping` round trip, and falls back to
 // the native editor when the runtime is missing, the page does not report `ready`, or the page cannot be loaded.
 // Everything here runs on the message thread; nothing touches the audio thread.

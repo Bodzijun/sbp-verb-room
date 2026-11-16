@@ -112,12 +112,13 @@ void EnergyMapView::startAnalysis() {
     }
     submittedSignature = signature(sc, opt); stop.store(false); progress.store(0); working.store(true);
     setControlsEnabled(false); status.setText("Analyzing... 0%", juce::dontSendNotification);
-    worker = std::thread([this, sc, opt] {
+    auto pool=proc.getAnalysisPool();
+    worker = std::thread([this, sc, opt, pool] {
         verb::BakePool::lowerCurrentThread(true);
         std::shared_ptr<const verb::EnergyMap> done; juce::String error;
         try {
             done = std::make_shared<verb::EnergyMap>(verb::analyzeEnergyMap(sc, opt,
-                [this] { return stop.load(); }, [this](double f) { progress.store(f); }));
+                [this] { return stop.load(); }, [this](double f) { progress.store(f); }, {pool,pool?pool->size():1}));
         } catch (const std::exception& e) { error = e.what(); }
         catch (...) { error = "Analysis failed"; }
         { std::lock_guard<std::mutex> lock(completionMutex); pending = std::move(done); pendingError = error; }

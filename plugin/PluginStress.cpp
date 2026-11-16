@@ -410,8 +410,8 @@ static void testThreadedFuzz() {
             }
             case 7: {
                 verbp::OutputCfg o;
-                o.layout = rnd(10) - 1;
-                if (o.layout > (int)verb::Layout::Ring) o.layout = (int)verb::Layout::Ring;
+                o.layout = rnd(11) - 1;
+                if (o.layout > (int)verb::Layout::AmbiX3) o.layout = (int)verb::Layout::AmbiX3;
                 o.radius = rf(0, 0.6);
                 p.setOutputCfg(o);
                 break;

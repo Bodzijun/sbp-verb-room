@@ -288,7 +288,7 @@ static bool tailSecondsCache(bool computeIfMiss, Scene s, int order, double abso
     absorption=clampTo(absorption,.3,3.,1.);
     for(auto& m:s.mats)for(int b=0;b<NB;++b)m.alpha[b]=std::clamp(m.alpha[b]*absorption,0.,std::max(0.,1.-m.tau[b]));
     Scene keyScene=s;if(keyScene.sources.size()>1)keyScene.sources.resize(1);
-    std::ostringstream exact;exact.precision(17);if(!keyScene.sources.empty())exact<<keyScene.sources[0].patternHf;for(const auto&r:keyScene.receivers)exact<<' '<<r.patternHf;
+    std::ostringstream exact;exact.precision(17);if(!keyScene.sources.empty())exact<<keyScene.sources[0].patternHf;for(const auto&r:keyScene.receivers)exact<<' '<<r.patternHf<<':'<<r.shIndex;
     const auto key=std::to_string(order)+serializeScene(keyScene,17)+exact.str();
     static std::mutex mx;static std::map<std::string,double> cache;
     {std::lock_guard<std::mutex> lock(mx);auto it=cache.find(key);if(it!=cache.end()){outLen=it->second;return true;}}
@@ -357,6 +357,13 @@ struct Engine::Impl {
         int quiet = 0;                           // periods since the source/listener last moved
         int fadeLeftPeriods = 0;                 // remaining periods of jump crossfade
         Transducer t;
+        DirectivityMailbox directivityState;
+        std::atomic<uint64_t> directivitySerial{0};
+        mutable uint64_t workerDirectivitySerial = ~0ull;
+        mutable DirectivityState workerDirectivity; // constructor/worker only, never audio
+        const DirectivityProfile* solvedDirectivity = nullptr;
+        double solvedAmount = -1.0;
+        double solvedAimAz = 0.0, solvedAimEl = 0.0, solvedAimRoll = 0.0;
     };
     std::vector<std::unique_ptr<Src>> srcs;
     size_t ringMask = 0;
@@ -608,7 +615,8 @@ struct Engine::Impl {
 
     Impl(const Scene& scene, const EngineConfig& c_)
         : sc(scene), cfg(c_), S((int)scene.sources.size()), R((int)scene.receivers.size()), sr(scene.sr),
-          c(speedOfSound(scene.tempC)), fft(c_.tailBlock * 2) {
+          c(speedOfSound(scene.tempC)), fft(c_.tailBlock * 2),
+          bakeObjectRevision((size_t)scene.sources.size() + 1) {
         if (cfg.erOrder < 1 || cfg.erOrder > 4) throw std::runtime_error("erOrder must be 1..4");
         currentAbsorption=cfg.absorptionScale;
         requestedRays = cfg.tailRays; requestedAdaptive = cfg.adaptiveTail;
@@ -651,6 +659,8 @@ struct Engine::Impl {
         for (int r = 0; r < R; ++r)
             for (int k = 0; k < M; ++k) rcvAbs[(size_t)(r * M + k)] = sc.receivers[(size_t)r];
         offs.assign((size_t)M, Vec3{});
+        passBuffer.resize(Impl::passCap*4*((size_t)S+1));
+        bakeJointPose.assign(4*((size_t)S+1),0.);
         params.reset(new std::atomic<double>[S * 5 + 9]);
         params[S * 5 + 8] = 0.0;  // late-field (tail) level, dB
         params[S * 4 + 7] = 1.0;  // Doppler strength 0..2 (1 = physical)
@@ -755,6 +765,8 @@ struct Engine::Impl {
             sp->split.init(sr);
             sp->t = sc.sources[s];
             sp->t.pos = {effSrc0[(size_t)s * 4 + 0], effSrc0[(size_t)s * 4 + 1], effSrc0[(size_t)s * 4 + 2]};
+            sp->directivityState.publish({sp->t.directivity, sp->t.instrumentAmount, sp->t.pattern, false,
+                                          sp->t.aimAzDeg, sp->t.aimElDeg, sp->t.aimRollDeg});
             if (!shared) {initConv(sp->tail, R);sp->tail.bakeSource=s;for(auto&v:sp->tail.bakeWeights)v.resize((size_t)B+1);
                 for(int bin=0;bin<=B;++bin){const auto z=std::polar(1.,-2*kPi*bin/(2*B));std::complex<double> last=0;double total=0;
                     for(int band=0;band<NB;++band){std::complex<double> low=1.;if(band<NB-1){double a=1-std::exp(-2*kPi*kBandHz[band]*std::sqrt(2.)/sr);low=a/(1.-(1.-a)*z);}float weight=(float)std::norm(low-last);sp->tail.bakeWeights[band][(size_t)bin]=weight;total+=weight;last=low;}
@@ -782,6 +794,10 @@ struct Engine::Impl {
             trans.slotX.assign((size_t)R, 0); trans.slotH.assign((size_t)R, 0); trans.rho.assign((size_t)R, 0.f);
             trans.gNew.assign((size_t)R * S * 8, 0.f); trans.cmul.assign((size_t)R * 8, 1.f);
         }
+        bakeObjectTouched.assign((size_t)S + 1, 0);
+        bakeAudioSourceValid.assign((size_t)S, 0);
+        bakeLookupScratch.assign((size_t)S * R * NB, 0.);
+        bakeProjectHints.assign((size_t)S + 2, 0);
         bakeAudioEnergy.assign((size_t)S*R*NB,0.);bakeAudioNorm.assign((size_t)R*NB,0.);bakeAudioRefPose.assign((size_t)(S+1)*4,0.);if(shared)bakeReferenceGain.assign((size_t)R*S*8,0.f);
         srcHist.resize((size_t)S); shapedHist.resize((size_t)S); sourceSeconds.assign((size_t)S,0.);
         sourcePhysicalSeconds.assign(S,sc.length);
@@ -819,7 +835,7 @@ struct Engine::Impl {
             srcs[s]->lastGeom = geomSerial.load();
             srcs[s]->hist.assign(kHist, srcs[s]->t.pos);
             if (!shared) {
-                Transducer st = srcs[s]->t;
+                Transducer st = currentSource(s);
                 buildTail(s, latest->sc, st, initRc, 0, latest->serial);
                 srcs[s]->lastPattern = st.pattern;
                 srcs[s]->tail.cur = 0;
@@ -936,7 +952,7 @@ struct Engine::Impl {
     void ensureRebuildPool(unsigned needed=0){
         const auto hw=std::thread::hardware_concurrency();const unsigned available=hw>1?hw-1:1;
         const unsigned target=std::clamp(std::max(defaultPoolWorkers(hw),needed),1u,available);
-        if(!bakePool||(target>bakePoolCount&&bakeActive.empty())){bakePool.reset();bakePoolCount=target;bakePool=std::make_unique<BakePool>(bakePoolCount);}
+        if(!bakePool||(target>bakePoolCount&&bakeActiveEmpty()&&bakePool.use_count()==1)){bakePoolCount=target;std::atomic_store(&bakePool,std::make_shared<BakePool>(bakePoolCount));}
     }
     template<class F> void rebuildFor(size_t n,F fn){
         if(rebuildWidth()>1&&n>1){ensureRebuildPool(rebuildWidth());bakePool->parallelFor(n,rebuildWidth(),fn);}
@@ -1005,6 +1021,30 @@ struct Engine::Impl {
         const Vec3 p = resolveWallLinePose(g, {raw[0], raw[1], raw[2]}, hist, worldSerial);
         out[0] = p.x; out[1] = p.y; out[2] = p.z; out[3] = raw[3];
     }
+    const DirectivityState& workerState(int s) const {
+        auto& source=*srcs[(size_t)s];
+        const auto epoch=source.directivitySerial.load(std::memory_order_acquire);
+        if(source.workerDirectivitySerial!=epoch) {
+            source.workerDirectivity=source.directivityState.controlRead();
+            source.workerDirectivitySerial=epoch;
+        }
+        return source.workerDirectivity;
+    }
+    Transducer currentSource(int s) const {
+        if((size_t)s>=srcs.size()) return sc.sources[(size_t)s]; // initial resolved-pose length probe precedes Src allocation
+        auto t = srcs[(size_t)s]->t;
+        const auto& state = workerState(s);
+        t.directivity = state.profile; t.instrument = state.profile ? "custom" : "";
+        t.instrumentAmount = state.amount;
+        t.aimAzDeg = state.aimAzDeg; t.aimElDeg = state.aimElDeg; t.aimRollDeg = state.aimRollDeg;
+        t.pattern = state.fixedPattern ? state.pattern : params[S*4+8+s].load();
+        return t;
+    }
+    double workerPattern(int s) const {
+        const auto& state=workerState(s);
+        return state.fixedPattern?state.pattern:params[S*4+8+s].load();
+    }
+
     void resolvedReceivers(const Geo& g, const double* effLst, std::vector<Transducer>& out, bool exactYaw0 = false) const {
         listenerReceivers(effLst, out);
         if (exactYaw0 && effLst[3] == yaw0) {
@@ -1050,7 +1090,7 @@ struct Engine::Impl {
                 probe.sources[s].pos={params[s*4].load(),params[s*4+1].load(),params[s*4+2].load()};
                 probe.sources[s].azimuthDeg=params[s*4+3].load();
             }
-            probe.sources[s].pattern=params[S*4+8+s].load();
+            auto state=currentSource(s);probe.sources[s].directivity=state.directivity;probe.sources[s].instrument=state.instrument;probe.sources[s].instrumentAmount=state.instrumentAmount;probe.sources[s].aimAzDeg=state.aimAzDeg;probe.sources[s].aimElDeg=state.aimElDeg;probe.sources[s].aimRollDeg=state.aimRollDeg;probe.sources[s].pattern=state.pattern;
         }
         return probe;
     }
@@ -1138,8 +1178,8 @@ struct Engine::Impl {
             }
             const double dp = std::hypot(std::hypot(p[0] - sp.lastPose[0], p[1] - sp.lastPose[1]), p[2] - sp.lastPose[2]);
             const double dYawS = std::fabs(std::remainder(p[3] - sp.lastPose[3], 360.0));
-            if (jumpRebuild ? (all || dp > 0.001 || dYawS > 0.1 || params[S * 4 + 8 + s].load() != sp.lastPattern)
-                            : (all || dp > 0.05 || std::fabs(p[3] - sp.lastPose[3]) > 2 || params[S * 4 + 8 + s].load() != sp.lastPattern)) dirty.push_back(s);
+            if (jumpRebuild ? (all || dp > 0.001 || dYawS > 0.1 || workerPattern(s) != sp.lastPattern)
+                            : (all || dp > 0.05 || std::fabs(p[3] - sp.lastPose[3]) > 2 || workerPattern(s) != sp.lastPattern)) dirty.push_back(s);
         }
         if (durationChanged) { dirty.clear(); for (int s = 0; s < S; ++s) dirty.push_back(s); }
         if (dirty.empty()) return false;
@@ -1153,10 +1193,10 @@ struct Engine::Impl {
         std::vector<int>& hRays = useCopies ? workRays : histRays;
         // Retain raw moments in the cache; assess confidence only after pooling.
         auto traceSource = [&](int s, int count) {
-            Transducer st = srcs[(size_t)s]->t;
+            Transducer st = currentSource(s);
             st.pos = {poses[(size_t)s][0], poses[(size_t)s][1], poses[(size_t)s][2]};
             st.azimuthDeg = poses[(size_t)s][3];
-            st.pattern = settle ? srcs[(size_t)s]->lastPattern : std::min(std::max(params[S * 4 + 8 + s].load(), 0.0), 1.0);
+            st.pattern = workerPattern(s);
             hist[(size_t)s] = traceTail(scn, st, rc, cfg.erOrder, count, scn.seed + 131 * s, false, cancelled, S==1?execution:TailExecution{});
             hRays[(size_t)s] = count;
             if (useCopies) return;
@@ -1356,7 +1396,7 @@ struct Engine::Impl {
                 srcHist.swap(work);
                 histRays.swap(workRays);
                 for (int s : dirty) {
-                    srcs[(size_t)s]->lastPattern = std::min(std::max(params[S * 4 + 8 + s].load(), 0.0), 1.0);
+                    srcs[(size_t)s]->lastPattern = std::min(std::max(workerPattern(s), 0.0), 1.0);
                     for (int i = 0; i < 4; ++i) srcs[(size_t)s]->lastPose[i] = poses[(size_t)s][(size_t)i];
                 }
             }
@@ -1449,17 +1489,48 @@ struct Engine::Impl {
     // the reference), each weighted by its inverse variance from the per-ray sums of squares. A value whose measured
     // variance says it is unreliable (standard deviation above motionHoldDb) keeps the previous gain.
     void motionEstimate(const std::vector<double>& P, const World& w) {
-        if(bakeEnabled.load()&&bakePercent.load()==100&&bakeContextAudio(bakeWork)) {double u;int moving=bakeWork.path.object<0?0:4+4*bakeWork.path.object;bool covered=bakeWork.path.project(P.data()+moving,u);if(covered)for(size_t j=1;j<bakeWork.movingPaths.size();++j){const auto&path=bakeWork.movingPaths[j];auto expected=path.at(u);covered=covered&&!poseFar(P.data()+4+4*path.object,expected.data(),.02,1.);}if(covered)return;}
+        std::vector<uint8_t> bakeCovered((size_t)S, 0);
+        if(bakeEnabled.load()) {
+            auto tables=std::atomic_load(&bakeDiagnosticList);
+            if(tables){
+                for(const auto& t:*tables){
+                    if(!bakeContextTable(t,true))continue;
+                    double u=0;bool covered=false;
+                    if(t.path.recorded){
+                        covered=t.projectJoint(P.data(),u);
+                    }else if(t.hasDeclaredJoint()){
+                        covered=t.projectDeclared(P.data(),u);
+                    }else{
+                        const int moving=t.path.object<0?0:4+4*t.path.object;
+                        covered=t.path.project(P.data()+moving,u);
+                        if(covered)for(size_t j=1;j<t.movingPaths.size();++j){
+                            const auto&path=t.movingPaths[j];auto expected=path.at(u);
+                            const int off=path.object<0?0:4+4*path.object;
+                            covered=covered&&!poseFar(P.data()+off,expected.data(),.02,1.);
+                        }
+                    }
+                    if(covered)for(int s:t.groupSources)if(s>=0&&s<S)bakeCovered[(size_t)s]=1;
+                }
+            }
+        }
+        const double dm = cfg.motionDeadbandM, dd = cfg.motionDeadbandDeg;
+        const bool lmoved = poseFar(P.data(), mref.lst, dm, dd);
+        bool allCovered=true;
+        for(int s=0;s<S;++s){
+            const bool smoved=lmoved||poseFar(&P[(size_t)(4+4*s)],mref.pose[(size_t)s].data(),dm,dd);
+            if(smoved&&!bakeCovered[(size_t)s]){allCovered=false;break;}
+        }
+        if(allCovered)return;
 
         const auto t0 = std::chrono::steady_clock::now();
         const Scene& scn = w.sc;
         long long work = 0, wk = 0;
         const auto cancel = [&]{ return !running || geomSerial.load() != w.serial || qualitySerial.load() != workerQuality || jumpSerial.load(std::memory_order_acquire) != workerJumpSeen; };
-        const double stopDb = -20, dm = cfg.motionDeadbandM, dd = cfg.motionDeadbandDeg;
+        const double stopDb = -20;
         const int KF = std::max(8, cfg.motionForwardRays), KR = std::max(64, cfg.motionReciprocalRays);
         auto srcAt = [&](int s, const double* p) {
-            Transducer t = srcs[(size_t)s]->t;
-            t.pos = {p[0], p[1], p[2]}; t.azimuthDeg = p[3]; t.pattern = srcs[(size_t)s]->lastPattern;
+            Transducer t = currentSource(s);
+            t.pos = {p[0], p[1], p[2]}; t.azimuthDeg = p[3]; t.pattern = workerPattern(s);
             return t;
         };
         if (!mref.recValid) {
@@ -1475,7 +1546,6 @@ struct Engine::Impl {
         std::vector<std::array<double, NB>> recSq1;
         const auto rec1 = traceLateReciprocal(scn, Vec3{P[0], P[1], P[2]}, rc, st1, cfg.erOrder, KR, scn.seed + 4242, stopDb, cancel, &wk, &recSq1);
         work += wk;
-        const bool lmoved = poseFar(P.data(), mref.lst, dm, dd);
         const double dl = std::hypot(std::hypot(P[0] - mref.lst[0], P[1] - mref.lst[1]), P[2] - mref.lst[2]) + 0.5 * std::fabs(std::remainder(P[3] - mref.lst[3], 360.0)) / 90;
         const double vHold = (cfg.motionHoldDb / 4.343) * (cfg.motionHoldDb / 4.343);  // variance of ln(energy)
         std::vector<float> G = prevPub;
@@ -1487,6 +1557,7 @@ struct Engine::Impl {
                 for (int r = 0; r < R; ++r) for (int b = 0; b < 8; ++b) G[((size_t)r * S + s) * 8 + b] = mref.G[((size_t)r * S + s) * 8 + b];
                 continue;
             }
+            if (!lmoved && bakeCovered[(size_t)s]) continue;
             const double dist = dl + std::hypot(std::hypot(ps[0] - p0[0], ps[1] - p0[1]), ps[2] - p0[2]) + 0.5 * std::fabs(std::remainder(ps[3] - p0[3], 360.0)) / 90;
             std::vector<std::array<double, NB>> sqF;
             const auto F1 = traceTailEnergyCRN(scn, st1[(size_t)s], rc, cfg.erOrder, KF, scn.seed + 131 * s, stopDb, cancel, &wk, &sqF);
@@ -1584,7 +1655,7 @@ struct Engine::Impl {
         }
         // geometry, materials, quality, decay, directivity: the immediate re-trace and short swap, as before
         bool legacy = wsnap->serial != sLastGeom || workerQuality != sLastQuality;
-        for (int s = 0; s < S; ++s) legacy |= std::min(std::max(params[S * 4 + 8 + s].load(), 0.0), 1.0) != srcs[(size_t)s]->lastPattern;
+        for (int s = 0; s < S; ++s) legacy |= std::min(std::max(workerPattern(s), 0.0), 1.0) != srcs[(size_t)s]->lastPattern;
         if (legacy) {
             if (ts == 1 || ts == 2) return;  // the long crossfade finishes first (motionFadeSec at most)
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLegacy).count() < cfg.tailRefreshMs) return;
@@ -1714,7 +1785,7 @@ struct Engine::Impl {
             double dp = std::hypot(std::hypot(pose[0] - sp.lastPose[0], pose[1] - sp.lastPose[1]), pose[2] - sp.lastPose[2]);
             double dl = std::hypot(std::hypot(lst[0] - sp.lastLst[0], lst[1] - sp.lastLst[1]), lst[2] - sp.lastLst[2]);
             const uint64_t gser = geomSerial.load();
-            const double pat = std::min(std::max(params[S * 4 + 8 + s].load(), 0.0), 1.0);
+            const double pat = std::min(std::max(workerPattern(s), 0.0), 1.0);
             const bool other = jumpPending || gser != sp.lastGeom || pat != sp.lastPattern || sp.lastQuality != workerQuality;
             const bool durationChanged=sourcePhysicalSeconds[s]!=wsnap->sc.length;
             bool moved = false, longFade = false, poseMoved = false;
@@ -1732,7 +1803,7 @@ struct Engine::Impl {
             }
             if ((sp.tail.publishedHandover.load(std::memory_order_acquire) >= 0 || sp.tail.cleanSynced.load(std::memory_order_acquire) < sp.tail.P) && !other) continue;
             if (!moved) continue;
-            Transducer st = sp.t;
+            Transducer st = currentSource(s);
             st.pattern = pat;
             st.pos = {pose[0], pose[1], pose[2]};
             st.azimuthDeg = pose[3];
@@ -1854,7 +1925,7 @@ struct Engine::Impl {
             for(auto& r:n.receivers)r.pos=scaledCentre+(r.pos-centre);
             if(n.hasListener)n.listenerPos=scaledCentre;
         }
-        n.walls = ns.walls; n.mats = ns.mats; n.floorMat = ns.floorMat; n.ceilMat = ns.ceilMat; n.height = ns.height;
+        n.walls = ns.walls; n.mats = ns.mats; n.floorMat = ns.floorMat; n.ceilMat = ns.ceilMat; n.ceilingInfinite = ns.ceilingInfinite; n.height = ns.height;
         n.tempC = ns.tempC; n.humidity = ns.humidity; n.clutter = ns.clutter;
         n.floorZones = ns.floorZones; n.ceilZones = ns.ceilZones;
         n.roughness = ns.roughness; n.roughSeed = ns.roughSeed; n.diffraction = ns.diffraction;
@@ -1940,7 +2011,8 @@ struct Engine::Impl {
         return 1;
     }
 
-    bool validate(int idx, const Src& sp, const Transducer& rc, const Transducer& src, Found& f,int source,int receiver) {
+    template<bool Profile>
+    bool validateProfile(int idx, const Src& sp, const Transducer& rc, const Transducer& src, Found& f,int source,int receiver) {
         if(G().separatedShell(src.pos,rc.pos,false))return false;
         Vec3 cur = rc.pos, first{}, last{};
         int prevSurf = -1, n = idx;
@@ -1990,8 +2062,15 @@ struct Engine::Impl {
         double rg[NB];
         dirGainBands(rc, unit(first - rc.pos), rg);  // the receiver's pattern may depend on frequency
         for (int b = 0; b < NB; ++b) amp[b] *= (float)rg[b];
-        double gain = dirGain(src, unit(last - src.pos));
-        finish(f, nodes[idx].key, D, gain, amp);
+        if constexpr (Profile) {
+            double sg[NB];
+            dirGainBands(src, unit(last - src.pos), sg);
+            for (int b = 0; b < NB; ++b) amp[b] *= (float)sg[b];
+            finish(f, nodes[idx].key, D, 1.0, amp);
+        } else {
+            double gain = dirGain(src, unit(last - src.pos));
+            finish(f, nodes[idx].key, D, gain, amp);
+        }
         if(memo)memo->value=f;
         return true;
     }
@@ -2004,6 +2083,12 @@ struct Engine::Impl {
         for (int b = 0; b < NB; ++b) f.amp[b] = (float)(amp[b] * spread * std::pow(airAmp[b], len));
     }
 
+    bool validate(int idx,const Src& sp,const Transducer& rc,const Transducer& src,Found& f,int source,int receiver) {
+        return src.profile() ? validateProfile<true>(idx,sp,rc,src,f,source,receiver)
+                             : validateProfile<false>(idx,sp,rc,src,f,source,receiver);
+    }
+
+    template<bool Profile>
     void solveLink(int s, int r, const Transducer& src, bool jumpNow, int fadePeriods) {
         found.clear();
         const Src& sp = *srcs[s];
@@ -2025,12 +2110,19 @@ struct Engine::Impl {
                 const double u = L / c * sr / cfg.ctrlInterval;
                 L = norm(histPos(sp, u) - dp.first) + dp.inner + norm(rc.pos - dp.last);
             }
-            const double gain = dirGain(src, unit(dp.first - src.pos));
             double rg[NB];
             dirGainBands(rc, unit(dp.last - rc.pos), rg);
             for (int b = 0; b < NB; ++b) dp.amp[b] *= (float)rg[b];
             Found f;
-            finish(f, kDiffKey, Vec3{L, 0, 0}, gain, dp.amp);
+            if constexpr (Profile) {
+                double sg[NB];
+                dirGainBands(src, unit(dp.first - src.pos), sg);
+                for (int b = 0; b < NB; ++b) dp.amp[b] *= (float)sg[b];
+                finish(f, kDiffKey, Vec3{L, 0, 0}, 1.0, dp.amp);
+            } else {
+                const double gain = dirGain(src, unit(dp.first - src.pos));
+                finish(f, kDiffKey, Vec3{L, 0, 0}, gain, dp.amp);
+            }
             found.push_back(f);
         };
         if (transmitLeg(G(), src.pos, rc.pos, -1, -1, damp)) {  // through open/partial walls, attenuated
@@ -2040,9 +2132,16 @@ struct Engine::Impl {
             double rg[NB];
             dirGainBands(rc, d * -1.0, rg);
             for (int b = 0; b < NB; ++b) damp[b] *= (float)rg[b];
-            const float* amp = damp;
             Found f;
-            finish(f, 0, retardedD(sp, 0, rc.pos), dirGain(src, d), amp);
+            if constexpr (Profile) {
+                double sg[NB];
+                dirGainBands(src, d, sg);
+                for (int b = 0; b < NB; ++b) damp[b] *= (float)sg[b];
+                finish(f, 0, retardedD(sp, 0, rc.pos), 1.0, damp);
+            } else {
+                const float* amp = damp;
+                finish(f, 0, retardedD(sp, 0, rc.pos), dirGain(src, d), amp);
+            }
             found.push_back(f);
             if (diffr && screened) addDiffracted(true);
         } else if (diffr) {  // blocked: the sound bends round the nearest wall end
@@ -2050,7 +2149,7 @@ struct Engine::Impl {
         }
         for (size_t i = 1; i < nodes.size(); ++i) {
             Found f;
-            if (found.size() < found.capacity() && validate((int)i, sp, rc, src, f,s,r)) found.push_back(f);
+            if (found.size() < found.capacity() && validateProfile<Profile>((int)i, sp, rc, src, f,s,r)) found.push_back(f);
         }
         const double maxDelay = (double)ringMask - 16;
         auto& taps = links[(size_t)s * RM + r];
@@ -2083,7 +2182,7 @@ struct Engine::Impl {
                 for (size_t ti = 0; ti < taps.size(); ++ti) {
                     if (!taps[ti].jumpFadeOut && taps[ti].key != 0xFFFFFFFFu) continue;
                     float pk = 0.f;
-                    for (int b = 0; b < NB; ++b) pk = std::max(pk, std::max(taps[ti].g0[b], taps[ti].g1[b]));
+                    for (int b = 0; b < NB; ++b) pk = std::max(pk, std::max(std::fabs(taps[ti].g0[b]), std::fabs(taps[ti].g1[b])));
                     if (pk < bestPeak) { bestPeak = pk; bestIdx = (int)ti; }
                 }
                 if (bestIdx >= 0) taps[(size_t)bestIdx] = nt;
@@ -2368,6 +2467,8 @@ struct Engine::Impl {
                     handoverLegacy = true;
                     jumpHandoverAbort = true;
                 }
+                motionExact = false;
+                if (gainMode == 2) gainMode = 1;
                 if (mMid.load(std::memory_order_acquire) & 4)
                     mFront = mMid.exchange(mFront, std::memory_order_acq_rel) & 3;
             }
@@ -2484,7 +2585,7 @@ struct Engine::Impl {
             }
         }
         if(!shared && bakeEnabled.load(std::memory_order_relaxed))bakeAudioStep(audioJumped);
-        else if(!shared)bakeAudioValid=false;
+        else if(!shared){bakeAudioValid=false;passOff.store(false,std::memory_order_relaxed);std::fill(bakeAudioSourceValid.begin(),bakeAudioSourceValid.end(),0);}
         {
             const float gt = (float)std::min(std::max(params[S * 4 + 6].load(std::memory_order_relaxed), 0.0), 1.0);
             diffG += (gt - diffG) * 0.2f;
@@ -2521,9 +2622,20 @@ struct Engine::Impl {
             Vec3 pnow{pose[0], pose[1], pose[2]};
             ++sp.period;
             sp.hist[sp.period & (kHist - 1)] = pnow;
-            const double pat = std::min(std::max(params[S * 4 + 8 + s].load(std::memory_order_relaxed), 0.0), 1.0);
-            bool changed = lmoved || firstSolve || worldChanged || dopK != lastDopK || pat != sp.solvedPattern;
+            const auto& state = sp.directivityState.audioRead();
+            const double pat = state.fixedPattern ? state.pattern : std::min(std::max(params[S*4+8+s].load(std::memory_order_relaxed), 0.0), 1.0);
+            const auto* curDir = state.profile.get();
+            const double curAmt = state.amount;
+            const double curAimAz = state.aimAzDeg, curAimEl = state.aimElDeg, curAimRoll = state.aimRollDeg;
+            bool changed = lmoved || firstSolve || worldChanged || dopK != lastDopK || pat != sp.solvedPattern
+                || curDir != sp.solvedDirectivity
+                || (curDir != nullptr && (curAmt != sp.solvedAmount || curAimAz != sp.solvedAimAz || curAimEl != sp.solvedAimEl || curAimRoll != sp.solvedAimRoll));
             sp.solvedPattern = pat;
+            sp.solvedDirectivity = curDir;
+            sp.solvedAmount = curAmt;
+            sp.solvedAimAz = curAimAz;
+            sp.solvedAimEl = curAimEl;
+            sp.solvedAimRoll = curAimRoll;
             for (int i = 0; i < 4; ++i) if(pose[i]!=sp.solvedPose[i]) {changed=true; if(!firstSolve)autoMovingUntil.store(gcount+(uint64_t)(.4*sr),std::memory_order_relaxed);}
             if(changed&&!firstSolve)++sp.earlyEpoch;
             if (changed) sp.quiet = 0;
@@ -2542,11 +2654,17 @@ struct Engine::Impl {
             Transducer st;
             st.elevationDeg=sp.t.elevationDeg;st.patternHf=sp.t.patternHf;st.gainDb=sp.t.gainDb;
             st.pattern = pat;
+            st.instrumentAmount = curAmt;
+            st.aimAzDeg = curAimAz;
+            st.aimElDeg = curAimEl;
+            st.aimRollDeg = curAimRoll;
+            st.directivityView = curDir;
             st.pos = pnow;
             st.azimuthDeg = pose[3];
             if (!buildImages(st.pos)) nodes.resize(1);
             diffPendingNow = false;
-            for (int r = 0; r < RM; ++r) solveLink(s, r, st, audioJumped, fadePeriods);
+            if (curDir) {for (int r=0;r<RM;++r) solveLink<true>(s,r,st,audioJumped,fadePeriods);}
+            else {for (int r=0;r<RM;++r) solveLink<false>(s,r,st,audioJumped,fadePeriods);}
             if (diffPendingNow) sp.quiet = 0;  // an answer is still being searched for: keep solving this source
         }
         runDiffractionJobs();
@@ -2574,7 +2692,7 @@ struct Engine::Impl {
             for (size_t i = 0; i < l.size();) {
                 Tap& t = l[i];
                 float m = 0;
-                for (int b = 0; b < NB; ++b) m = std::max(m, t.g1[b]);
+                for (int b = 0; b < NB; ++b) m = std::max(m, std::fabs(t.g1[b]));
                 if (m == 0.f) { l[i] = l.back(); l.pop_back(); }
                 else ++i;
             }
@@ -2621,7 +2739,7 @@ struct Engine::Impl {
         const float invCtrl = 1.f / cfg.ctrlInterval;
         for (const Tap& t : links[(size_t)s * RM + r]) {
             float gmax = 0;bool gainsStat=true;
-            for (int k = 0; k < NB; ++k) {gmax = std::max(gmax, std::max(t.g0[k], t.g1[k]));gainsStat=gainsStat&&t.g0[k]==t.g1[k];}
+            for (int k = 0; k < NB; ++k) {gmax = std::max(gmax, std::max(std::fabs(t.g0[k]), std::fabs(t.g1[k])));gainsStat=gainsStat&&t.g0[k]==t.g1[k];}
             if (gmax < 3e-5f) continue;  // below -90 dB: inaudible, not worth rendering
             float* const dst = (t.key == 0 || t.key == kDiffKey) ? out : early;
             const bool stat = t.d0 == t.d1 && gainsStat;
@@ -2995,8 +3113,8 @@ struct Engine::Impl {
                         std::copy(bakeTransNorm.begin(),bakeTransNorm.end(),bakeAudioNorm.begin());
                         std::copy(trans.gNew.begin(),trans.gNew.end(),bakeReferenceGain.begin());
                         std::copy(bakeTransRefPose.begin(),bakeTransRefPose.end(),bakeAudioRefPose.begin());
-                        motionExact=false;if(gainMode!=2)gainMode=1;
                     }
+                    motionExact=false;if(gainMode!=2)gainMode=1;
                     jumpHandoverAbort=false;
                     transState.store(0,std::memory_order_release);stTransDone.fetch_add(1,std::memory_order_relaxed);
                 }
@@ -3193,6 +3311,27 @@ void Engine::setDecayMultipliers(double low, double mid, double high) {
 }
 void Engine::setDopplerStrength(double k) { p_->params[p_->S * 4 + 7].store(k); }
 void Engine::setSourcePattern(int s, double p) { if (s >= 0 && s < p_->S) p_->params[p_->S * 4 + 8 + s].store(p); }
+void Engine::setSourceDirectivity(int s, std::shared_ptr<const DirectivityProfile> profile, double amount,
+                                  double effectivePattern, double aimAzDeg, double aimElDeg, double aimRollDeg) {
+    if (s < 0 || s >= p_->S) return;
+    const bool hasProf = profile != nullptr;
+    const double az = hasProf ? clampTo(aimAzDeg, -180.0, 180.0, 0.0) : 0.0;
+    const double el = hasProf ? clampTo(aimElDeg, -90.0, 90.0, 0.0) : 0.0;
+    const double roll = hasProf ? clampTo(aimRollDeg, -180.0, 180.0, 0.0) : 0.0;
+    DirectivityState state{std::move(profile), clampTo(amount, 0.0, 1.0, 1.0),
+        std::isfinite(effectivePattern) ? clampTo(effectivePattern,0.,1.,0.) : 0., std::isfinite(effectivePattern),
+        az, el, roll};
+    const auto old=p_->srcs[(size_t)s]->directivityState.controlRead();
+    const double legacy=p_->params[p_->S*4+8+s].load();
+    const bool acousticChange=old.profile!=state.profile || old.amount!=state.amount
+        || old.aimAzDeg!=state.aimAzDeg || old.aimElDeg!=state.aimElDeg || old.aimRollDeg!=state.aimRollDeg
+        || (old.fixedPattern?old.pattern:legacy)!=(state.fixedPattern?state.pattern:legacy);
+    if (state.fixedPattern) p_->params[p_->S*4+8+s].store(state.pattern);
+    if (p_->srcs[(size_t)s]->directivityState.publish(std::move(state))) {
+        p_->srcs[(size_t)s]->directivitySerial.fetch_add(1,std::memory_order_release);
+        if(acousticChange) p_->qualitySerial.fetch_add(1, std::memory_order_release);
+    } // workers, motion and baked tables invalidate together
+}
 void Engine::setSourceAzimuth(int s, double deg) { p_->params[s * 4 + 3].store(deg); }
 void Engine::setListener(double x, double y, double z, double yaw) {
     int o = p_->S * 4;
@@ -3281,6 +3420,7 @@ std::shared_ptr<const TailDiagnostics> Engine::tailDiagnostics() const {
     std::lock_guard<std::mutex> lock(p_->diagnosticsMx);
     return p_->diagnostics;
 }
+std::shared_ptr<BakePool> Engine::analysisPool() const { return std::atomic_load(&p_->bakePool); }
 std::shared_ptr<const Scene> Engine::sceneSnapshot() const { return std::atomic_load(&p_->analysisScene); }
 bool Engine::copyTailForOffline(const Engine& reference) {
     auto& dst=*p_;auto& src=*reference.p_;
@@ -3326,15 +3466,212 @@ bool Engine::copyTailForOffline(const Engine& reference) {
 
 
 namespace verb {
-void Engine::setBakedPaths(const std::vector<BakedPath>& paths) {
-    for(const auto&p:paths){if(p.object < -1||p.object>=p_->S||p.poses.size()<2||p.poses.size()>8193||p.distance.size()!=p.poses.size()||!std::isfinite(p.distance.back())||p.distance.back()<=0||p.distance.front()!=0||!std::is_sorted(p.distance.begin(),p.distance.end()))return;for(double d:p.distance)if(!std::isfinite(d))return;for(const auto&v:p.poses)for(double x:v)if(!std::isfinite(x))return;}
-    std::lock_guard<std::mutex> lock(p_->bakeRequestMx);if(p_->bakePaths==paths)return;
-    p_->bakePaths=paths;++p_->bakeRevision;p_->bakeRequested=false;++p_->bakeAction;const auto oldState=p_->bakeState.load();p_->bakeState=(oldState==BakeState::NotBaked?BakeState::NotBaked:BakeState::Outdated);bool coupled=paths.size()>1&&paths.front().group>=0;for(const auto&p:paths)coupled=coupled&&p.object>=0&&p.group==paths.front().group;p_->bakeEnabled.store(paths.size()==1||coupled,std::memory_order_release);p_->bakePercent=0;
+void Engine::armRecordedPass(){p_->passCommand.store(1,std::memory_order_release);}
+void Engine::stopRecordedPass(){p_->passCommand.store(2,std::memory_order_release);}
+void Engine::recordPassAudio(bool playing) noexcept {p_->recordPassAudio(playing);}
+Engine::RecordedPassStats Engine::recordedPassStats() const noexcept {
+    RecordedPassStats s;s.state=p_->passState.load(std::memory_order_acquire);s.samples=p_->passCount.load(std::memory_order_acquire);s.offPass=p_->passOff.load(std::memory_order_relaxed);return s;
 }
-void Engine::requestPathBake(unsigned workers) {std::lock_guard<std::mutex>lock(p_->bakeRequestMx);p_->bakeWantedWorkers=workers;p_->bakePercent=0;p_->bakeDone=0;p_->bakeTotal=0;p_->bakeWaitReason=0;p_->bakeState=BakeState::Baking;++p_->bakeAction;p_->bakeRequested=true;}
-void Engine::cancelPathBake() {std::lock_guard<std::mutex>lock(p_->bakeRequestMx);p_->bakeRequested=false;++p_->bakeAction;p_->bakePercent=0;p_->bakeState=BakeState::Cancelled;p_->bakeWaitReason=13;}
-Engine::BakeStats Engine::bakeStats() const {BakeStats s;s.state=p_->bakeState.load();s.waitReason=p_->bakeWaitReason.load();s.workers=p_->bakeWorkers.load();s.done=p_->bakeDone.load();s.total=p_->bakeTotal.load();s.stations=p_->bakeStations.load();s.resets=p_->bakeResets.load();s.cancelled=p_->bakeCancelled.load();s.percent=p_->bakePercent.load();if(s.state==BakeState::Baking){auto input=std::atomic_load(&p_->bakeRunningDiagnostic);if(input&&input->job==p_->bakeAction.load()&&!p_->bakeContextAudio(*input)){s.state=BakeState::Outdated;s.percent=0;s.waitReason=11;}}if(s.percent==100){auto table=std::atomic_load(&p_->bakeDiagnostic);if(!p_->bakeEnabled.load()||!table||!p_->bakeContextAudio(*table)){s.percent=0;s.state=BakeState::Outdated;s.waitReason=11;}}s.discontinuities=p_->bakeDiscontinuities.load();s.hash=p_->bakeHash.load();s.lookups=p_->bakeLookups.load();s.milliseconds=p_->bakeMilliseconds.load();return s;}
+Engine::RecordedPassData Engine::exportRecordedPass() const {
+    RecordedPassData out;
+    if(p_->passState.load(std::memory_order_acquire)!=3)return out;
+    int ready=3;
+    if(!p_->passState.compare_exchange_strong(ready,4,std::memory_order_acq_rel))return out;
+    struct Release { std::atomic<int>& state;~Release(){state.store(3,std::memory_order_release);} } release{p_->passState};
+    const size_t n=(size_t)p_->passCount.load(std::memory_order_acquire);
+    const size_t objects=(size_t)p_->S+1,total=n*objects*4;
+    if(n<2||n>Impl::passCap||p_->passBuffer.size()<total)return out;
+    out.objects=(int)objects;out.samples=(int)n;
+    out.poses.assign(p_->passBuffer.begin(),p_->passBuffer.begin()+(ptrdiff_t)total);
+    return out;
+}
+void Engine::Impl::applyBakedPathsLocked(const std::vector<BakedPath>& declared) {
+    auto validBaked=[&](const BakedPath& p){
+        if(p.object < -1||p.object>=S||p.poses.size()<2||p.poses.size()>8193||p.distance.size()!=p.poses.size()||!std::isfinite(p.distance.back())||p.distance.back()<=0||p.distance.front()!=0||!std::is_sorted(p.distance.begin(),p.distance.end()))return false;
+        if(!std::isfinite(p.startU)||!std::isfinite(p.endU)||p.startU<0.||p.endU>1.||p.endU<=p.startU||p.laps<1||p.laps>64)return false;
+        double prevT=0.;
+        for(const auto& k:p.timingKeys){if(!std::isfinite(k.t)||!std::isfinite(k.f)||k.t<prevT||k.t>1.||k.f<0.||k.f>1.||k.easing>3)return false;prevT=k.t;}
+        for(double d:p.distance)if(!std::isfinite(d))return false;
+        for(const auto&v:p.poses)for(double x:v)if(!std::isfinite(x))return false;
+        return true;
+    };
+    for(const auto&p:declared)if(!validBaked(p))return;
+    for(size_t i=0;i<declared.size();++i)for(size_t j=i+1;j<declared.size();++j)if(declared[i].object==declared[j].object)return;
+    declaredPaths=declared;
+    consumeRecordedPass();
+    const auto declSpecs=partitionBakeGroups(declared);
+    bool declHasListener=false;for(const auto&sp:declSpecs)declHasListener|=sp.movesListener;
+    const bool forced=bakeForcedBlock;
+    const bool blocked=(declHasListener&&declSpecs.size()>1)||forced;
+    const bool useRecorded=!recordedPaths.empty()&&(blocked||declared.empty());
+    const auto& paths=useRecorded?recordedPaths:declared;
+    for(const auto&p:paths)if(!validBaked(p))return;
+    for(size_t i=0;i<paths.size();++i)for(size_t j=i+1;j<paths.size();++j)if(paths[i].object==paths[j].object)return;
+    if(bakePaths==paths&&bakeForcedApplied==forced)return;
+    bakeForcedApplied=forced;
+    const auto oldSpecs=partitionBakeGroups(bakePaths);
+    const auto newSpecs=partitionBakeGroups(paths);
+    bool hasListener=false;for(const auto&sp:newSpecs)hasListener|=sp.movesListener;
+    const bool canBake=!newSpecs.empty()&&(!hasListener||newSpecs.size()==1)&&!(forced&&!useRecorded);
+    auto findSpec=[&](const std::vector<BakedGroupSpec>& specs,int obj)->const BakedGroupSpec*{
+        for(const auto&sp:specs)for(int o:sp.objects)if(o==obj)return &sp;
+        return nullptr;
+    };
+    for(int idx=0;idx<=S;++idx){
+        const int obj=idx-1;
+        const auto*oSp=findSpec(oldSpecs,obj);
+        const auto*nSp=findSpec(newSpecs,obj);
+        const bool same=(!oSp&&!nSp)||(oSp&&nSp&&oSp->paths==nSp->paths&&oSp->movesListener==nSp->movesListener);
+        if(!same||!canBake)bakeObjectRevision[(size_t)idx].fetch_add(1,std::memory_order_release);
+    }
+    bakePaths=paths;++bakeRevision;bakeRequested=false;++bakeAction;
+    bakeEnabled.store(canBake,std::memory_order_release);
+    bakePercent=0;bakeWaitReason=0;
+    const auto prevDiag=std::atomic_load(&bakeDiagnosticList);
+    auto keptDiag=std::make_shared<std::vector<BakedTable>>();
+    std::vector<BakedGroupRuntime> nextGroups;nextGroups.reserve(newSpecs.size());
+    bool anyValid=false,anyInvalid=false,anyOutdated=false,anyApprox=false;
+    for(const auto&sp:newSpecs){
+        BakedGroupRuntime gr;gr.spec=sp;
+        std::shared_ptr<const BakedTable> match;
+        if(canBake&&prevDiag){
+            for(const auto&t:*prevDiag){
+                if(t.movingPaths==sp.paths&&t.movesListener==sp.movesListener&&bakeContextTable(t,true)){
+                    match=std::make_shared<BakedTable>(t);break;
+                }
+            }
+        }
+        if(match){
+            gr.table=match;gr.discontinuities=match->discontinuities;
+            gr.done=(int)match->u.size();gr.total=gr.done;gr.percent=100;gr.dirty=false;gr.touched=true;
+            gr.state=match->discontinuities?Engine::BakeState::Approximate:Engine::BakeState::Baked;
+            anyValid=true;anyApprox|=(match->discontinuities>0);
+            keptDiag->push_back(*match);
+        }else if(!canBake){
+            gr.dirty=true;gr.state=Engine::BakeState::Blocked;anyInvalid=true;
+        }else{
+            bool touched=false;
+            for(int o:sp.objects){const int idx=o<0?0:o+1;if(idx>=0&&idx<(int)bakeObjectTouched.size()&&bakeObjectTouched[(size_t)idx])touched=true;}
+            gr.touched=touched;gr.dirty=true;
+            gr.state=touched?Engine::BakeState::Outdated:Engine::BakeState::NotBaked;
+            anyInvalid=true;anyOutdated|=touched;
+        }
+        nextGroups.push_back(std::move(gr));
+    }
+    std::atomic_store(&bakeDiagnosticList,std::shared_ptr<const std::vector<BakedTable>>(keptDiag));
+    std::atomic_store(&bakeDiagnostic,keptDiag->empty()?std::shared_ptr<const BakedTable>{}:std::make_shared<BakedTable>(keptDiag->front()));
+    bakeGroups=std::move(nextGroups);
+    if(newSpecs.empty()){
+        bakeState=Engine::BakeState::NotBaked;
+    }else if(!canBake){
+        bakeState=Engine::BakeState::Blocked;bakeWaitReason=10;
+    }else if(!anyInvalid&&anyValid){
+        bakeState=anyApprox?Engine::BakeState::Approximate:Engine::BakeState::Baked;
+        bakePercent=100;
+    }else if(anyOutdated){
+        bakeState=Engine::BakeState::Outdated;
+    }else{
+        bakeState=Engine::BakeState::NotBaked;
+    }
+}
+bool Engine::importRecordedPass(const RecordedPassData& data) {
+    const size_t objects=(size_t)p_->S+1;
+    if(data.objects!=(int)objects||data.samples<2||(size_t)data.samples>Impl::passCap)return false;
+    const size_t total=(size_t)data.samples*objects*4;
+    if(data.poses.size()!=total)return false;
+    for(double v:data.poses)if(!std::isfinite(v))return false;
+    std::lock_guard<std::mutex> lock(p_->bakeRequestMx);
+    int st=p_->passState.load(std::memory_order_acquire);
+    if(st==1||st==2||st==4)return false;
+    if(!p_->passState.compare_exchange_strong(st,4,std::memory_order_acq_rel))return false;
+    std::copy(data.poses.begin(),data.poses.end(),p_->passBuffer.begin());
+    p_->passCount.store(data.samples,std::memory_order_release);
+    p_->passCommand.store(0,std::memory_order_release);
+    p_->passOff.store(false,std::memory_order_relaxed);
+    p_->passGeneration.fetch_add(1,std::memory_order_acq_rel);
+    p_->passState.store(3,std::memory_order_release);
+    p_->applyBakedPathsLocked(p_->declaredPaths);
+    return true;
+}
+void Engine::setBakeForcedBlock(bool blocked) {
+    std::lock_guard<std::mutex> lock(p_->bakeRequestMx);
+    if(p_->bakeForcedBlock==blocked)return;
+    p_->bakeForcedBlock=blocked;
+    p_->applyBakedPathsLocked(p_->declaredPaths);
+}
+void Engine::setBakedPaths(const std::vector<BakedPath>& declared) {
+    std::lock_guard<std::mutex> lock(p_->bakeRequestMx);
+    p_->applyBakedPathsLocked(declared);
+}
+void Engine::requestPathBake(unsigned workers) {
+    std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    if(p_->passGeneration.load(std::memory_order_acquire)!=p_->passConsumed)
+        p_->applyBakedPathsLocked(p_->declaredPaths);
+    if(p_->bakeEnabled.load()){
+        for(const auto&gr:p_->bakeGroups)for(int o:gr.spec.objects){
+            const int idx=o<0?0:o+1;if(idx>=0&&idx<(int)p_->bakeObjectTouched.size())p_->bakeObjectTouched[(size_t)idx]=1;
+        }
+    }
+    p_->bakeWantedWorkers=workers;p_->bakePercent=0;p_->bakeDone=0;p_->bakeTotal=0;p_->bakeWaitReason=0;p_->bakeState=BakeState::Baking;++p_->bakeAction;p_->bakeRequested=true;
+}
+void Engine::cancelPathBake() {
+    std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    p_->bakeRequested=false;++p_->bakeAction;p_->bakePercent=0;p_->bakeState=BakeState::Cancelled;p_->bakeWaitReason=13;
+    for(auto&gr:p_->bakeGroups)if(gr.state==BakeState::Baking||gr.dirty)gr.state=BakeState::Cancelled;
+}
+void Engine::clearPathBake() {
+    std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    for(auto&r:p_->bakeObjectRevision)r.fetch_add(1,std::memory_order_release);  // the audio thread stops using every table at once
+    p_->bakeRequested=false;++p_->bakeAction;++p_->bakeRevision;p_->bakePercent=0;p_->bakeWaitReason=0;
+    std::atomic_store(&p_->bakeDiagnosticList,std::shared_ptr<const std::vector<BakedTable>>(std::make_shared<std::vector<BakedTable>>()));
+    std::atomic_store(&p_->bakeDiagnostic,std::shared_ptr<const BakedTable>{});
+    std::fill(p_->bakeObjectTouched.begin(),p_->bakeObjectTouched.end(),(uint8_t)0);
+    const bool canBake=p_->bakeEnabled.load();
+    for(auto&gr:p_->bakeGroups){gr.table.reset();gr.done=0;gr.total=0;gr.percent=0;gr.discontinuities=0;gr.dirty=true;gr.touched=false;gr.state=canBake?BakeState::NotBaked:BakeState::Blocked;}
+    p_->bakeState=p_->bakeGroups.empty()?BakeState::NotBaked:canBake?BakeState::NotBaked:BakeState::Blocked;
+    if(!canBake&&!p_->bakeGroups.empty())p_->bakeWaitReason=10;
+}
+Engine::BakeStats Engine::bakeStats() const {
+    BakeStats s;
+    std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    s.state=p_->bakeState.load();s.waitReason=p_->bakeWaitReason.load();s.workers=p_->bakeWorkers.load();
+    s.done=p_->bakeDone.load();s.total=p_->bakeTotal.load();s.stations=p_->bakeStations.load();
+    s.resets=p_->bakeResets.load();s.cancelled=p_->bakeCancelled.load();s.percent=p_->bakePercent.load();
+    const auto action=p_->bakeAction.load();
+    bool anyRunningStale=false;
+    if(s.state==BakeState::Baking){
+        auto inputs=std::atomic_load(&p_->bakeRunningInputs);
+        if(inputs)for(const auto&in:*inputs)if(in.job==action&&!p_->bakeContextTable(in,false)){anyRunningStale=true;break;}
+        if(anyRunningStale){s.state=BakeState::Outdated;s.percent=0;s.waitReason=11;}
+    }
+    bool allBaked=!p_->bakeGroups.empty(),anyInvalidated=false;
+    for(const auto&gr:p_->bakeGroups){
+        PathGroupStats gs;
+        gs.group=gr.spec.group;gs.movesListener=gr.spec.movesListener;gs.objects=gr.spec.objects;
+        gs.state=gr.state;gs.percent=gr.percent;gs.discontinuities=gr.discontinuities;gs.done=gr.done;gs.total=gr.total;
+        if(anyRunningStale&&gs.state==BakeState::Baking){gs.state=BakeState::Outdated;gs.percent=0;}
+        if((gs.state==BakeState::Baked||gs.state==BakeState::Approximate)&&(!gr.table||!p_->bakeContextTable(*gr.table,true))){
+            gs.state=BakeState::Outdated;gs.percent=0;anyInvalidated=true;
+        }
+        allBaked&=(gs.state==BakeState::Baked||gs.state==BakeState::Approximate);
+        s.groups.push_back(std::move(gs));
+    }
+    if((s.percent==100||s.state==BakeState::Baked||s.state==BakeState::Approximate)&&(!p_->bakeEnabled.load()||!allBaked||anyInvalidated)){
+        s.percent=0;s.state=BakeState::Outdated;s.waitReason=11;
+    }
+    s.discontinuities=p_->bakeDiscontinuities.load();s.hash=p_->bakeHash.load();
+    s.lookups=p_->bakeLookups.load();s.milliseconds=p_->bakeMilliseconds.load();
+    return s;
+}
 
 }
 
-namespace verb { std::shared_ptr<const BakedTable> Engine::bakedTableSnapshot()const {return std::atomic_load(&p_->bakeDiagnostic);} }
+namespace verb {
+std::shared_ptr<const BakedTable> Engine::bakedTableSnapshot() const {return std::atomic_load(&p_->bakeDiagnostic);}
+std::vector<std::shared_ptr<const BakedTable>> Engine::bakedTablesSnapshot() const {
+    std::vector<std::shared_ptr<const BakedTable>> out;
+    auto list=std::atomic_load(&p_->bakeDiagnosticList);
+    if(list)for(const auto&t:*list)out.push_back(std::make_shared<BakedTable>(t));
+    return out;
+}
+}

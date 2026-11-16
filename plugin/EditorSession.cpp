@@ -410,14 +410,19 @@ CommandResult EditorSession::dispatch(const juce::var& payload, const juce::Stri
     }
     else if (op == "session.setViewState") r = setViewStateOp(payload, requestId);
     else if (op == "layers.set") r = layersOp(payload, requestId, baseRevision, envelope);
-    else if(op=="path.bake"||op=="path.bakeCancel") {
+    else if(op=="path.recordPass"||op=="path.recordStop") {
+        if(proc.isRoomLoadPending())return error(requestId,{"notReady","A room is loading",""});
+        proc.recordPathPass(op=="path.recordStop");r=ok(requestId,"accepted",{},false);
+    }
+    else if(op=="path.bake"||op=="path.bakeCancel"||op=="path.bakeClear") {
         // Worker actions are not document edits: no revision, transaction or undo entry.
         if(proc.isRoomLoadPending())return error(requestId,{"notReady","A room is loading",""});
         int object=-1;auto value=payload.getProperty("object",{});
         if(!value.isVoid()&&!(value.isString()&&value.toString()=="all")){if(!(value.isInt()||value.isInt64())||(int)value<0||(int)value>kListener)return error(requestId,{"invalid","object must be 0..32, all, or omitted","object"});object=(int)value;}
         if(op=="path.bakeCancel"){proc.cancelPathBake();r=ok(requestId,"accepted",{},false);}
+        else if(op=="path.bakeClear"){proc.clearPathBake();r=ok(requestId,"accepted",{},false);}
         else if(proc.startPathBake(object))r=ok(requestId,"accepted",{},false);
-        else r=error(requestId,{"notReady","Enable a path before baking","object"});
+        else r=error(requestId,{"notReady","Enable a path or record a pass before baking","object"});
     }
     else if (const Descriptor* d = findDescriptor(op)) r = mutate(*d, payload, requestId, baseRevision, transactionId, envelope);
     else if (isOtherServiceOp(op)) return error(requestId, {"unsupported", "this command is served by another service, not by the editing session", "op"});

@@ -6,7 +6,9 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -19,6 +21,7 @@ namespace verbp {
 class EditorSession;  // plugin/EditorSession.h: command model + undo history, owned by the processor
 constexpr int kMaxReceivers = 16;
 constexpr int kListener = kMaxSources;  // object index of the listener (sources are 0..kMaxSources-1)
+static_assert(kListener == kOrientMaxObject, "MovementPath.h hard-codes the listener index");
 
 // Parameter id of object `obj` (source 0..31, listener = kListener), component k: 0 x, 1 y, 2 z, 3 azimuth/yaw,
 // 4 gain (sources only).
@@ -59,7 +62,9 @@ public:
     bool producesMidi() const override { return false; }
     // Hosts may query and cache this before the asynchronous room has loaded.
     // Report the maximum supported tail from the outset, including engine latency.
-    double getTailLengthSeconds() const override { return 20.25; }
+    // With "Keep processing during silence" ON the plugin reports an infinite tail (JUCE VST3 maps +inf to kInfiniteTail),
+    // so a host never skips the plugin while its input is silent and position automation keeps being applied.
+    double getTailLengthSeconds() const override { return keepProcessing.load() ? std::numeric_limits<double>::infinity() : 20.25; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
@@ -81,6 +86,7 @@ public:
     juce::String getStatus() const;
     juce::String getSceneName() const;
     verb::Scene getDisplayScene(double* home /*[4]: x y z yaw of the listener anchor*/ = nullptr) const;
+    std::shared_ptr<verb::BakePool> getAnalysisPool() const;
     verb::Scene getEnergyScene(int source = -1, bool webSnapshot = false) const; // message-thread snapshot, live poses/gains and audible spatial points
     // Edit the live room (message thread): `fn` changes a copy of the scene (walls, surface materials, floor,
     // ceiling, height); the result is validated, kept in the saved state and pushed to the running engine without
@@ -92,6 +98,7 @@ public:
     bool editScene(const std::function<void(verb::Scene&)>& fn);
     bool editSceneMetadata(const std::function<void(verb::Scene&)>& fn);
     bool isRoomLoadPending() const;  // a requested room has not been displayed yet (and did not fail)
+    uint64_t analysisRoomGeneration() const { juce::ScopedLock l(dispLock); return roomGen; }
     // Monotonic revision of the structural state (T3): +1 on every accepted structural change, including the live
     // setters setSourcePattern / setSourceSpread / setPointOffset that do not change getSceneSerial(), and on every
     // room / preset / project-state load (request and completion). Same-room engine rebuilds do not bump it.
@@ -113,6 +120,12 @@ public:
     int addSource();                                             // returns the new index, or -1 if full
     void removeSource(int index);                                // keeps at least one source
     void setSourcePattern(int index, double pattern);  // live: directivity 0 omni, 0.5 cardioid, 1 figure-8
+    void setSourceDirectivity(int index, const std::string& instrument, double amount,
+                              const std::string& customData = {}, const std::string& customName = {},
+                              const std::string& customPath = {},
+                              std::optional<double> aimAzDeg = std::nullopt,
+                              std::optional<double> aimElDeg = std::nullopt,
+                              std::optional<double> aimRollDeg = std::nullopt);  // live: per-band directivity profile + amount + aim
     void setSourceSpread(int index, double radius);  // live: moves the channels of a multichannel source, no rebuild
     // Turns a source (or the listener, obj == kListener) so that its azimuth/yaw points at the world position (x, y).
     void orientObject(int obj, double x, double y);
@@ -147,6 +160,8 @@ public:
     int pathBakePercent() const {return webBakePercent.load();}
     bool startPathBake(int object=-1);
     void cancelPathBake();
+    void clearPathBake();
+    void recordPathPass(bool stop=false) {webPassAction=stop?2:1;wake.signal();}
     juce::var pathBakeStatus() const;
     double webAppliedSize() const {return engineSize.load();}
     float webDuckReductionDb() const {return duckReduction.load();}
@@ -198,15 +213,23 @@ public:
     void setInputMetersEnabled(bool on) { inputMetersOn = on; }  // an editor option saved with the project
     bool keepRoutingEnabled() const { return keepRouting.load(); }
     void setKeepRoutingEnabled(bool on) { keepRouting = on; }
+    bool keepProcessingEnabled() const { return keepProcessing.load(); }
+    void setKeepProcessingEnabled(bool on) { if (keepProcessing.exchange(on) != on) updateHostDisplay(ChangeDetails().withNonParameterStateChanged(true)); }
     bool mixerCompactEnabled() const { return mixerCompact.load(); }
     void setMixerCompactEnabled(bool on) { mixerCompact = on; }
     bool navigationLocked() const { return navLocked.load(); }
     void setNavigationLocked(bool on) { navLocked = on; }
     bool outlinerVisible() const { return showOutliner.load(); }
     void setOutlinerVisible(bool on) { showOutliner = on; }
+    void setTestOutputMeteringEnabled(bool enabled) { outputMeteringEnabled.store(enabled); }
+    float outputRms(int ch) const {return ch>=0&&ch<verbp::kMaxReceivers?outRms[(size_t)ch].load(std::memory_order_relaxed):0.f;}
+    float takeWebOutputPeak(int ch) {return ch>=0&&ch<verbp::kMaxReceivers?outPeaks[(size_t)ch].exchange(0.f,std::memory_order_relaxed):0.f;}
+    bool outputClipped(int ch) const {return ch>=0&&ch<verbp::kMaxReceivers&&outClips[(size_t)ch].load(std::memory_order_relaxed);}
+    void clearOutputClip(int ch) {if(ch>=0&&ch<verbp::kMaxReceivers)outClips[(size_t)ch].store(false,std::memory_order_relaxed);}
     float inputPeak(int ch) const { return ch >= 0 && ch < verbp::kMaxInputChannels ? inPeaks[(size_t)ch].load(std::memory_order_relaxed) : 0.f; }
     // Web meters accumulate between polls; native last-block metering is unchanged.
     void setWebMetersActive(bool on) { webMetersActive.store(on, std::memory_order_relaxed); }
+    float liveAzimuth(int object) const noexcept { return object >= 0 && object <= verbp::kMaxSources ? liveAz[(size_t)object].load(std::memory_order_relaxed) : 0.f; }
     float takeWebInputPeak(int ch) { return ch >= 0 && ch < verbp::kMaxInputChannels ? webInPeaks[(size_t)ch].exchange(0.f, std::memory_order_relaxed) : 0.f; }
     int numPoints() const { return numPts.load(); }
     int numOutputChannels() const { return builtOutCh.load(); }  // channels the engine renders (the layout's)
@@ -271,9 +294,12 @@ private:
     std::atomic<int> webBakePercent{0};
     std::atomic<int> webBakeStart{-2};
     std::atomic<bool> webBakeCancel{false};
+    std::atomic<bool> webBakeClear{false};
+    std::atomic<int> webPassAction{0};
     mutable juce::CriticalSection webBakeLock;
     juce::var webBakeStatus;
     std::array<bool,33> webBakeTouched{};
+    bool webRecordedTouched = false;
     std::atomic<uint64_t> webProcessedBlocks{0};
     std::atomic<float> webCpuMean{0.f};
     std::atomic<float> webCpuWorst{0.f};
@@ -298,11 +324,18 @@ private:
     std::vector<verbp::SourceCfg> srcCfg;
     verbp::OutputCfg outCfg;
     verbp::TailSettings tailSettings;
+    verb::Engine::RecordedPassData savedRecordedPass;
     std::atomic<int> state{0};
     std::atomic<bool> inputMetersOn{true};
     std::atomic<bool> keepRouting{false};
+    std::atomic<bool> keepProcessing{false};   // E21: report an infinite tail; written to project state only when ON
     std::atomic<bool> mixerCompact{true};
     std::atomic<bool> navLocked{false}, showOutliner{false};
+    void captureOutputMeters(const juce::AudioBuffer<float>&);
+    std::atomic<bool> outputMeteringEnabled{true}; // test baseline switch; no host parameter
+    std::array<float,verbp::kMaxReceivers> outMeanSquare{}; // audio thread only
+    std::array<std::atomic<float>,verbp::kMaxReceivers> outPeaks{},outRms{};
+    std::array<std::atomic<bool>,verbp::kMaxReceivers> outClips{};
     std::array<std::atomic<float>, verbp::kMaxInputChannels> inPeaks{};
     std::array<std::atomic<float>, verbp::kMaxInputChannels> webInPeaks{};
     std::atomic<bool> webMetersActive{false};
@@ -331,6 +364,7 @@ private:
     mutable juce::CriticalSection pathLock;
     std::array<verbp::MovementPath, verbp::kMaxSources+1> movementPaths;
     std::array<verbp::PathMailbox, verbp::kMaxSources+1> pathMailboxes;
+    std::array<std::atomic<float>, verbp::kMaxSources+1> liveAz{};  // E19: azimuth actually applied in the last block (after Along path / Look at)
     std::atomic<float>* pathParams[verbp::kMaxSources+1] = {};
     std::atomic<float>* makeupParam = nullptr;
     std::atomic<float>* modeParam = nullptr;
@@ -348,6 +382,12 @@ private:
     juce::SmoothedValue<float> lfeSoloGain{1.f};
     float prevWet = 1.f, prevDry = 0.f;  // audio thread: the dry/wet gains at the end of the last block
     std::atomic<float> srcPattern[verbp::kMaxSources] = {};  // live directivity of every source (audio thread reads)
+    std::shared_ptr<const verb::DirectivityProfile> srcDirectivity[verbp::kMaxSources];
+    std::atomic<float> srcInstrumentAmount[verbp::kMaxSources] = {};
+    std::atomic<float> srcAimAz[verbp::kMaxSources] = {};
+    std::atomic<float> srcAimEl[verbp::kMaxSources] = {};
+    std::atomic<float> srcAimRoll[verbp::kMaxSources] = {};
+    std::atomic<uint64_t> srcDirectivityEpoch{0};
     void syncPatterns();
     std::atomic<float> ptOff[verbp::kMaxPoints][3] = {};  // live offset of every engine point from its source centre
     std::vector<verbp::PointMap> livePoints;                // guarded by dispLock

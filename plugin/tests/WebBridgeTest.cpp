@@ -85,6 +85,11 @@ int main() {
     const auto snap = prop((*hello.getArray())[0], "payload");
     check((int)prop(prop(prop(snap,"parameters"),"descriptors"),"count") == 283, "snapshot contains all 283 live APVTS descriptors including P1");
     juce::File("out/T4/live-snapshot.json").replaceWithText(juce::JSON::toString((*hello.getArray())[0]));
+    check((bool)prop(prop(prop(snap,"capabilities"),"features"),"output.meters").getProperty("available",false),"E12 native output meters capability available");
+    command(R"({"op":"telemetry.subscribe","topics":["meters"]})");captured.clear();bridge.tick(true,980);bool outputEvent=false;
+    for(const auto& message:captured){const auto event=prop(message,"payload");if(prop(event,"event").toString()=="meters.output")outputEvent=prop(event,"peaks").isArray()&&prop(event,"rms").isArray()&&prop(event,"clips").isArray()&&(int)prop(event,"outputChannels")==p.numOutputChannels();}
+    check(outputEvent,"E12 schema validated output telemetry includes all channels peak/RMS/clip");
+    const auto clearClip=command(R"({"op":"output.resetClip","channel":0})");check(prop((*clearClip.getArray())[0],"kind").toString()=="ack","E12 clip reset command accepted");
     auto* mix = p.apvts.getParameter("mix"); HostListener listener; mix->addListener(&listener);
     const auto gesture = bridge.parameterBatch(array({obj({{"type","begin"},{"id","mix"}}),obj({{"type","change"},{"id","mix"},{"value",37.5}}),obj({{"type","end"},{"id","mix"}})}));
     check((bool)prop(gesture,"ok") && listener.begins == 1 && listener.changes == 1 && listener.ends == 1, "gesture reaches host begin/change/end exactly once");
@@ -93,6 +98,14 @@ int main() {
     mix->removeListener(&listener);
     const auto bad = bridge.parameterBatch(array({obj({{"type","begin"},{"id","early"}}),obj({{"type","change"},{"id","early"},{"value",-6}}),obj({{"type","end"},{"id","early"}})}));
     check(prop(bad,"error").isString(), "Physical mode rejects Creative-only change atomically");
+    auto* absorb=p.apvts.getParameter("absorption");HostListener absListener;absorb->addListener(&absListener);
+    const double lower=absorb->getNormalisableRange().start;
+    const auto epsilon=bridge.parameterBatch(array({obj({{"type","begin"},{"id","absorption"}}),obj({{"type","change"},{"id","absorption"},{"value",lower-1e-8}}),obj({{"type","end"},{"id","absorption"}})}));
+    check((bool)prop(epsilon,"ok")&&p.apvts.getRawParameterValue("absorption")->load()>=lower,"E11 epsilon undershoot clamps to legal endpoint");
+    bridge.parameterBatch(array({obj({{"type","begin"},{"id","absorption"}})}));
+    const auto overshoot=bridge.parameterBatch(array({obj({{"type","change"},{"id","absorption"},{"value",100.}})}));
+    check(prop(overshoot,"error").isString()&&absListener.begins==absListener.ends,"E11 rejected change closes native gesture");
+    absorb->removeListener(&absListener);absorb->setValueNotifyingHost(absorb->convertTo0to1(1.f));
     const auto& pr = verb::surfacePresets(); const std::string preset = pr[20].name, preset2 = pr[10].name;
     const std::vector<Step> steps = {
         {"surface.translate", R"({"op":"surface.translate","refs":[{"kind":"wall","index":0}],"deltaM":[0.5,0.25]})"},
@@ -140,6 +153,9 @@ int main() {
         check(prop(a[0],"kind").toString() == "ack", step.name + " through bridge");
         if (prop(a[0],"kind").toString() != "ack") std::printf("  %s\n",juce::JSON::toString(a[0],true).toRawUTF8());
     }
+    command(R"({"op":"room.setHeight","ceilingExtent":"infinite"})");check(p.getDisplayScene().ceilingInfinite,"E11 extent command reaches scene");
+    command(R"({"op":"history.undo"})");check(!p.getDisplayScene().ceilingInfinite,"E11 extent command undo");
+    command(R"({"op":"history.redo"})");check(p.getDisplayScene().ceilingInfinite,"E11 extent command redo");
     command(R"({"op":"history.undo"})"); command(R"({"op":"history.redo"})");
     check(!p.getEditorSession().undoLabel().empty(), "history has human-readable undo label");
     command(R"({"op":"editor.setFlags","flags":{"keepRouting":false,"navLocked":true}})");
@@ -181,6 +197,7 @@ int main() {
     {verbp::MovementPath path;double x=p.apvts.getRawParameterValue("s1x")->load(),y=p.apvts.getRawParameterValue("s1y")->load(),z=p.apvts.getRawParameterValue("s1z")->load();path.points={{{x,y,z}},{{x+.2,y,z}}};check(p.setMovementPath(0,path),"E9b native bridge path accepted");const auto revision=p.getRevision();const auto depth=p.getEditorSession().undoDepth();
         auto reply=command(R"({"op":"path.bake","object":0})");check(prop((*reply.getArray())[0],"kind").toString()=="ack"&&p.getRevision()==revision&&p.getEditorSession().undoDepth()==depth,"E9b native bake ack changes no revision or undo");
         reply=command(R"({"op":"path.bakeCancel"})");check(prop((*reply.getArray())[0],"kind").toString()=="ack","E9b native cancel ack");const auto until=juce::Time::getMillisecondCounterHiRes()+3000;while(prop(p.pathBakeStatus(),"state").toString()!="cancelled"&&juce::Time::getMillisecondCounterHiRes()<until){block.clear();stage2Process(p,block,midi);juce::MessageManager::getInstance()->runDispatchLoopUntil(5);}bridge.tick(true,2990);bool found=false;for(const auto&m:captured){auto payload=prop(m,"payload");if(prop(payload,"event").toString()=="status.load"&&prop(prop(payload,"pathBake"),"state").toString()=="cancelled")found=true;}check(found,"E9b runtime bake state/cancel reason delivered in typed status event");p.setMovementPath(0,{});}
+    {auto clr=command(R"({"op":"path.bakeClear"})");check(prop((*clr.getArray())[0],"kind").toString()=="ack","E24 native bakeClear ack");const auto until2=juce::Time::getMillisecondCounterHiRes()+3000;while(prop(p.pathBakeStatus(),"state").toString()!="notBaked"&&juce::Time::getMillisecondCounterHiRes()<until2){block.clear();stage2Process(p,block,midi);juce::MessageManager::getInstance()->runDispatchLoopUntil(5);}check(prop(p.pathBakeStatus(),"state").toString()=="notBaked","E24 bakeClear returns the bake state to notBaked");}
     bridge.tick(true,3000); const int beforeHidden=captured.size(); bridge.tick(false,3100); bridge.tick(false,5000); check(captured.size()==beforeHidden,"hidden editor emits no telemetry");
     const auto currentDeadline=juce::Time::getMillisecondCounterHiRes()+5000;
     while(!p.isWebSceneCurrent() && juce::Time::getMillisecondCounterHiRes()<currentDeadline) juce::MessageManager::getInstance()->runDispatchLoopUntil(10);
@@ -203,7 +220,39 @@ int main() {
     bool replayed=false;
     for(const auto& m:*restored.getArray()){record(m);if(prop(prop(m,"payload"),"event").toString()=="analysis.result")replayed=true;}
     check(replayed,"hello after hidden page replays the real Energy descriptor");
+    {
+        const auto preset = p.getRoomPresetText(); juce::MemoryBlock savedState; p.getStateInformation(savedState);
+        // Same-room edits retain the resource and mark it stale, loads do not.
+        check(p.editScene([](verb::Scene& s){s.humidity+=.01;}),"E12b ordinary room edit accepted");
+        bridge.tick(true,juce::Time::getMillisecondCounterHiRes());
+        bool stale=false;for(const auto& m:captured)stale|=prop(prop(m,"payload"),"event").toString()=="analysis.stale";
+        check(stale,"E12b ordinary edit keeps analysis and emits STALE");
+        for(int load=0;load<4;++load) {
+            const auto pending=juce::Time::getMillisecondCounterHiRes()+10000;
+            while(!p.isWebSceneCurrent()&&juce::Time::getMillisecondCounterHiRes()<pending){block.clear();p.processBlock(block,midi);juce::MessageManager::getInstance()->runDispatchLoopUntil(4);}
+            command(R"({"op":"analysis.start","source":0,"heightM":1.2,"durationS":1,"resolution":16,"rays":12000,"components":7})");
+            const size_t first=captured.size();bool done=false;juce::String url;
+            const auto until=juce::Time::getMillisecondCounterHiRes()+10000;
+            while(!done&&juce::Time::getMillisecondCounterHiRes()<until){bridge.tick(true,juce::Time::getMillisecondCounterHiRes());juce::MessageManager::getInstance()->runDispatchLoopUntil(5);
+                for(size_t i=first;i<captured.size();++i){auto e=prop(captured[i],"payload");if(prop(e,"event").toString()=="analysis.result"&&prop(e,"outcome").toString()=="done"){done=true;url=prop(prop(prop(e,"result"),"blob"),"fullUrl").toString();}}}
+            check(done,"E12b result ready before load invalidation test");
+            if(load==0){const auto r=verbp::builtinRooms()[5];p.loadRoomWithSetup(r.text,r.name,r.setup,r.micPattern);}
+            if(load==1)p.loadSceneText(p.getRoomText(),"E12b txt load",true);
+            if(load==2){juce::String why;check(p.loadRoomPresetText(preset,why),"E12b verbroom restore accepted");}
+            if(load==3){auto running=command(R"({"op":"analysis.start","source":0,"heightM":1.2,"durationS":20,"resolution":96,"rays":192000,"components":7})");check(prop((*running.getArray())[0],"kind").toString()=="ack","E12b running analysis accepted before state LOAD cancels it");}
+            if(load==3)p.setStateInformation(savedState.getData(),(int)savedState.getSize());
+            const size_t before=captured.size();bridge.tick(true,juce::Time::getMillisecondCounterHiRes());
+            bool cleared=false;for(size_t i=before;i<captured.size();++i)cleared|=prop(prop(captured[i],"payload"),"event").toString()=="analysis.cleared";
+            std::vector<std::byte> obsolete;
+            check(cleared&&!bridge.resource(url,obsolete),"E12b library/txt/verbroom/state load clears descriptor and old binary");
+            const auto helloAgain=bridge.handle(obj({{"schemaVersion",1},{"sessionId","test-live"},{"kind","hello"},{"payload",obj({{"supportedVersions",array({1})},{"ready",true}})}}));
+            bool oldReplay=false;for(const auto& m:*helloAgain.getArray()){record(m);oldReplay|=prop(prop(m,"payload"),"event").toString()=="analysis.result";}
+            check(!oldReplay,"E12b hello after room load cannot replay old map");
+        }
+    }
     command(R"({"op":"analysis.cancel"})"); command(R"({"op":"rt60.cancel"})");
+    // Wait for the preceding asynchronous state reload before structural commands.
+    if (!ready(p)) return 1;
     // P1b bridge checks: lpath descriptor group, laps in snapshot/command, and bidirectional path automation.
     {
         const auto desc = prop(prop(prop(prop((*hello.getArray())[0], "payload"), "parameters"), "descriptors"), "parameters");
@@ -220,6 +269,7 @@ int main() {
         check(s1pathName.containsIgnoreCase("Source 1 path") && s2pathName.containsIgnoreCase("Source 2 path") && lpathName.containsIgnoreCase("Listener path"), "path parameters expose readable host names");
         const auto addSrcRes = command(R"({"op":"source.add"})");
         check(prop((*addSrcRes.getArray())[0], "kind").toString() == "ack", "source.add for Source 2 path test");
+        check(ready(p), "engine ready after source.add for path test");
         const auto setPathRes = command(R"({"op":"path.set","object":32,"points":[[1,2,1.5],[5,2,1.5],[5,6,1.5]],"enabled":true,"closed":true,"laps":3})");
         check(prop((*setPathRes.getArray())[0], "kind").toString() == "ack", "path.set accepts laps");
         const auto setSrc2Res = command(R"({"op":"path.set","object":1,"points":[[2,2,1.5],[6,2,1.5]],"enabled":true})");
@@ -257,10 +307,204 @@ int main() {
         lpathParam->setValueNotifyingHost(0.f);
         s2pathParam->setValueNotifyingHost(0.f);
         bridge.tick(true, juce::Time::getMillisecondCounterHiRes() + 40);
+        // E16 bridge checks: path.setFlags group, document omission when uncoupled, coupled bake & blocked ASCII reason.
+        {
+            const auto gL = command(R"({"op":"path.setFlags","object":32,"group":1})");
+            const auto gS2 = command(R"({"op":"path.setFlags","object":1,"group":1})");
+            check(prop((*gL.getArray())[0], "kind").toString() == "ack" && prop((*gS2.getArray())[0], "kind").toString() == "ack", "E16 path.setFlags accepts coupling group");
+            const auto e16Snap = bridge.handle(obj({{"schemaVersion",1},{"sessionId","test-live"},{"kind","hello"},{"payload",obj({{"supportedVersions",array({1})},{"ready",true}})}}));
+            const auto pathsDoc = prop(prop(prop((*e16Snap.getArray())[0], "payload"), "document"), "paths");
+            auto* p0Obj = pathsDoc[0].getDynamicObject();
+            check(p0Obj && !p0Obj->hasProperty("group"), "E16 uncoupled path omits group in document snapshot");
+            check((int)prop(pathsDoc[32], "group") == 1 && (int)prop(pathsDoc[1], "group") == 1, "E16 coupled paths serialize group=1 in document snapshot");
+            command(R"({"op":"path.set","object":32,"points":[[0.8,0.5,1.2],[1.2,0.5,1.2]],"enabled":true,"closed":false,"laps":1})");
+            command(R"({"op":"path.set","object":1,"points":[[0.6,1.0,1.2],[1.4,1.0,1.2]],"enabled":true,"closed":false,"laps":1})");
+            command(R"({"op":"path.setFlags","object":32,"group":1})");
+            command(R"({"op":"path.setFlags","object":1,"group":1})");
+            const auto bakeCmd = command(R"({"op":"path.bake","object":"all"})");
+            check(prop((*bakeCmd.getArray())[0], "kind").toString() == "ack", "E16 coupled group bake command accepted");
+            const auto e16Deadline = juce::Time::getMillisecondCounterHiRes() + 15000.0;
+            while (prop(p.pathBakeStatus(), "state").toString() != "baked" && juce::Time::getMillisecondCounterHiRes() < e16Deadline) {
+                block.clear(); stage2Process(p, block, midi); juce::MessageManager::getInstance()->runDispatchLoopUntil(5);
+            }
+            bridge.tick(true, juce::Time::getMillisecondCounterHiRes() + 60);
+            const auto st = p.pathBakeStatus();
+            bool foundS2 = false, foundL = false;
+            if (auto* arr = prop(st, "paths").getArray()) {
+                for (const auto& it : *arr) {
+                    if ((int)prop(it, "object") == 1) foundS2 = (int)prop(it, "group") == 1 && (int)prop(it, "drivenBy") == 1 && prop(it, "state").toString() == "baked";
+                    if ((int)prop(it, "object") == 32) foundL = (int)prop(it, "group") == 1 && (int)prop(it, "drivenBy") == 1 && prop(it, "state").toString() == "baked";
+                }
+            }
+            check(prop(st, "state").toString() == "baked" && foundS2 && foundL, "E16 coupled bake finishes cleanly with per-path driver metadata");
+            const auto ugS2 = command(R"({"op":"path.setFlags","object":1,"group":-1})");
+            check(prop((*ugS2.getArray())[0], "kind").toString() == "ack", "E16 uncoupling source 2 accepted");
+            const auto blkDeadline = juce::Time::getMillisecondCounterHiRes() + 5000.0;
+            while (prop(p.pathBakeStatus(), "state").toString() != "blocked" && juce::Time::getMillisecondCounterHiRes() < blkDeadline) {
+                block.clear(); stage2Process(p, block, midi); juce::MessageManager::getInstance()->runDispatchLoopUntil(5);
+            }
+            bridge.tick(true, juce::Time::getMillisecondCounterHiRes() + 120);
+            const auto blkReason = prop(p.pathBakeStatus(), "reason").toString();
+            bool reasonAscii = blkReason.isNotEmpty();
+            for (unsigned char c : blkReason.toStdString()) reasonAscii &= (c >= 32 && c <= 126);
+            check(prop(p.pathBakeStatus(), "state").toString() == "blocked" && reasonAscii, "E16 uncoupled listener+source reports blocked with pure-ASCII reason");
+            command(R"({"op":"path.setFlags","object":32,"group":-1})");
+        }
         const auto clrRes = command(R"({"op":"path.clear","object":32})");
         const auto clrSrc2Res = command(R"({"op":"path.clear","object":1})");
         const auto rmSrc2Res = command(R"({"op":"source.remove","index":1})");
         check(prop((*clrRes.getArray())[0], "kind").toString() == "ack" && prop((*clrSrc2Res.getArray())[0], "kind").toString() == "ack" && prop((*rmSrc2Res.getArray())[0], "kind").toString() == "ack", "path.clear cleans up listener and source 2 test paths");
+    }
+    {
+        // E18 bridge checks: path timing fields omitted at default, start/end & point timing/easing commands, decreasing rejection, undo/redo.
+        const auto e18Set = command(R"({"op":"path.set","object":0,"points":[[1,1,1.5],[2,1,1.5],[3,1,1.5]],"enabled":true})");
+        check(prop((*e18Set.getArray())[0], "kind").toString() == "ack", "E18 path.set default accepted");
+        auto snapDoc = [&]() {
+            const auto h = bridge.handle(obj({{"schemaVersion",1},{"sessionId","test-live"},{"kind","hello"},{"payload",obj({{"supportedVersions",array({1})},{"ready",true}})}}));
+            return prop(prop(prop((*h.getArray())[0], "payload"), "document"), "paths")[0];
+        };
+        const auto defDoc = snapDoc();
+        auto* defObj = defDoc.getDynamicObject();
+        check(defObj && !defObj->hasProperty("start") && !defObj->hasProperty("end") && !defObj->hasProperty("times") && !defObj->hasProperty("easings"),
+              "E18 default path omits start/end/times/easings in bridge snapshot");
+
+        const auto e18Win = command(R"({"op":"path.setFlags","object":0,"start":15,"end":85})");
+        const auto e18Pt = command(R"({"op":"path.setPointTiming","object":0,"index":1,"time":40,"easing":"easeInOut"})");
+        check(prop((*e18Win.getArray())[0], "kind").toString() == "ack" && prop((*e18Pt.getArray())[0], "kind").toString() == "ack",
+              "E18 path.setFlags window and path.setPointTiming accepted");
+        const auto timedDoc = snapDoc();
+        const auto timedArr = prop(timedDoc, "times");
+        const auto easingArr = prop(timedDoc, "easings");
+        check(std::abs((double)prop(timedDoc, "start") - 15.0) < 1e-6 && std::abs((double)prop(timedDoc, "end") - 85.0) < 1e-6
+              && timedArr.isArray() && timedArr.size() == 3 && std::abs((double)timedArr[1] - 40.0) < 1e-6
+              && easingArr.isArray() && easingArr.size() == 3 && easingArr[1].toString() == "easeInOut",
+              "E18 timed path serializes start/end/times/easings in bridge snapshot");
+
+        command(R"({"op":"path.addPoint","object":0,"point":[4,1,1.5]})");
+        const auto e18Bad = command(R"({"op":"path.setPointTiming","object":0,"index":2,"time":20})");
+        check(prop((*e18Bad.getArray())[0], "kind").toString() == "error", "E18 decreasing point time returns bridge error");
+        const auto afterBad = snapDoc();
+        check(std::abs((double)prop(afterBad, "times")[1] - 40.0) < 1e-6 && prop(afterBad, "times")[2].isVoid(),
+              "E18 rejected timing edit leaves document state unchanged");
+
+        const auto e18Clr = command(R"({"op":"path.setPointTiming","object":0,"index":1,"time":null,"easing":"linear"})");
+        check(prop((*e18Clr.getArray())[0], "kind").toString() == "ack", "E18 clearing point time to null accepted");
+        const auto clearedDoc = snapDoc();
+        auto* clearedObj = clearedDoc.getDynamicObject();
+        check(clearedObj && !clearedObj->hasProperty("times") && !clearedObj->hasProperty("easings"),
+              "E18 cleared point timing omits times/easings from snapshot");
+
+        const auto undoRes = command(R"({"op":"history.undo"})");
+        check(prop((*undoRes.getArray())[0], "kind").toString() == "ack"
+              && std::abs((double)prop(snapDoc(), "times")[1] - 40.0) < 1e-6
+              && prop(snapDoc(), "easings")[1].toString() == "easeInOut",
+              "E18 history.undo restores cleared point time and easing");
+        const auto redoRes = command(R"({"op":"history.redo"})");
+        auto* redoObj = snapDoc().getDynamicObject();
+        check(prop((*redoRes.getArray())[0], "kind").toString() == "ack"
+              && redoObj && !redoObj->hasProperty("times") && !redoObj->hasProperty("easings"),
+              "E18 history.redo reapplies clearing point time and easing");
+
+        command(R"({"op":"path.clear","object":0})");
+    }
+    {
+        // E22 bridge checks: Profiles initial dir, lastDirectivityDir preference + fallback, aim commands, validation, polarSlices, undo/redo.
+        const auto expectedProfiles = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("SBP/Verb Room/Profiles");
+        const auto initDir = bridge.directivityInitialDir(true);
+        check(initDir == expectedProfiles && initDir.isDirectory(),
+              "E22 directivityInitialDir defaults to Documents/SBP/Verb Room/Profiles and creates it");
+
+        const auto tmpPrefDir = juce::File::getCurrentWorkingDirectory().getChildFile("out/E22/tmp-profiles-dir");
+        tmpPrefDir.createDirectory();
+        const auto prefSetRes = send(obj({{"op", "preferences.set"}, {"patch", obj({{"lastDirectivityDir", tmpPrefDir.getFullPathName()}})}}));
+        check(prop((*prefSetRes.getArray())[0], "kind").toString() == "ack"
+              && bridge.directivityInitialDir(false) == tmpPrefDir,
+              "E22 preferences.set lastDirectivityDir overrides directivityInitialDir when folder exists");
+
+        tmpPrefDir.deleteRecursively();
+        check(bridge.directivityInitialDir(true) == expectedProfiles,
+              "E22 missing lastDirectivityDir falls back to Profiles");
+        command(R"({"op":"preferences.set","patch":{"lastDirectivityDir":""}})");
+
+        auto src0 = [&]() {
+            const auto h = bridge.handle(obj({{"schemaVersion",1},{"sessionId","test-live"},{"kind","hello"},{"payload",obj({{"supportedVersions",array({1})},{"ready",true}})}}));
+            return prop(prop(prop((*h.getArray())[0], "payload"), "document"), "sources")[0];
+        };
+
+        check(prop((*command(R"({"op":"source.setDirectivity","index":0,"instrument":"brass_trumpet_bell_model","amount":1})").getArray())[0], "kind").toString() == "ack",
+              "E22 select brass_trumpet_bell_model accepted");
+        const auto sDef = src0();
+        auto* sDefObj = sDef.getDynamicObject();
+        const auto slices0 = prop(sDef, "polarSlices");
+        check(sDefObj && !sDefObj->hasProperty("aimAzDeg") && !sDefObj->hasProperty("aimElDeg") && !sDefObj->hasProperty("aimRollDeg")
+              && slices0.isArray() && slices0.size() == 3,
+              "E22 snapshot omits zero aimAzDeg/aimElDeg/aimRollDeg and exposes polarSlices");
+
+        check(prop((*command(R"({"op":"source.setDirectivity","index":0,"aimAzDeg":90,"aimElDeg":30,"aimRollDeg":-45})").getArray())[0], "kind").toString() == "ack",
+              "E22 set aimAzDeg/aimElDeg/aimRollDeg accepted");
+        const auto sAim = src0();
+        check(std::abs((double)prop(sAim, "aimAzDeg") - 90.0) < 1e-6
+              && std::abs((double)prop(sAim, "aimElDeg") - 30.0) < 1e-6
+              && std::abs((double)prop(sAim, "aimRollDeg") + 45.0) < 1e-6,
+              "E22 snapshot reports non-zero aimAzDeg=90, aimElDeg=30, aimRollDeg=-45");
+
+        // Partial update preserves existing elevation while changing azimuth
+        check(prop((*command(R"({"op":"source.setDirectivity","index":0,"aimAzDeg":45})").getArray())[0], "kind").toString() == "ack",
+              "E22 partial aimAzDeg update accepted");
+        const auto sPart = src0();
+        check(std::abs((double)prop(sPart, "aimAzDeg") - 45.0) < 1e-6
+              && std::abs((double)prop(sPart, "aimElDeg") - 30.0) < 1e-6,
+              "E22 partial update preserves aimElDeg=30");
+
+        // A different profile starts with its own orientation (hand-rotated angles are dropped); explicit values in the same command still apply.
+        check(prop((*command(R"({"op":"source.setDirectivity","index":0,"instrument":"brass_tuba_bell_model"})").getArray())[0], "kind").toString() == "ack",
+              "E22b switching profile accepted");
+        const auto sSwitch = src0();
+        auto* sSwitchObj = sSwitch.getDynamicObject();
+        check(sSwitchObj && !sSwitchObj->hasProperty("aimAzDeg") && !sSwitchObj->hasProperty("aimElDeg") && !sSwitchObj->hasProperty("aimRollDeg"),
+              "E22b switching to another profile resets the aim angles");
+        check(prop((*command(R"({"op":"source.setDirectivity","index":0,"instrument":"brass_trumpet_bell_model","aimAzDeg":45,"aimElDeg":30,"aimRollDeg":-45})").getArray())[0], "kind").toString() == "ack",
+              "E22b switching back with explicit aim accepted");
+        const auto sBack = src0();
+        check(std::abs((double)prop(sBack, "aimAzDeg") - 45.0) < 1e-6 && std::abs((double)prop(sBack, "aimElDeg") - 30.0) < 1e-6,
+              "E22b explicit aim in the same command survives the profile change");
+
+        // Reject out-of-range (unrecorded direct bridge call since schema also forbids 181) and non-zero aim on none
+        const auto badRangeMsg = obj({{"schemaVersion", 1}, {"sessionId", "test-live"}, {"kind", "command"}, {"requestId", "test-bad-range"},
+            {"baseRevision", decimal(p.getRevision())}, {"payload", juce::JSON::parse(R"({"op":"source.setDirectivity","index":0,"aimAzDeg":181})")}});
+        const auto badRange = bridge.handle(badRangeMsg);
+        const auto badNone = command(R"({"op":"source.setDirectivity","index":0,"instrument":"none","aimAzDeg":45})");
+        check(badRange.isArray() && !badRange.getArray()->isEmpty() && prop((*badRange.getArray())[0], "kind").toString() == "error"
+              && prop((*badNone.getArray())[0], "kind").toString() == "error",
+              "E22 rejects out-of-bounds aimAzDeg and non-zero aim on instrument=none");
+
+        // Use explicit transaction so EditorSession records a discrete undo step rather than coalescing rapid same-key edits
+        send(obj({{"op", "transaction.begin"}}), {}, "tx-e22-aim");
+        const auto res90 = send(juce::JSON::parse(R"({"op":"source.setDirectivity","index":0,"aimAzDeg":90,"aimElDeg":0,"aimRollDeg":0})"), {}, "tx-e22-aim");
+        send(obj({{"op", "transaction.commit"}}), {}, "tx-e22-aim");
+        check(prop((*res90.getArray())[0], "kind").toString() == "ack",
+              "E22 set aimAzDeg=90, el=0, roll=0 accepted");
+        const auto s90 = src0();
+        auto* s90Obj = s90.getDynamicObject();
+        const auto slices90 = prop(s90, "polarSlices");
+        bool rotSliceOk = s90Obj && !s90Obj->hasProperty("aimElDeg") && !s90Obj->hasProperty("aimRollDeg")
+            && slices90.isArray() && slices90.size() == 3;
+        for (int b = 0; b < 3 && rotSliceOk; ++b) {
+            if (std::abs((double)slices90[b][18] - (double)slices0[b][0]) > 1e-4) rotSliceOk = false;
+        }
+        check(rotSliceOk, "E22 aimAzDeg=90 omits zero el/roll and shifts polarSlices[b][18] to slices0[b][0]");
+
+        // Undo / redo restores aim state
+        check(prop((*command(R"({"op":"history.undo"})").getArray())[0], "kind").toString() == "ack", "E22 history.undo accepted");
+        const auto sUndo = src0();
+        check(std::abs((double)prop(sUndo, "aimAzDeg") - 45.0) < 1e-6 && std::abs((double)prop(sUndo, "aimElDeg") - 30.0) < 1e-6,
+              "E22 history.undo restores aimAzDeg=45, aimElDeg=30");
+        check(prop((*command(R"({"op":"history.redo"})").getArray())[0], "kind").toString() == "ack", "E22 history.redo accepted");
+        const auto sRedo = src0();
+        check(std::abs((double)prop(sRedo, "aimAzDeg") - 90.0) < 1e-6,
+              "E22 history.redo reapplies aimAzDeg=90");
+
+        command(R"({"op":"source.setDirectivity","index":0,"instrument":"none"})");
     }
     juce::File("out/T4/bridge-messages.json").replaceWithText(juce::JSON::toString(captured));
     std::printf("web_bridge: %d pass, %d fail, %d validated envelopes; %.3f s; snapshot %zu bytes\n",passes,fails,checked,(juce::Time::getMillisecondCounterHiRes()-started)/1000.,juce::JSON::toString((*hello.getArray())[0],true).getNumBytesAsUTF8());
@@ -362,11 +606,16 @@ int main() {
         check(waitJs("document.querySelector('.ray-legend')?.textContent.includes('live poses') && document.querySelector('.ray-legend')?.textContent.includes('first order') && !document.querySelector('.ray-legend')?.textContent.includes('static')"), "partial engine rays carry a truthful first-order live-pose note");
         check(eval("String(document.querySelector('.rt-large')?.textContent !== 'â€”' && document.querySelector('.rt-caption')?.textContent.includes('Engine'))") == "true", "real RT60 arrives in status card");
         mix->setValueNotifyingHost(mix->convertTo0to1(37.5f));
+        // The Mix knob lives in the Mix tab since the owner swapped it with Output gain in the macro row: open that tab for the two
+        // readout checks and return to the tab that was active, so the rest of the test sees the page as before.
+        const auto tabBefore = eval("document.querySelector('.bottom [role=tab][aria-selected=true]')?.textContent || ''");
+        eval("[...document.querySelectorAll('.bottom [role=tab]')].find(e=>e.textContent==='Mix')?.click();'ok'");
         // T9 D1: the page now formats every value with one table that always carries the unit ("37.5 %"); the value shown is still the
         // plugin's own value after host automation, so the check compares against the unit-formatted plugin value.
         const auto mixText = juce::String(juce::String(mix->convertFrom0to1(mix->getValue()), 1).getDoubleValue()) + " %";
         check(waitJs("document.querySelector('[data-parameter=mix] .readout')?.value === " + juce::JSON::toString(mixText)), "live readout uses authoritative plugin text after automation");
         check(eval("String(document.querySelector('[data-parameter=mix] [role=slider]')?.getAttribute('aria-valuetext') === " + juce::JSON::toString(mixText) + ")") == "true", "accessible slider text is authoritative too");
+        eval("[...document.querySelectorAll('.bottom [role=tab]')].find(e=>e.textContent===" + juce::JSON::toString(tabBefore) + ")?.click();'ok'");
         // All ids are taken from the backend catalogue, chosen in the live combobox.
         p.setTailSettings({8000,false});
         const auto rooms = verbp::builtinRooms();
@@ -506,6 +755,32 @@ int main() {
         check(eval("document.querySelector('.viewport').dataset.drawCount") == drawsBefore, "silent idle meter/status traffic causes zero viewport redraws");
         juce::File("out/T4b/after-metrics.json").replaceWithText(juce::JSON::toString(obj({{"firstFullRenderMs",openMs},{"idleWindowMs",2000},{"initialWebviewCpuMs",webCpuMs},{"initialOneCoreCpuPercent",webCpuMs/20.},{"steadyWebviewCpuMs",steadyCpuMs},{"steadyOneCoreCpuPercent",steadyCpuMs/20.},{"idleDrawsBefore",drawsBefore},{"idleDrawsAfter",eval("document.querySelector('.viewport').dataset.drawCount")}})));
         std::printf("T4b steady WebView CPU %.3f ms / 2 s = %.3f%% one core\n",steadyCpuMs,steadyCpuMs/20.);
+        // E11: owned real WebView timer during three worker/gesture workloads.
+        const auto heartbeatWindow=[&](const char* label,bool drag){
+            double previous=juce::Time::getMillisecondCounterHiRes(),maximum=0;const double until=previous+1500;
+            if(drag)bridge.parameterBatch(array({obj({{"type","begin"},{"id","absorption"}})}));
+            int n=0;while(juce::Time::getMillisecondCounterHiRes()<until){
+                const double now=juce::Time::getMillisecondCounterHiRes();maximum=std::max(maximum,now-previous);previous=now;
+                if(drag && n++%8==0)bridge.parameterBatch(array({obj({{"type","change"},{"id","absorption"},{"value",1.+.01*(n%10)}})}));
+                block.clear();p.processBlock(block,midi);bridge.tick(true,now);juce::MessageManager::getInstance()->runDispatchLoopUntil(4);
+            }
+            if(drag)bridge.parameterBatch(array({obj({{"type","end"},{"id","absorption"}})}));
+            printf("E11 HEARTBEAT %s loop_max_gap_ms %.3f webview_timer_max_gap_ms %.3f bridge_tick_max_ms %.3f\n",label,maximum,editor->getStats().maxTimerGapMs,editor->getStats().maxBridgeTickMs);
+        };
+        heartbeatWindow("continuous-drag",true);
+        verbp::MovementPath movement;movement.enabled=true;movement.points={{{1.,1.,1.5}},{{1.5,1.,1.5}}};p.setMovementPath(verbp::kListener,movement);
+        const auto waitCurrent=[&]{const auto deadline=juce::Time::getMillisecondCounterHiRes()+5000;while(!p.isWebSceneCurrent()&&juce::Time::getMillisecondCounterHiRes()<deadline){block.clear();p.processBlock(block,midi);bridge.tick(true,juce::Time::getMillisecondCounterHiRes());juce::MessageManager::getInstance()->runDispatchLoopUntil(4);}};
+        waitCurrent();check(p.startPathBake(verbp::kListener),"E11 heartbeat workload user bake accepted");heartbeatWindow("user-bake",false);p.cancelPathBake();
+        waitCurrent();const auto analysisReply=command(R"({"op":"analysis.start","source":0,"resolution":24,"rays":48000,"heightM":1.2,"durationS":3,"components":7})");check(prop((*analysisReply.getArray())[0],"kind").toString()=="ack","E11 heartbeat workload energy analysis accepted");heartbeatWindow("energy-map",false);command(R"({"op":"analysis.cancel"})");
+        eval("document.querySelector('[data-action=diagnostics]')?.click();'ok'");
+        check(waitJs("document.querySelector('[data-ui-diagnostics]')?.textContent.includes('message-thread gap')"),"E11 Theme Diagnostics exposes native live watchdog");
+        eval("document.querySelector('.theme-menu').open=false;'ok'");clickText("Settings");
+        check(waitJs("document.querySelectorAll('.output-meter-row').length === " + juce::String(p.numOutputChannels())),"E12 native Settings renders output meter for every current channel");
+        clickText("Energy");
+        check(waitJs("!document.querySelector('.energy-scale')?.hidden"),"E12b live map layer exists before room load");
+        {const auto r=verbp::builtinRooms()[5];p.loadSceneText(r.text,r.name,true);}
+        check(waitJs("document.querySelector('.analysis-status')?.textContent==='No result · Analyze to start' && document.querySelector('.energy-scale')?.hidden",10000),"E12b live room LOAD clears map layer and returns analysis status to No result");
+
         eval("document.querySelector('[data-action=classic-ui]')?.click();'ok'");
         const auto switched=juce::Time::getMillisecondCounterHiRes();
         while(!editor->getNativeEditor() && juce::Time::getMillisecondCounterHiRes()-switched<3000)juce::MessageManager::getInstance()->runDispatchLoopUntil(10);
@@ -514,6 +789,40 @@ int main() {
     }
     settings() = beforeSettings;
 #endif
+    // E21 B: a host channel-count change alone (no scene edit, no window reopen) must publish a fresh snapshot whose host block carries the new counts.
+    {
+        double nowMs = 5.0e6;
+        captured.clear();
+        const auto helloHost = bridge.handle(obj({{"schemaVersion",1},{"sessionId","test-live"},{"kind","hello"},{"payload",obj({{"supportedVersions",array({1})},{"ready",true}})}}));
+        for (const auto& m : *helloHost.getArray()) record(m);
+        for (int i = 0; i < 3; ++i) bridge.tick(true, nowMs += 40);
+        const auto publishedHost = [&](int wantIn, int wantOut, bool keep = false) {
+            if (!keep) captured.clear();
+            bool seen = false;
+            for (int i = 0; i < 60 && !seen; ++i) {
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(10); bridge.tick(true, nowMs += 40);
+                for (const auto& m : captured) {
+                    if (prop(m, "kind").toString() != "snapshot") continue;
+                    const auto h = prop(prop(m, "payload"), "host");
+                    if ((int)prop(h, "inputChannels") == wantIn && (int)prop(h, "outputChannels") == wantOut) seen = true;
+                }
+            }
+            return seen;
+        };
+        const int in0 = p.hostInputChannels(), out0 = p.hostOutputChannels();
+        check(publishedHost(in0, out0, true), "E21 B: initial snapshot carries the current host channel counts");
+        for (const int outCh : {4, 9, 2}) {
+            p.setPlayConfigDetails(2, outCh, 48000, 256); p.prepareToPlay(48000, 256);
+            check(ready(p), "E21 B: engine ready after the host output count changes to " + std::to_string(outCh));
+            check(publishedHost(2, outCh), "E21 B: UI snapshot carries host.outputChannels=" + std::to_string(outCh) + " without user action");
+        }
+        p.setPlayConfigDetails(6, 2, 48000, 256); p.prepareToPlay(48000, 256);
+        check(ready(p), "E21 B: engine ready after the host input count changes to 6");
+        check(publishedHost(6, 2), "E21 B: UI snapshot carries host.inputChannels=6 without user action");
+        p.setPlayConfigDetails(2, 2, 48000, 256); p.prepareToPlay(48000, 256);
+        check(ready(p), "E21 B: engine ready after the host input count returns to 2");
+        check(publishedHost(2, 2), "E21 B: UI snapshot carries host.inputChannels=2 again");
+    }
     std::printf("FINAL web_bridge: %d pass, %d fail\n", passes, fails);
     return fails ? 1 : 0;
 }

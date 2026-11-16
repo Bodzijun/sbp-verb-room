@@ -7,6 +7,7 @@
 //  - process() never allocates or locks. Setters are thread-safe (atomics, last value wins).
 #pragma once
 #include <memory>
+#include <limits>
 
 #include "scene.hpp"
 #include "tail.hpp"
@@ -94,6 +95,10 @@ public:
     // depth of the comb filtering that direct sound + a strong reflection produce (the "flanger" colour).
     void setEarlyLevel(double dB);
     void setSourcePattern(int s, double p);  // directivity 0 omni .. 0.5 cardioid .. 1 figure-8, live
+    // Control thread only (allocations/ownership retirement); process only reads the mailbox.
+    void setSourceDirectivity(int s, std::shared_ptr<const DirectivityProfile> profile, double amount = 1.0,
+                              double effectivePattern = std::numeric_limits<double>::quiet_NaN(),
+                              double aimAzDeg = 0.0, double aimElDeg = 0.0, double aimRollDeg = 0.0);
     void setTailLevel(double dB);  // level of the late field (the reverberant tail) alone, -60..+12 dB, live
     // 0 = all components; bits 1 direct, 2 early, 4 tail. Changes ramp over 10 ms.
     void setSoloMask(int mask);
@@ -148,21 +153,52 @@ public:
     // Actual immutable modeled geometry, including the seeded roughness/clutter.
     // Control threads only; retaining it never involves the audio callback.
     std::shared_ptr<const Scene> sceneSnapshot() const;
+    std::shared_ptr<BakePool> analysisPool() const;
     // Control/offline only: destination must have tailThread=false and no concurrent
     // process(). Copies the reference's audible IR and immutable modeled geometry,
     // never its audio history.
     // Only the reference worker is locked; its process() does not acquire this mutex.
     bool copyTailForOffline(const Engine& reference);
 
-    // Control thread only. Empty or multiple paths select the legacy estimator.
+    // Control thread only. Empty or conflicting moving listener + uncoupled sources select the legacy estimator.
+    void armRecordedPass(); // control; actual capture happens after setters on audio thread
+    void stopRecordedPass();
+    void recordPassAudio(bool playing) noexcept;
+    struct RecordedPassStats { int state=0,samples=0;bool offPass=false; };
+    RecordedPassStats recordedPassStats() const noexcept;
+    struct RecordedPassData {
+        int objects=0,samples=0;
+        std::vector<double> poses; // row-major: samples * objects * 4
+    };
+    RecordedPassData exportRecordedPass() const;
+    bool importRecordedPass(const RecordedPassData& data);
     void setBakedPaths(const std::vector<BakedPath>& paths);
+    // E19: true when an object's orientation depends on an independently moving target. Behaves like an uncoupled moving listener:
+    // Blocked unless a recorded pass is available. Control thread only.
+    void setBakeForcedBlock(bool blocked);
     enum class BakeState { NotBaked, Baking, Baked, Outdated, Cancelled, Blocked, Approximate, Failed };
     // Control thread requests only. workers=0 selects hardware concurrency minus one.
     void requestPathBake(unsigned workers=0);
     void cancelPathBake();
-    struct BakeStats { BakeState state=BakeState::NotBaked; int percent=0, discontinuities=0,waitReason=0,workers=0,done=0,total=0; uint64_t hash=0,lookups=0,stations=0,resets=0,cancelled=0; double milliseconds=0; };
+    // Drops every baked table (and any running bake); declared paths stay, state returns to NotBaked. Control thread only.
+    void clearPathBake();
+    struct PathGroupStats {
+        int group=-1;
+        bool movesListener=false;
+        std::vector<int> objects;
+        BakeState state=BakeState::NotBaked;
+        int percent=0,discontinuities=0,done=0,total=0;
+    };
+    struct BakeStats {
+        BakeState state=BakeState::NotBaked;
+        int percent=0, discontinuities=0,waitReason=0,workers=0,done=0,total=0;
+        uint64_t hash=0,lookups=0,stations=0,resets=0,cancelled=0;
+        double milliseconds=0;
+        std::vector<PathGroupStats> groups;
+    };
     BakeStats bakeStats() const;
     std::shared_ptr<const BakedTable> bakedTableSnapshot() const;
+    std::vector<std::shared_ptr<const BakedTable>> bakedTablesSnapshot() const;
     // E4a. Tests with EngineConfig::manualWorker: one pass of the late-field worker, synchronously (control thread,
     // never while process() runs).
     void runWorkerStep();

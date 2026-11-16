@@ -23,6 +23,7 @@ public:
     void setUiSwitch(std::function<void(bool)> fn) { uiSwitch = std::move(fn); }
     void windowSize(int w, int h);
     std::pair<int, int> preferredSize() const;
+    juce::File directivityInitialDir(bool createDefault = true) const;
 private:
     juce::var dispatch(const juce::var&);
     juce::var snapshotAttempt(int retries);
@@ -37,12 +38,15 @@ private:
     juce::var error(const juce::String&, const char*, const juce::String&, bool resync = false) const;
     juce::var document() const;
     juce::var host() const;
+    juce::String hostSignature() const;
     juce::var history();
     juce::var catalogs(const juce::String& requestId);
     void fileCommand(const juce::var&, const juce::String&);
     bool loadFile(const juce::File&);
     void startAnalysis(const juce::var&);
     void pollAnalysis();
+    void checkAnalysisRoom();
+    uint64_t analysisRoomGeneration = 0;
     void emitEvent(juce::var);
     void publishSnapshot();
     juce::String analysisSignature(int source) const;
@@ -62,6 +66,7 @@ private:
     bool clutterDirty = true;
     juce::String lastClutterSignature;
     int lastState = -1;
+    juce::String sentHost;
     std::vector<juce::String> topics;
     juce::var preferences = obj();
     juce::File preferenceLocation;

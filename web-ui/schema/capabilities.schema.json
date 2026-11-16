@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json",
+  "title": "Verb Room WebView contract v1: capabilities",
+  "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Capabilities",
+  "$defs": {
+    "Feature": {
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "available",
+            "partial",
+            "unavailable",
+            "readOnly",
+            "planned"
+          ]
+        },
+        "reasonCode": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "available",
+        "status"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "unavailable",
+                  "readOnly",
+                  "planned"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "reasonCode"
+            ]
+          }
+        }
+      ]
+    },
+    "Capabilities": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "const": 1
+        },
+        "pluginVersion": {
+          "type": "string"
+        },
+        "engine": {
+          "type": "object",
+          "properties": {
+            "erOrder": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4
+            },
+            "maxWallsForOrder": {
+              "type": "integer",
+              "minimum": 12,
+              "maximum": 128
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "erOrder",
+            "maxWallsForOrder"
+          ]
+        },
+        "features": {
+          "type": "object",
+          "properties": {
+            "mode.physicalCreative": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "absorption.scale": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "decay.bandMultipliers": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "rt60.target": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "rt60.estimate": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "tail.quality": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "tail.diagnostics": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "energy.map": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "energy.components": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "energy.planSlice": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "energy.sliceFrontSide": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "ir.export": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "ir.exportCancel": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "ir.exportProgressCounters": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "presets.verbroom": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "presets.txt": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "presets.keepIO": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "library.user": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "history.undo": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "history.redo": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "surface.groups": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "surface.perSurfaceLockHide": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "editor.layerModesPersist": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "editor.viewStateSession": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "surface.classEdit": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "room.scaleOnce": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "room.diffraction": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "room.clutter": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "room.clutterMinDist": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "room.roughness": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "sources.freePoints": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "output.layouts": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "output.micPatterns": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "output.ringIndependentCount": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "output.meters": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "input.meters": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "reflections.paths": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "size.continuous": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "predelay": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "stereoWidth": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "freeze": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "duck": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "binaural": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "ambix": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "hybridFdn": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "lfRoomModes": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "velvetTransition": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "instrumentDirectivity": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "ab.compare": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "ab.persistInProject": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "colours.material": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
+            "colours.source": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode.physicalCreative",
+            "absorption.scale",
+            "decay.bandMultipliers",
+            "rt60.target",
+            "rt60.estimate",
+            "tail.quality",
+            "tail.diagnostics",
+            "energy.map",
+            "energy.components",
+            "energy.planSlice",
+            "energy.sliceFrontSide",
+            "ir.export",
+            "ir.exportCancel",
+            "ir.exportProgressCounters",
+            "presets.verbroom",
+            "presets.txt",
+            "presets.keepIO",
+            "library.user",
+            "history.undo",
+            "history.redo",
+            "surface.groups",
+            "surface.perSurfaceLockHide",
+            "editor.layerModesPersist",
+            "editor.viewStateSession",
+            "surface.classEdit",
+            "room.scaleOnce",
+            "room.diffraction",
+            "room.clutter",
+            "room.clutterMinDist",
+            "room.roughness",
+            "sources.freePoints",
+            "output.layouts",
+            "output.micPatterns",
+            "output.ringIndependentCount",
+            "output.meters",
+            "input.meters",
+            "reflections.paths",
+            "size.continuous",
+            "predelay",
+            "stereoWidth",
+            "freeze",
+            "duck",
+            "binaural",
+            "ambix",
+            "hybridFdn",
+            "lfRoomModes",
+            "velvetTransition",
+            "instrumentDirectivity",
+            "ab.compare",
+            "ab.persistInProject",
+            "colours.material",
+            "colours.source"
+          ],
+          "description": "Every known feature MUST be present; unavailable ones are shown marked, never omitted."
+        },
+        "contractMinor": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "features"
+      ]
+    }
+  }
+}

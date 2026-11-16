@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verbroom.invalid/web-ui/schema/fixture.schema.json",
+  "title": "Verb Room WebView contract v1: fixture file wrapper (test-only)",
+  "type": "object",
+  "properties": {
+    "fixtureMeta": {
+      "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/FixtureMeta"
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "$ref": "https://verbroom.invalid/web-ui/schema/envelope.schema.json#/$defs/Envelope"
+      },
+      "minItems": 1
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "fixtureMeta",
+    "messages"
+  ],
+  "description": "Test-only wrapper: an ordered list of envelopes plus value-source annotations."
+}

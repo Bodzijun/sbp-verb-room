@@ -9,12 +9,16 @@ def write_binary_readme(stage: Path, version: str, target: str) -> None:
             "Windows x64",
             "Copy the entire `Verb Room.vst3` folder to "
             "`C:\\Program Files\\Common Files\\VST3\\`.\n\n"
-            "The Windows build requires an AVX2/FMA-capable CPU.",
+            "The Windows build requires an AVX2/FMA-capable CPU. The new web interface uses the Microsoft WebView2 "
+            "Runtime (normally present on Windows 10/11); without it the classic interface opens.",
         ),
         "macos-universal": (
             "macOS Universal (Apple Silicon and Intel)",
             "Copy the entire `Verb Room.vst3` bundle to "
             "`~/Library/Audio/Plug-Ins/VST3/` or `/Library/Audio/Plug-Ins/VST3/`.\n\n"
+            "The package is ad-hoc signed, not notarized. If macOS blocks it, right-click the plug-in and choose "
+            "Open, or run `xattr -dr com.apple.quarantine \"Verb Room.vst3\"`. The new web interface uses the system "
+            "WKWebView; to use the classic interface, press `Classic UI` in the Theme menu or set `VERB_UI=classic`.\n\n"
             "See INSTALL.txt for this build's macOS requirements and signing status.",
         ),
         "linux-x86_64": (

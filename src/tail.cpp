@@ -166,8 +166,12 @@ struct TailTracePrepared {
     for (int r = 0; r < R; ++r) clip[(size_t)r] = makeSphereClip(g, rcv[(size_t)r].pos, rd);
     }
 };
+// Analysis-only bounded replay records. Source ray propagation is unchanged.
+struct EnergySegment { Vec3 p,d;double L,path;std::array<double,NB> e;double x0,x1,y0,y1; };
+struct EnergyCapture {std::vector<EnergySegment> segments;double rz0=0,rz1=0,rd=0;std::atomic<size_t>* count=nullptr;};
+struct EnergyCaptureFull:std::runtime_error {EnergyCaptureFull():std::runtime_error("Analysis segment budget"){} };
 static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize,
-    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr, int firstRay=0,int lastRay=-1,const TailTracePrepared* prepared=nullptr,TailHist* recycle=nullptr) {
+    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr, int firstRay=0,int lastRay=-1,const TailTracePrepared* prepared=nullptr,TailHist* recycle=nullptr,EnergyCapture* capture=nullptr) {
     std::unique_ptr<TailTracePrepared> owned;
     if(!prepared){owned=std::make_unique<TailTracePrepared>(sc,rcv);prepared=owned.get();}
     const auto& g=prepared->g;const int R=prepared->R;const double c=prepared->c;
@@ -209,7 +213,7 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
         if (crn) crn->rayAcc.assign((size_t)R * NB, 0.0);
         double zc = 2 * U(rng) - 1, ph = 2 * kPi * U(rng), sr_ = std::sqrt(1 - zc * zc);
         Vec3 d{sr_ * std::cos(ph), sr_ * std::sin(ph), zc};
-        double gs = dirGain(src, d);
+        double gs = src.profile() != nullptr ? std::pow(10.0, src.gainDb / 20.0) : dirGain(src, d);
         std::array<double, NB> e;
         e.fill(gs * gs / rays);
         Vec3 p = src.pos;
@@ -249,6 +253,8 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
             double L = surf < 0 ? maxPath - path : std::min(tBest, maxPath - path);
             if (L <= 0) break;
             if (refl > order) {
+                if(capture){double a=0,b=L;if(std::abs(d.z)>1e-12){double lo=(capture->rz0-p.z)/d.z,hi=(capture->rz1-p.z)/d.z;if(lo>hi)std::swap(lo,hi);a=std::max(a,lo);b=std::min(b,hi);}else if(p.z<capture->rz0||p.z>capture->rz1)b=-1;
+                    if(b>=a){if(capture->segments.size()%128==0&&capture->count->fetch_add(128)>=262144)throw EnergyCaptureFull();const auto q0=p+d*a,q1=p+d*b;capture->segments.push_back({p,d,L,path,e,std::min(q0.x,q1.x)-rd,std::max(q0.x,q1.x)+rd,std::min(q0.y,q1.y)-rd,std::max(q0.y,q1.y)+rd});}}
                 auto record = [&](int r) {
                     Vec3 oc = p - rcv[r].pos;
                     double bq = dot(oc, d), cc = dot(oc, oc) - rd * rd, disc = bq * bq - cc;
@@ -408,6 +414,69 @@ std::vector<std::array<double, NB>> traceTailEnergy(const Scene& sc, const Trans
     return result;
 }
 
+
+static void replayEnergy(const TailTracePrepared& prepared,const Transducer& receiver,const SphereClip& clipping,const EnergySegment& segment,std::array<double,NB>& result) {
+    const auto& g=prepared.g;const auto& airDb=prepared.airDb;const double rd=prepared.rd,Vs=prepared.Vs;const auto p=segment.p,d=segment.d;const double L=segment.L,path=segment.path;const auto& e=segment.e;
+
+                    Vec3 oc = p - receiver.pos;
+                    double bq = dot(oc, d), cc = dot(oc, oc) - rd * rd, disc = bq * bq - cc;
+                    if (disc <= 0) return;
+                    double sq = std::sqrt(disc);
+                    double s1 = std::max(-bq - sq, 0.0), s2 = std::min(-bq + sq, L);
+                    if (s2 <= s1) return;
+                    double mid = path + 0.5 * (s1 + s2);
+                    double chord = s2 - s1, vol = Vs;
+                    const SphereClip& sphere = clipping;
+                    if (!sphere.clean) {  // count only the part of the chord the receiver can actually be reached from
+                        // Three probes first (both ends and the middle of the chord): all hidden or all reachable ends
+                        // the question; a chord that crosses a boundary is cut into 8 pieces, each judged at its middle.
+                        const Vec3 c0 = receiver.pos;
+                        const bool v0 = reachable(g, sphere, c0, p + d * s1), v1 = reachable(g, sphere, c0, p + d * (0.5 * (s1 + s2))),
+                                   v2 = reachable(g, sphere, c0, p + d * s2);
+                        if (v0 == v1 && v1 == v2) {
+                            if (!v0) return;
+                        } else {
+                            constexpr int K = 8;
+                            const double ds = chord / K;
+                            int seen = 0;
+                            for (int k = 0; k < K; ++k)
+                                if (reachable(g, sphere, c0, p + d * (s1 + (k + 0.5) * ds))) ++seen;
+                            if (seen == 0) return;
+                            chord = ds * seen;
+                        }
+                        vol = Vs * sphere.reach;
+                    }
+                    
+                    double grb[NB];
+                    dirGainBands(receiver, d * -1.0, grb);
+                    for (int b = 0; b < NB; ++b) {
+                        const double gr = grb[b];
+                        const double contrib = 4 * kPi * e[b] * std::pow(10.0, -airDb[b] * mid / 10.0) * chord / vol * gr * gr;
+                        result[b] += contrib;
+                        
+                        
+                    }
+
+}
+template<class F>static void analysisTasks(const TailExecution& execution,size_t count,F fn){
+    const unsigned width=std::max(1u,std::min<unsigned>((unsigned)count,execution.workers));std::atomic<bool> failed{false};std::vector<std::future<void>> jobs;
+    try{for(unsigned j=0;j<width;++j)jobs.push_back(execution.pool->submit([&,j]{try{for(size_t i=j;i<count&&!failed.load();i+=width)fn(i);}catch(...){failed=true;throw;}},false,true));}
+    catch(...){failed=true;for(auto& job:jobs)if(job.valid())try{job.get();}catch(...){}throw;}
+    std::exception_ptr error;for(auto& job:jobs)try{job.get();}catch(...){if(!error)error=std::current_exception();}if(error)std::rethrow_exception(error);
+}
+std::vector<std::array<double,NB>> traceTailEnergyAnalysis(const Scene& sc,const Transducer& src,const std::vector<Transducer>& receivers,int order,int rays,int seed,const std::function<bool()>& cancelled,const std::function<void(double)>& progress,const TailExecution& execution){
+    if(!execution.pool||execution.workers<=1)return traceTailEnergy(sc,src,receivers,order,rays,seed,cancelled,progress);
+    const TailTracePrepared prepared(sc,receivers),empty(sc,{});double rz0=1e30,rz1=-1e30;for(auto r:receivers){rz0=std::min(rz0,r.pos.z-prepared.rd);rz1=std::max(rz1,r.pos.z+prepared.rd);}
+    std::vector<std::array<double,NB>> result(receivers.size());
+    for(int first=0;first<rays;first+=128){if(cancelled&&cancelled())throw std::runtime_error("Analysis cancelled");const int count=std::min(128,rays-first);std::vector<EnergyCapture> captures((size_t)count);std::atomic<size_t> records{0};std::atomic<bool> overflow{false};
+        for(auto& c:captures){c.rz0=rz0;c.rz1=rz1;c.rd=prepared.rd;c.count=&records;}
+        try {analysisTasks(execution,count,[&](size_t i){try{traceTailImpl(sc,src,{},order,rays,seed,false,true,cancelled,{},nullptr,first+(int)i,first+(int)i+1,&empty,nullptr,&captures[i]);}catch(const EnergyCaptureFull&){overflow=true;throw;}});}
+        catch(...){if(overflow.load()&&!(cancelled&&cancelled())){auto fallback=traceTailEnergy(sc,src,receivers,order,rays,seed,cancelled);if(progress)progress(1.);return fallback;}throw;}
+        analysisTasks(execution,receivers.size(),[&](size_t r){if(cancelled&&cancelled())throw std::runtime_error("Analysis cancelled");const auto position=receivers[r].pos;
+            for(const auto& capture:captures)for(const auto& segment:capture.segments)if(position.x>=segment.x0&&position.x<=segment.x1&&position.y>=segment.y0&&position.y<=segment.y1)replayEnergy(prepared,receivers[r],prepared.clip[r],segment,result[r]);});
+        if(progress)progress((first+count)/(double)rays);
+    }return result;
+}
 std::vector<std::array<double, NB>> traceTailEnergyCRN(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
     int order, int rays, int seed, double stopDb, const std::function<bool()>& cancelled, long long* work, std::vector<std::array<double, NB>>* sumSq) {
     TraceCRN crn;
@@ -558,7 +627,7 @@ std::vector<std::array<double, NB>> traceLateReciprocal(const Scene& sc, Vec3 or
                             }
                             vol = Vs * sphere.reach;
                         }
-                        const double gs = dirGain(st, d * -1.0);  // the source sends this energy along -d
+                        const double gs = st.profile() != nullptr ? std::pow(10.0, st.gainDb / 20.0) : dirGain(st, d * -1.0);  // the source sends this energy along -d
                         for (int b = 0; b < NB; ++b) {
                             const double base = 4 * kPi * f[(size_t)b] * std::pow(10.0, -airDb[(size_t)b] * mid / 10.0) * chord / vol * gs * gs;
                             for (int r = 0; r < R; ++r) out[(size_t)s * R + r][(size_t)b] += base * w[(size_t)r * NB + b];
@@ -1011,6 +1080,7 @@ Scene withAbsorptionScale(const Scene& scene, double scale) {
 
 std::array<double, NB> estimateRoomRT60(const Scene& scene) {
     const Scene s = withClutter(withRoughness(scene), 128);
+    const CeilingPlan ceilingPlan(s);
     // Even-odd scan integration handles concave outlines and overlapping material patches.
     double x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
     for (const auto& w : scene.walls) { x0 = std::min({x0,w.ax,w.bx}); x1 = std::max({x1,w.ax,w.bx}); y0 = std::min({y0,w.ay,w.by}); y1 = std::max({y1,w.ay,w.by}); }
@@ -1026,7 +1096,7 @@ std::array<double, NB> estimateRoomRT60(const Scene& scene) {
         for (const auto& w : scene.walls) if ((w.ay > y) != (w.by > y) && w.ax+(y-w.ay)*(w.bx-w.ax)/(w.by-w.ay)>x) ++hits;
         if (!(hits & 1)) continue;
         const double a = (x1-x0)*(y1-y0)/25600.; area += a;
-        add(a, floorMatAt(s,x,y)); add(a,ceilMatAt(s,x,y));
+        add(a, floorMatAt(s,x,y)); add(a,ceilMatAt(s,x,y,&ceilingPlan));
     }
     for (const auto* zones : {&s.floorZones,&s.ceilZones}) for (const auto& z : *zones) if (z.z >= 0 && z.mat >= 0) {
         double twice = 0; for (size_t i=0;i<z.poly.size();++i) { const auto a=z.poly[i], b=z.poly[(i+1)%z.poly.size()]; twice += a.first*b.second-b.first*a.second; }
@@ -1043,36 +1113,25 @@ std::array<double, NB> estimateRoomRT60(const Scene& scene) {
 }
 
 double tailSecondsFromTrace(const TailHist& input,double minimum){
-    auto h=input;finalizeTail(h,false);double len=minimum;
-    double need = 0;
-    for(size_t receiver=0;receiver<h.h.size();++receiver){
-    std::array<double, NB> totals{};
-    double largest = 0;
-    for (int b = 0; b < NB; ++b) {
-        for (double v : h.h[receiver][(size_t)b]) totals[(size_t)b] += v;
-        largest = std::max(largest, totals[(size_t)b]);
-    }
-    for (int b = 0; b < NB; ++b) {
-        const auto& e = h.h[receiver][(size_t)b];
-        const double total = totals[(size_t)b];
-        if (total <= largest * 1e-5) continue;
-        double rem = total;
-        size_t k = 0, k5 = 0, k35 = 0;
-        for (; k < e.size(); ++k) {
-        rem -= e[k];
-        if (k5 == 0 && rem < 0.316 * total) k5 = k;     // -5 dB
-        if (k35 == 0 && rem < 3.16e-4 * total) k35 = k;  // -35 dB
-        if (rem < 1e-8 * total) break;  // 80 dB of the energy has passed
+    double need = 0.0;
+    std::vector<double> edc(input.nBins);
+    for (size_t receiver = 0; receiver < input.h.size(); ++receiver) {
+        double acc = 0.0;
+        for (size_t k = input.nBins; k-- > 0;) {
+            double e = 0.0;
+            for (int b = 0; b < NB; ++b)
+                if (k < input.h[receiver][(size_t)b].size()) e += input.h[receiver][(size_t)b][k];
+            acc += e;
+            edc[k] = acc;
         }
-        need = std::max(need, (double)k * h.binDur);
-        // A truncated or sparse trace underestimates the remaining energy.
-        // Extrapolate the measured -5..-35 dB segment to -80 dB from its actual onset.
-        if (k5 > 0 && k35 > k5)
-        need = std::max(need, ((double)k5 + 2.5 * (double)(k35 - k5)) * h.binDur);
+        if (acc <= 0.0) continue;
+        const double target = acc * 1e-6;  // -60 dB below EDC at start of the late field
+        size_t k = 0;
+        while (k < input.nBins && edc[k] > target) ++k;
+        need = std::max(need, (double)k * input.binDur);
     }
-    }
-    len = std::max(len, need + 0.8);  // leave the maximum 0.6 s end fade beyond the target
-    return std::min(std::max(len,.2),20.);
+    const double len = std::max(minimum, need + 0.8);  // leave the maximum 0.6 s end fade beyond -60 dB
+    return std::min(std::max(len, 0.2), 20.0);
 }
 
 double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled, const TailExecution& execution, int probeRays) {
@@ -1080,8 +1139,7 @@ double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bo
     if (!sc.sources.empty() && !sc.receivers.empty() && !sc.walls.empty()) {
         Scene t = sc;
         t.length = 20.0;  // allow long-decay rooms to reach the target before the final fade
-        const std::vector<Transducer> rc{t.receivers[0]};
-        auto h = traceTail(t, t.sources[0], rc, erOrder, probeRays, t.seed, false, cancelled, execution);
+        auto h = traceTail(t, t.sources[0], t.receivers, erOrder, probeRays, t.seed, false, cancelled, execution);
         return tailSecondsFromTrace(h, len);
     }
     return std::min(std::max(len, 0.2), 20.0);

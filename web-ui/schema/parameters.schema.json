@@ -1,0 +1,464 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verbroom.invalid/web-ui/schema/parameters.schema.json",
+  "title": "Verb Room WebView contract v1: parameter descriptor list",
+  "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/DescriptorList",
+  "$defs": {
+    "Descriptor": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(s([1-9]|[12][0-9]|3[0-2])(x|y|z|az|g|mute|solo|path)|l(x|y|z|az|path)|gain|early|diffusion|doppler|tail|mix|spatialDry|soloDirect|soloEarly|soloTail|mode|absorption|decayLow|decayMid|decayHigh|size|predelay|stereoWidth|freeze|duck|duckRelease|makeup)$"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 282
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "float",
+            "bool",
+            "choice"
+          ]
+        },
+        "group": {
+          "enum": [
+            "sourcePosition",
+            "sourceGain",
+            "sourceMute",
+            "sourceSolo",
+            "listener",
+            "output",
+            "mix",
+            "solo",
+            "mode",
+            "creative",
+            "absorption"
+          ]
+        },
+        "unit": {
+          "type": "string"
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "step": {
+          "type": "number",
+          "minimum": 0
+        },
+        "default": {
+          "type": "number"
+        },
+        "skew": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "enum": [
+                "none",
+                "centre"
+              ]
+            },
+            "centre": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2
+        },
+        "decimals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "relay": {
+          "enum": [
+            "slider",
+            "toggle",
+            "combo"
+          ]
+        },
+        "automatable": {
+          "const": true
+        },
+        "modeClass": {
+          "enum": [
+            "always",
+            "creativeOnly",
+            "modeSelector"
+          ]
+        },
+        "physicalValue": {
+          "type": "number",
+          "description": "Value the engine uses in Physical mode (creativeOnly)."
+        },
+        "x-source": {
+          "type": "string",
+          "description": "file:line in the verified source."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "index",
+        "name",
+        "type",
+        "group",
+        "unit",
+        "default",
+        "relay",
+        "modeClass",
+        "automatable"
+      ],
+      "description": "Matches juce::RangedAudioParameter metadata produced by makeLayout().",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "float"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "min",
+              "max",
+              "step",
+              "skew",
+              "decimals"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "choice"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "choices"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "modeClass": {
+                "const": "creativeOnly"
+              }
+            },
+            "required": [
+              "modeClass"
+            ]
+          },
+          "then": {
+            "required": [
+              "physicalValue"
+            ]
+          }
+        }
+      ]
+    },
+    "DescriptorList": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 283
+        },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/Descriptor"
+          },
+          "minItems": 1,
+          "maxItems": 283
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "count",
+        "parameters"
+      ]
+    },
+    "Values": {
+      "type": "object",
+      "patternProperties": {
+        "^(s([1-9]|[12][0-9]|3[0-2])(x|y|z|az|g|mute|solo|path)|l(x|y|z|az|path)|gain|early|diffusion|doppler|tail|mix|spatialDry|soloDirect|soloEarly|soloTail|mode|absorption|decayLow|decayMid|decayHigh|size|predelay|stereoWidth|freeze|duck|duckRelease|makeup)$": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 243,
+      "maxProperties": 283,
+      "description": "Denormalised current values keyed by parameter ID. bool 0/1, choice index."
+    },
+    "Effective": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "physical",
+            "creative"
+          ]
+        },
+        "earlyDb": {
+          "type": "number",
+          "minimum": -60,
+          "maximum": 6
+        },
+        "tailDb": {
+          "type": "number",
+          "minimum": -60,
+          "maximum": 12
+        },
+        "doppler": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "decay": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0.3,
+            "maximum": 3
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "diffusion": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "absorption": {
+          "type": "object",
+          "properties": {
+            "requested": {
+              "type": "number",
+              "minimum": 0.3,
+              "maximum": 3
+            },
+            "tailCurrent": {
+              "type": "boolean"
+            },
+            "applied": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0.3,
+                  "maximum": 3
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "requested",
+            "tailCurrent"
+          ],
+          "description": "requested plus atomic worker-applied scale (null before first engine); tailCurrent includes audio consumption."
+        },
+        "mixEffective": {
+          "type": "object",
+          "properties": {
+            "ignored": {
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "none",
+                "solo",
+                "positionedDry"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "ignored",
+            "reason"
+          ]
+        },
+        "zM": {
+          "type": "object",
+          "patternProperties": {
+            "^(s([1-9]|[12][0-9]|3[0-2])z|lz)$": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 30
+            }
+          },
+          "additionalProperties": false
+        },
+        "sizePercent": {
+          "type": "number",
+          "minimum": 50,
+          "maximum": 160
+        },
+        "sizeRequested": {
+          "type": "number",
+          "minimum": 50,
+          "maximum": 160
+        },
+        "predelayMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 283
+        },
+        "stereoWidthPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 200
+        },
+        "duckDb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "duckReleaseMs": {
+          "type": "number",
+          "minimum": 50,
+          "maximum": 2000
+        },
+        "duckReductionDb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 24
+        },
+        "freeze": {
+          "type": "boolean"
+        },
+        "widthAvailable": {
+          "type": "boolean"
+        },
+        "lockReason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "earlyDb",
+        "tailDb",
+        "doppler",
+        "decay",
+        "diffusion",
+        "absorption"
+      ],
+      "description": "What the engine actually uses (PluginProcessor.cpp:192-209), not the stored values."
+    },
+    "Texts": {
+      "type": "object",
+      "patternProperties": {
+        "^(s([1-9]|[12][0-9]|3[0-2])(x|y|z|az|g|mute|solo|path)|l(x|y|z|az|path)|gain|early|diffusion|doppler|tail|mix|spatialDry|soloDirect|soloEarly|soloTail|mode|absorption|decayLow|decayMid|decayHigh|size|predelay|stereoWidth|freeze|duck|duckRelease|makeup)$": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "GestureAction": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "begin",
+            "change",
+            "end"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^(s([1-9]|[12][0-9]|3[0-2])(x|y|z|az|g|mute|solo|path)|l(x|y|z|az|path)|gain|early|diffusion|doppler|tail|mix|spatialDry|soloDirect|soloEarly|soloTail|mode|absorption|decayLow|decayMid|decayHigh|size|predelay|stereoWidth|freeze|duck|duckRelease|makeup)$"
+        },
+        "value": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "change"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "value"
+            ]
+          }
+        }
+      ]
+    },
+    "GestureBatch": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1024,
+      "items": {
+        "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/GestureAction"
+      }
+    },
+    "Update": {
+      "type": "object",
+      "properties": {
+        "values": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/Values"
+        },
+        "effective": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/Effective"
+        },
+        "texts": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/Texts"
+        }
+      },
+      "required": [
+        "values",
+        "effective",
+        "texts"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

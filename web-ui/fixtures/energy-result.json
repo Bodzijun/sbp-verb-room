@@ -1,0 +1,84 @@
+{
+  "fixtureMeta": {
+    "title": "Energy map: progress -> result descriptor -> stale flag, for the default demo room (6 x 8 m, probe 1.2 m, 24 cells, Physical)",
+    "valueSources": {
+      "result.nx/ny/x0/y0/dx/dy/validCells/raysUsed": "derived-by-hand",
+      "result.options": "code",
+      "result.blob.*ByteLength": "derived-by-hand",
+      "result.resultId/sceneRevision/jobId/progress": "protocol-example",
+      "cell energy values": "requires-run"
+    },
+    "notes": [
+      "nx=ceil(24*6/8)=18, ny=ceil(24*8/8)=24, dx=dy=1/3 (energy.cpp:64-67); all cells valid (probe 1.2 m < ceiling 3 m, no plates); raysUsed = 48000 (one source, cpp energy.cpp:92,97).",
+      "earlyDb/tailDb = 0 because Physical (EnergyMapView.cpp:74-75).",
+      "Blob: [validity bitmask padded to 4 bytes][float32 per cell]; full = 3 components x 7 bands x float32 per cell = 21 floats (84 B)/cell.",
+      "The binary payload itself is NOT included: cell energies cannot be produced without running analyzeEnergyMap()."
+    ],
+    "unverified": [
+      "cell energy values (requires-run)",
+      "peak / hover dB values"
+    ]
+  },
+  "messages": [
+    {
+      "schemaVersion": 1,
+      "sessionId": "editor-1",
+      "kind": "event",
+      "payload": {
+        "event": "analysis.progress",
+        "jobId": "job-1",
+        "state": "running",
+        "progress": 0.42
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sessionId": "editor-1",
+      "kind": "event",
+      "payload": {
+        "event": "analysis.result",
+        "jobId": "job-1",
+        "outcome": "done",
+        "result": {
+          "resultId": "energy-1",
+          "sceneRevision": "1",
+          "nx": 18,
+          "ny": 24,
+          "x0": 0.0,
+          "y0": 0.0,
+          "dx": 0.3333333333333333,
+          "dy": 0.3333333333333333,
+          "heightM": 1.2,
+          "raysUsed": 48000,
+          "options": {
+            "source": -1,
+            "durationS": 20.0,
+            "resolution": 24,
+            "rays": 48000,
+            "components": 7,
+            "earlyDb": 0.0,
+            "tailDb": 0.0
+          },
+          "validCells": 432,
+          "blob": {
+            "layoutVersion": 1,
+            "fullUrl": "/analysis/energy-1/full.bin",
+            "bandUrlTemplate": "/analysis/energy-1/band/{band}.bin",
+            "fullByteLength": 36344,
+            "maskByteLength": 56
+          }
+        }
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "sessionId": "editor-1",
+      "kind": "event",
+      "payload": {
+        "event": "analysis.stale",
+        "resultId": "energy-1",
+        "stale": true
+      }
+    }
+  ]
+}

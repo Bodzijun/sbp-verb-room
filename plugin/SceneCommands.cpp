@@ -27,7 +27,11 @@ bool eqSurf(const SurfaceSnap& a, const SurfaceSnap& b, bool ignoreTag) {
 }
 bool eqSource(const SourceCfg& a, const SourceCfg& b) {
     return a.name == b.name && a.format == b.format && a.channels == b.channels && a.firstIn == b.firstIn && a.sum == b.sum && a.spread == b.spread
-           && a.pattern == b.pattern && a.freePoints == b.freePoints && a.ox == b.ox && a.oy == b.oy && a.oz == b.oz;
+           && a.pattern == b.pattern && a.instrument == b.instrument && a.instrumentAmount == b.instrumentAmount
+           && a.aimAzDeg == b.aimAzDeg && a.aimElDeg == b.aimElDeg && a.aimRollDeg == b.aimRollDeg
+           && a.customDirectivityData == b.customDirectivityData && a.customDirectivityName == b.customDirectivityName
+           && a.customDirectivityPath == b.customDirectivityPath && a.directivityWarning == b.directivityWarning
+           && a.freePoints == b.freePoints && a.ox == b.ox && a.oy == b.oy && a.oz == b.oz;
 }
 bool eqClutter(const verb::ClutterCfg& a, const verb::ClutterCfg& b) {
     return a.count == b.count && a.minLen == b.minLen && a.maxLen == b.maxLen && a.tlMin == b.tlMin && a.tlMax == b.tlMax && a.hMin == b.hMin
@@ -40,7 +44,9 @@ size_t surfBytes(const SurfaceSnap& s) {
            + s.wall.editor.group.capacity() + s.zone.poly.capacity() * sizeof(std::pair<double, double>) + s.zone.editor.name.capacity() + s.zone.editor.group.capacity();
 }
 size_t sourceBytes(const SourceCfg& c) {
-    return sizeof(SourceCfg) + c.name.capacity() + (c.ox.capacity() + c.oy.capacity() + c.oz.capacity()) * sizeof(float);
+    return sizeof(SourceCfg) + c.name.capacity() + c.instrument.capacity() + c.customDirectivityData.capacity()
+           + c.customDirectivityName.capacity() + c.customDirectivityPath.capacity() + c.directivityWarning.capacity()
+           + (c.ox.capacity() + c.oy.capacity() + c.oz.capacity()) * sizeof(float);
 }
 
 SurfaceSnap surfaceSnap(const verb::Scene& s, int kind, int index) {
@@ -149,7 +155,7 @@ int applySceneTargets(verb::Scene& s, const std::vector<Target>& targets, bool t
             }
             break;
         }
-        case KeyType::Height: s.height = std::get<HeightSnap>(*t.snap).h; break;
+        case KeyType::Height: s.height = std::get<HeightSnap>(*t.snap).h; s.ceilingInfinite = std::get<HeightSnap>(*t.snap).ceilingInfinite; break;
         case KeyType::Air: s.tempC = std::get<AirSnap>(*t.snap).tempC; s.humidity = std::get<AirSnap>(*t.snap).humidity; break;
         case KeyType::Clutter: s.clutter = std::get<verb::ClutterCfg>(*t.snap); break;
         case KeyType::Rough: s.roughness = std::get<RoughSnap>(*t.snap).roughness; s.roughSeed = std::get<RoughSnap>(*t.snap).seed; break;
@@ -177,6 +183,14 @@ void applySources(VerbProcessor& proc, const std::vector<SourceCfg>& cur, const 
     if (!live) { proc.setSources(tgt); return; }  // a structural change: the engine is rebuilt in the background
     for (size_t i = 0; i < cur.size(); ++i) {
         if (cur[i].pattern != tgt[i].pattern) proc.setSourcePattern((int)i, tgt[i].pattern);
+        if (cur[i].instrument != tgt[i].instrument || cur[i].instrumentAmount != tgt[i].instrumentAmount
+            || cur[i].aimAzDeg != tgt[i].aimAzDeg || cur[i].aimElDeg != tgt[i].aimElDeg || cur[i].aimRollDeg != tgt[i].aimRollDeg
+            || cur[i].customDirectivityData != tgt[i].customDirectivityData
+            || cur[i].customDirectivityName != tgt[i].customDirectivityName
+            || cur[i].customDirectivityPath != tgt[i].customDirectivityPath)
+            proc.setSourceDirectivity((int)i, tgt[i].instrument, tgt[i].instrumentAmount,
+                                      tgt[i].customDirectivityData, tgt[i].customDirectivityName, tgt[i].customDirectivityPath,
+                                      tgt[i].aimAzDeg, tgt[i].aimElDeg, tgt[i].aimRollDeg);
         if (cur[i].spread != tgt[i].spread) proc.setSourceSpread((int)i, tgt[i].spread);
         for (size_t ch = 0; ch < tgt[i].ox.size(); ++ch)
             if (cur[i].ox[ch] != tgt[i].ox[ch] || cur[i].oy[ch] != tgt[i].oy[ch] || cur[i].oz[ch] != tgt[i].oz[ch])
@@ -257,7 +271,7 @@ std::vector<KeyChange> diffModels(const Model& a, const Model& b) {
     surfaces(1, sa.walls.size(), sb.walls.size());
     surfaces(4, sa.floorZones.size(), sb.floorZones.size());
     surfaces(5, sa.ceilZones.size(), sb.ceilZones.size());
-    if (sa.height != sb.height) { Key k; k.type = KeyType::Height; add(k, HeightSnap{sa.height}, HeightSnap{sb.height}, true); }
+    if (sa.height != sb.height || sa.ceilingInfinite != sb.ceilingInfinite) { Key k; k.type = KeyType::Height; add(k, HeightSnap{sa.height,sa.ceilingInfinite}, HeightSnap{sb.height,sb.ceilingInfinite}, true); }
     if (sa.tempC != sb.tempC || sa.humidity != sb.humidity) { Key k; k.type = KeyType::Air; add(k, AirSnap{sa.tempC, sa.humidity}, AirSnap{sb.tempC, sb.humidity}, true); }
     if (!eqClutter(sa.clutter, sb.clutter)) { Key k; k.type = KeyType::Clutter; add(k, sa.clutter, sb.clutter, true); }
     if (sa.roughness != sb.roughness || sa.roughSeed != sb.roughSeed) { Key k; k.type = KeyType::Rough; add(k, RoughSnap{sa.roughness, sa.roughSeed}, RoughSnap{sb.roughness, sb.roughSeed}, true); }
@@ -298,7 +312,7 @@ std::optional<Snap> captureKey(const Model& m, const Key& k) {
         for (size_t i = 0; i < n; ++i) v.push_back(surfaceSnap(s, k.kind, (int)i));
         return Snap(v);
     }
-    case KeyType::Height: return Snap(HeightSnap{s.height});
+    case KeyType::Height: return Snap(HeightSnap{s.height,s.ceilingInfinite});
     case KeyType::Air: return Snap(AirSnap{s.tempC, s.humidity});
     case KeyType::Clutter: return Snap(s.clutter);
     case KeyType::Rough: return Snap(RoughSnap{s.roughness, s.roughSeed});
@@ -328,7 +342,7 @@ bool snapsEqual(const Snap& a, const Snap& b) {
         for (size_t i = 0; i < x->size(); ++i) if (!eqSurf((*x)[i], y[i], false)) return false;
         return true;
     }
-    if (auto* x = std::get_if<HeightSnap>(&a)) return x->h == std::get<HeightSnap>(b).h;
+    if (auto* x = std::get_if<HeightSnap>(&a)) return x->h == std::get<HeightSnap>(b).h && x->ceilingInfinite == std::get<HeightSnap>(b).ceilingInfinite;
     if (auto* x = std::get_if<AirSnap>(&a)) return x->tempC == std::get<AirSnap>(b).tempC && x->humidity == std::get<AirSnap>(b).humidity;
     if (auto* x = std::get_if<verb::ClutterCfg>(&a)) return eqClutter(*x, std::get<verb::ClutterCfg>(b));
     if (auto* x = std::get_if<RoughSnap>(&a)) return x->roughness == std::get<RoughSnap>(b).roughness && x->seed == std::get<RoughSnap>(b).seed;
@@ -348,7 +362,7 @@ bool snapsEqual(const Snap& a, const Snap& b) {
 }
 
 size_t snapBytes(const Snap& s) {
-    if(auto* x=std::get_if<MovementPath>(&s))return sizeof(*x)+x->points.capacity()*sizeof(PathPoint);
+    if(auto* x=std::get_if<MovementPath>(&s))return sizeof(*x)+x->points.capacity()*sizeof(PathPoint)+x->times.capacity()*sizeof(std::optional<double>)+x->easings.capacity()*sizeof(PathEasing);
     if (auto* x = std::get_if<SurfaceSnap>(&s)) return surfBytes(*x);
     if (auto* x = std::get_if<std::vector<SurfaceSnap>>(&s)) { size_t n = sizeof(*x); for (auto& e : *x) n += surfBytes(e); return n; }
     if (auto* x = std::get_if<SourceCfg>(&s)) return sourceBytes(*x);
@@ -969,9 +983,13 @@ Fail opScale(const juce::var& p, Model& m, const Ctx& c) {
 
 Fail opSetHeight(const juce::var& p, Model& m, const Ctx&) {
     Args a(p);
-    const double h = a.num("heightM", 1, 30);
+    const auto h = a.optNum("heightM", 1, 30);
+    const auto extent = p.getProperty("ceilingExtent",juce::var()).toString();
+    if(!extent.isEmpty() && extent!="walls" && extent!="infinite") return {"invalid","Invalid ceiling extent","ceilingExtent"};
     if (a.bad()) return a.f;
-    m.scene.height = h;
+    if(!h && extent.isEmpty())return {"invalid","Height or ceiling extent required","heightM"};
+    if(h)m.scene.height = *h;
+    if(!extent.isEmpty())m.scene.ceilingInfinite=extent=="infinite";
     return {};
 }
 
@@ -1097,6 +1115,11 @@ Fail opSourceRemove(const juce::var& p, Model& m, const Ctx&) {
     }
     for(int i=index;i+1<(int)m.sources.size();++i){m.paths[(size_t)i]=m.paths[(size_t)i+1];m.params[VerbProcessor::pathParamId(i).toStdString()]=m.params[VerbProcessor::pathParamId(i+1).toStdString()];}
     m.paths[m.sources.size()-1]={};
+    for(int o=0;o<=kMaxSources;++o){  // E19: Look at targets follow the source list (the removed source leaves the target unset)
+        auto& lp=m.paths[(size_t)o];
+        if(lp.lookPoint||lp.lookTarget<0||lp.lookTarget>=kListener)continue;
+        if(lp.lookTarget==index)lp.lookTarget=-1;else if(lp.lookTarget>index)--lp.lookTarget;
+    }
     m.sources.erase(m.sources.begin() + index);
     return {};
 }
@@ -1143,6 +1166,76 @@ Fail opSourcePattern(const juce::var& p, Model& m, const Ctx&) {
     m.sources[(size_t)index].pattern = v;
     return {};
 }
+Fail opSourceDirectivity(const juce::var& p, Model& m, const Ctx&) {
+    Args a(p);
+    const int index = a.integer("index", 0, 31);
+    auto inst = a.optStr("instrument", 128);
+    auto amt = a.has("instrumentAmount") ? a.optNum("instrumentAmount", 0, 1) : a.optNum("amount", 0, 1);
+    auto aimAz = a.optNum("aimAzDeg", -180, 180);
+    auto aimEl = a.optNum("aimElDeg", -90, 90);
+    auto aimRoll = a.optNum("aimRollDeg", -180, 180);
+    auto customData = a.has("customDirectivityData") ? a.optStr("customDirectivityData", verb::kMaxVerbdirBytes)
+                                                     : a.optStr("customData", verb::kMaxVerbdirBytes);
+    auto customName = a.has("customDirectivityName") ? a.optStr("customDirectivityName", 128)
+                                                     : a.optStr("customName", 128);
+    auto customPath = a.has("customDirectivityPath") ? a.optStr("customDirectivityPath", 1024)
+                                                     : a.optStr("customPath", 1024);
+    if (!a.bad() && !inst && !amt && !aimAz && !aimEl && !aimRoll && !customData && !customName && !customPath)
+        a.err("invalid", "give instrument, amount, aim and/or customData", "instrument");
+    if (a.bad()) return a.f;
+    if (index >= (int)m.sources.size()) return {"invalid", "that source does not exist", "index"};
+    SourceCfg c = m.sources[(size_t)index];
+    const SourceCfg before = c;
+    if (inst) c.instrument = inst->empty() ? "none" : *inst;
+    if (amt) c.instrumentAmount = *amt;
+    if (customData) {
+        if (customData->size() > verb::kMaxVerbdirBytes)
+            return {"budgetExceeded", "Custom directivity exceeds the 64 KB limit.", "customData"};
+        if (!customData->empty()) {
+            std::string err;
+            verb::DirectivityProfile prof;
+            if (!verb::parseVerbdir(*customData, prof, err)) return {"invalid", "Invalid .verbdir data: " + err, "customData"};
+            c.instrument = "custom";
+            c.customDirectivityData = *customData;
+            if (!customName && c.customDirectivityName.empty()) c.customDirectivityName = prof.name;
+        } else {
+            c.customDirectivityData.clear();
+        }
+    }
+    if (customName) c.customDirectivityName = cleanText(*customName);
+    if (customPath) c.customDirectivityPath = *customPath;
+    if (c.instrument == "none") {
+        if ((aimAz && *aimAz != 0.0) || (aimEl && *aimEl != 0.0) || (aimRoll && *aimRoll != 0.0))
+            return {"invalid", "Aim correction requires an active directivity profile", "aimAzDeg"};
+        c.customDirectivityData.clear();
+        c.customDirectivityName.clear();
+        c.customDirectivityPath.clear();
+        c.aimAzDeg = 0.0;
+        c.aimElDeg = 0.0;
+        c.aimRollDeg = 0.0;
+    } else if (c.instrument != "custom") {
+        if (!verb::findBuiltinDirectivity(c.instrument))
+            return {"invalid", "Unknown directivity profile: " + c.instrument, "instrument"};
+    } else if (c.customDirectivityData.empty() && c.customDirectivityPath.empty()) {
+        return {"invalid", "Custom directivity requires customData or customPath.", "customData"};
+    }
+    // A different profile starts with its own orientation: hand-rotated angles of the previous one are dropped
+    // (values given in the same command still apply).
+    if (before.instrument != c.instrument || before.customDirectivityData != c.customDirectivityData
+        || before.customDirectivityPath != c.customDirectivityPath) {
+        c.aimAzDeg = 0.0;
+        c.aimElDeg = 0.0;
+        c.aimRollDeg = 0.0;
+    }
+    if (c.instrument != "none") {
+        if (aimAz) c.aimAzDeg = *aimAz;
+        if (aimEl) c.aimElDeg = *aimEl;
+        if (aimRoll) c.aimRollDeg = *aimRoll;
+    }
+    resolveSourceDirectivity(c);
+    m.sources[(size_t)index] = std::move(c);
+    return {};
+}
 Fail opSourceSpread(const juce::var& p, Model& m, const Ctx&) {
     Args a(p);
     const int index = a.integer("index", 0, 31);
@@ -1168,7 +1261,7 @@ Fail opSourcePointOffset(const juce::var& p, Model& m, const Ctx&) {
 
 Fail opOutputSet(const juce::var& p, Model& m, const Ctx&) {
     Args a(p);
-    auto layout = a.optInt("layout", -1, 8);
+    auto layout = a.optInt("layout", -1, 11);
     auto radius = a.optNum("radiusM", 0, 1);
     auto mic = a.optInt("micPattern", 0, 7);
     if (!a.bad() && !layout && !radius && !mic) a.err("invalid", "give layout, radiusM and/or micPattern", "layout");
@@ -1208,37 +1301,131 @@ Fail opPath(const juce::var& p,Model& m,const Ctx&) {
     Args a(p);const int o=a.integer("object",0,kMaxSources);
     if(a.bad())return a.f;
     if(o!=kListener && o>=(int)m.sources.size())return {"invalid","Source does not exist","object"};
-    auto& path=m.paths[(size_t)o];const auto op=a.get("op").toString();
-    if(op=="path.clear"){path={};return {};}
+    auto parseEasing=[](const juce::var& v,PathEasing& out)->bool{
+        if(!v.isString())return false;
+        const auto s=v.toString();
+        if(s=="linear"){out=PathEasing::Linear;return true;}
+        if(s=="easeIn"){out=PathEasing::EaseIn;return true;}
+        if(s=="easeOut"){out=PathEasing::EaseOut;return true;}
+        if(s=="easeInOut"){out=PathEasing::EaseInOut;return true;}
+        return false;
+    };
+    auto next=m.paths[(size_t)o];const auto op=a.get("op").toString();
+    if(op=="path.clear"){
+        MovementPath cleared;  // E19: the orientation setting belongs to the object, not to the path points
+        cleared.lookAt=next.lookAt;cleared.lookPoint=next.lookPoint;cleared.lookTarget=next.lookTarget;cleared.lookPos=next.lookPos;cleared.orientOffset=next.orientOffset;
+        m.paths[(size_t)o]=cleared;return {};
+    }
     if(op=="path.set") {
         auto* points=a.get("points").getArray();
         if(!points || points->size()<2 || points->size()>64)return {"invalid","Expected 2..64 points","points"};
-        path.points.clear();
+        next.points.clear(); next.start=0.0; next.end=100.0; next.times.clear(); next.easings.clear();
         for(const auto& pt:*points) {
             auto* xyz=pt.getArray();if(!xyz || xyz->size()!=3)return {"invalid","Expected [x,y,z]","points"};
-            PathPoint q{};for(int k=0;k<3;++k){if(!Args::isNum((*xyz)[k]))return {"invalid","Expected numeric point","points"};q[(size_t)k]=(double)(*xyz)[k];}path.points.push_back(q);
+            PathPoint q{};for(int k=0;k<3;++k){if(!Args::isNum((*xyz)[k]))return {"invalid","Expected numeric point","points"};q[(size_t)k]=(double)(*xyz)[k];}next.points.push_back(q);
+        }
+        if(a.has("times")){
+            auto* ts=a.get("times").getArray();
+            if(!ts || (size_t)ts->size()!=next.points.size())return {"invalid","Expected times matching point count","times"};
+            next.times.resize(next.points.size());
+            for(size_t i=0;i<next.points.size();++i){
+                const auto& tv=(*ts)[(int)i];
+                if(tv.isVoid())continue;
+                if(!Args::isNum(tv))return {"invalid","Expected numeric or null point time","times"};
+                next.times[i]=(double)tv;
+            }
+        }
+        if(a.has("easings")){
+            auto* es=a.get("easings").getArray();
+            if(!es || (size_t)es->size()!=next.points.size())return {"invalid","Expected easings matching point count","easings"};
+            next.easings.resize(next.points.size(),PathEasing::Linear);
+            for(size_t i=0;i<next.points.size();++i){
+                if(!parseEasing((*es)[(int)i],next.easings[i]))return {"invalid","Invalid path easing","easings"};
+            }
         }
     } else if(op=="path.addPoint" || op=="path.movePoint") {
         auto xyz=a.vecProp("point",3,3,200);if(a.bad())return a.f;
         PathPoint q{xyz[0],xyz[1],xyz[2]};
         if(op=="path.addPoint") {
-            if(a.has("index")){int i=a.integer("index",0,(int)path.points.size());if(a.bad())return a.f;path.points.insert(path.points.begin()+i,q);}
-            else path.points.push_back(q);
-        } else {int i=a.integer("index",0,(int)path.points.size()-1);if(a.bad())return a.f;path.points[(size_t)i]=q;}
+            if(a.has("index")){
+                int i=a.integer("index",0,(int)next.points.size());if(a.bad())return a.f;
+                next.points.insert(next.points.begin()+i,q);
+                if(!next.times.empty()&&(size_t)i<=next.times.size())next.times.insert(next.times.begin()+i,std::nullopt);
+                if(!next.easings.empty()&&(size_t)i<=next.easings.size())next.easings.insert(next.easings.begin()+i,PathEasing::Linear);
+            }else{
+                next.points.push_back(q);
+                if(!next.times.empty())next.times.push_back(std::nullopt);
+                if(!next.easings.empty())next.easings.push_back(PathEasing::Linear);
+            }
+        } else {int i=a.integer("index",0,(int)next.points.size()-1);if(a.bad())return a.f;next.points[(size_t)i]=q;}
     } else if(op=="path.removePoint") {
-        int i=a.integer("index",0,(int)path.points.size()-1);if(a.bad())return a.f;
-        if(path.points.size()<=2)return {"invalid","A path requires two points; use clear","index"};
-        path.points.erase(path.points.begin()+i);
+        int i=a.integer("index",0,(int)next.points.size()-1);if(a.bad())return a.f;
+        if(next.points.size()<=2)return {"invalid","A path requires two points; use clear","index"};
+        next.points.erase(next.points.begin()+i);
+        if((size_t)i<next.times.size())next.times.erase(next.times.begin()+i);
+        if((size_t)i<next.easings.size())next.easings.erase(next.easings.begin()+i);
+        if(!next.times.empty()){if(i==0)next.times[0].reset();if(!next.closed)next.times.back().reset();}
+    } else if(op=="path.setPointTiming") {
+        if(next.points.size()<2)return {"invalid","Path has fewer than two points","object"};
+        int i=a.integer("index",0,(int)next.points.size()-1);if(a.bad())return a.f;
+        if(!a.has("time")&&!a.has("easing"))return {"invalid","Expected time and/or easing","time"};
+        if(a.has("time")){
+            if(a.isNull("time")){
+                if(!next.times.empty())next.times[(size_t)i].reset();
+            }else{
+                double t=a.num("time",0.0,100.0);if(a.bad())return a.f;
+                if(next.times.empty())next.times.resize(next.points.size());
+                next.times[(size_t)i]=t;
+            }
+        }
+        if(a.has("easing")){
+            PathEasing ease=PathEasing::Linear;
+            if(!parseEasing(a.get("easing"),ease))return {"invalid","Invalid path easing","easing"};
+            const bool isKey=(i==0)||((size_t)i<next.times.size()&&next.times[(size_t)i].has_value());
+            const bool isLast=(!next.closed && (size_t)i+1==next.points.size());
+            if(ease!=PathEasing::Linear && (!isKey || isLast))
+                return {"invalid","Only key points before the end can have easing","easing"};
+            if(next.easings.empty()&&ease!=PathEasing::Linear)next.easings.resize(next.points.size(),PathEasing::Linear);
+            if(!next.easings.empty())next.easings[(size_t)i]=ease;
+        }
     } else if(op!="path.setFlags")return {"unsupported","Unknown path operation","op"};
-    for(auto flag:{"enabled","closed","smooth","orient"})if(a.has(flag)) {
-        bool value=a.boolean(flag);if(a.bad())return a.f;
-        if(juce::String(flag)=="enabled")path.enabled=value;
-        if(juce::String(flag)=="closed")path.closed=value;
-        if(juce::String(flag)=="smooth")path.smooth=value;
-        if(juce::String(flag)=="orient")path.orient=value;
+    if(op=="path.set" || op=="path.setFlags"){
+        for(auto flag:{"enabled","closed","smooth","orient"})if(a.has(flag)) {
+            bool value=a.boolean(flag);if(a.bad())return a.f;
+            if(juce::String(flag)=="enabled")next.enabled=value;
+            if(juce::String(flag)=="closed")next.closed=value;
+            if(juce::String(flag)=="smooth")next.smooth=value;
+            if(juce::String(flag)=="orient"){next.orient=value;if(value)next.lookAt=false;}
+        }
+        // E19 orientation: orientMode manual|along|lookAt, lookTarget (object index, listener = 32), lookPos [x,y,z] (fixed point), orientOffset (deg)
+        if(a.has("orientMode")){
+            const auto mode=a.get("orientMode").toString();
+            if(mode=="manual"){next.orient=false;next.lookAt=false;}
+            else if(mode=="along"){next.orient=true;next.lookAt=false;}
+            else if(mode=="lookAt"){next.orient=false;next.lookAt=true;}
+            else return {"invalid","Expected manual, along or lookAt","orientMode"};
+        }
+        if(a.has("lookTarget")){
+            int t=a.integer("lookTarget",0,kListener);if(a.bad())return a.f;
+            if(t==o)return {"invalid","An object cannot look at itself","lookTarget"};
+            if(t!=kListener && t>=(int)m.sources.size())return {"invalid","Source does not exist","lookTarget"};
+            next.lookTarget=t;next.lookPoint=false;
+        }
+        if(a.has("lookPos")){
+            auto xyz=a.vecProp("lookPos",3,3,200);if(a.bad())return a.f;
+            next.lookPos={xyz[0],xyz[1],xyz[2]};next.lookPoint=true;
+        }
+        if(a.has("orientOffset")){double off=a.num("orientOffset",-360.0,360.0);if(a.bad())return a.f;next.orientOffset=off;}
+        if(next.lookAt&&next.orient)next.orient=false;
+        if(op=="path.setFlags" && !next.closed && !next.times.empty())next.times.back().reset();
+        if(a.has("laps")){int laps=a.integer("laps",1,64);if(a.bad())return a.f;next.laps=laps;}
+        if(a.has("group")){int group=a.integer("group",-1,31);if(a.bad())return a.f;next.group=group;}
+        if(a.has("start")){double st=a.num("start",0.0,100.0-kMinPathWindowGap);if(a.bad())return a.f;next.start=st;}
+        if(a.has("end")){double en=a.num("end",kMinPathWindowGap,100.0);if(a.bad())return a.f;next.end=en;}
     }
-    if(a.has("laps")){int laps=a.integer("laps",1,64);if(a.bad())return a.f;path.laps=laps;}
-    if(!validPath(path))return {"invalid","Path points exceed count or coordinate bounds","points"};
+    if(!validPath(next))return {"invalid","Invalid path points or timing",(!next.times.empty()||!next.easings.empty()||next.start!=0.0||next.end!=100.0)?"times":"points"};
+    normalizePathTiming(next);
+    m.paths[(size_t)o]=std::move(next);
     return {};
 }
 // ============================================================================================ labels / coalescing
@@ -1286,6 +1473,7 @@ static const Descriptor kDescriptors[] = {
     {"path.movePoint",true,[](const juce::var&){return lbl("Move path point");},[](const juce::var& p){return p.getProperty("object",{}).toString().toStdString()+"/"+p.getProperty("index",{}).toString().toStdString();},opPath},
     {"path.removePoint",true,[](const juce::var&){return lbl("Remove path point");},noKey,opPath},
     {"path.setFlags",true,[](const juce::var&){return lbl("Path flags");},noKey,opPath},
+    {"path.setPointTiming",true,[](const juce::var&){return lbl("Set point timing");},[](const juce::var& p){return p.getProperty("object",{}).toString().toStdString()+"/"+p.getProperty("index",{}).toString().toStdString();},opPath},
     {"output.autoMakeup", true, [](const juce::var&) {return lbl("Auto makeup");}, noKey,
         [](const juce::var&, Model& m, const Ctx& c)->Fail { float v=0; if(!c.proc.autoMakeupDb(v))return {"notReady","No complete energy result or enabled source", ""}; m.params["makeup"]=v; return {}; }},
     {"surface.translate", true, labelMove, keyRefs, opTranslate},
@@ -1312,6 +1500,8 @@ static const Descriptor kDescriptors[] = {
     {"source.remove", true, labelRemoveSource, noKey, opSourceRemove},
     {"source.setConfig", true, [](const juce::var&) { return lbl("Edit source"); }, keyIndex, opSourceSetConfig},
     {"source.setPattern", true, [](const juce::var&) { return lbl("Source directivity"); }, keyIndex, opSourcePattern},
+    {"source.setDirectivity", true, [](const juce::var&) { return lbl("Source directivity profile"); }, keyIndex, opSourceDirectivity},
+    {"source.setInstrument", true, [](const juce::var&) { return lbl("Source directivity profile"); }, keyIndex, opSourceDirectivity},
     {"source.setSpread", true, [](const juce::var&) { return lbl("Source spread"); }, keyIndex, opSourceSpread},
     {"source.setPointOffset", true, [](const juce::var&) { return lbl("Move source point"); }, keyIndex, opSourcePointOffset},
     {"output.set", true, [](const juce::var&) { return lbl("Change output"); }, keyEmpty, opOutputSet},
@@ -1326,7 +1516,7 @@ const Descriptor* findDescriptor(const std::string& op) {
 
 bool isOtherServiceOp(const std::string& op) {
     static const char* ops[] = {"preset.list", "preset.load", "preset.save", "ir.export", "analysis.start", "analysis.cancel", "rt60.start", "rt60.cancel",
-                                "telemetry.subscribe", "preferences.set", "comparison.capture", "comparison.activate"};
+                                "telemetry.subscribe", "preferences.set", "comparison.capture", "comparison.activate", "source.loadDirectivityFile"};
     for (auto* o : ops) if (op == o) return true;
     return false;
 }

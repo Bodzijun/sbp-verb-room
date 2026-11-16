@@ -31,6 +31,7 @@ class BakePool {
     std::mutex mutex;
     std::condition_variable ready;
     std::deque<std::function<void()>> jobs;
+    std::deque<std::function<void()>> analysisJobs;
     std::vector<std::thread> threads;
     bool stopping=false;
 public:
@@ -48,14 +49,14 @@ public:
     explicit BakePool(unsigned count){
         try{for(unsigned i=0;i<count;++i)threads.emplace_back([this]{
             lowerCurrentThread(true);
-            for(;;){std::function<void()>job;{std::unique_lock<std::mutex>lock(mutex);ready.wait(lock,[this]{return stopping||!jobs.empty();});if(stopping&&jobs.empty())return;job=std::move(jobs.front());jobs.pop_front();}job();}
+            for(;;){std::function<void()>job;{std::unique_lock<std::mutex>lock(mutex);ready.wait(lock,[this]{return stopping||!jobs.empty()||!analysisJobs.empty();});if(stopping&&jobs.empty()&&analysisJobs.empty())return;auto& queue=jobs.empty()?analysisJobs:jobs;job=std::move(queue.front());queue.pop_front();}job();}
         });}catch(...){ {std::lock_guard<std::mutex>lock(mutex);stopping=true;}ready.notify_all();for(auto&t:threads)t.join();throw;}
     }
     ~BakePool(){ {std::lock_guard<std::mutex>lock(mutex);stopping=true;}ready.notify_all();for(auto&t:threads)t.join(); }
     unsigned size() const noexcept {return (unsigned)threads.size();}
-    template<class F> auto submit(F f, bool urgent=false)->std::future<decltype(f())>{
+    template<class F> auto submit(F f, bool urgent=false, bool analysis=false)->std::future<decltype(f())>{
         auto task=std::make_shared<std::packaged_task<decltype(f())()>>(std::move(f));auto result=task->get_future();
-        {std::lock_guard<std::mutex>lock(mutex);if(urgent)jobs.emplace_front([task]{(*task)();});else jobs.emplace_back([task]{(*task)();});}ready.notify_one();return result;
+        {std::lock_guard<std::mutex>lock(mutex);if(analysis)analysisJobs.emplace_back([task]{(*task)();});else if(urgent)jobs.emplace_front([task]{(*task)();});else jobs.emplace_back([task]{(*task)();});}ready.notify_one();return result;
     }
     // Coordinator only: no nested waits on this pool. Join EVERY task even on
     // failure, before releasing references to the caller's immutable job data.

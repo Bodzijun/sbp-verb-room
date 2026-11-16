@@ -1,0 +1,41 @@
+/* T8: explicit tool silhouettes and stable, quiet feedback. */
+.tool-rail button {position:relative;display:flex;align-items:center;justify-content:center;min-height:30px;height:32px;padding:5px;overflow:visible;flex-shrink:0}
+.tool-rail svg {width:22px;height:22px;flex:none}
+.tool-rail {gap:4px;overflow:visible}
+.tool-rail .active {border-left:3px solid var(--accent)!important;box-shadow:inset 0 0 8px #15d5a533}
+.tool-group-start {margin-top:5px;border-top:1px solid var(--muted)!important}
+.tool-tip {display:none;position:absolute;left:calc(100% + 8px);top:0;z-index:90;white-space:nowrap;background:#0b1218;color:#d9e5e9;border:1px solid #46565e;border-radius:4px;padding:7px 9px;font:12px 'Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 3px 12px #0009;pointer-events:none}
+.tool-rail button:hover .tool-tip,.tool-rail button:focus-visible .tool-tip {display:block}
+.drawing-readout {position:absolute;z-index:4;pointer-events:none;background:#10191ee8;color:var(--text-strong);border:1px solid var(--accent);border-radius:3px;padding:5px 7px;font:12px 'Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif;white-space:nowrap}
+.layer-filters button {display:flex;align-items:center;gap:3px}
+.layer-filters svg,.row-icon svg,.nav-tools svg {width:15px;height:15px;flex:none;vertical-align:middle}
+.outliner summary {position:relative;padding-right:48px}
+.outliner-group-controls {position:absolute;right:0;top:2px;display:flex;gap:2px}
+.outliner-group-controls button {padding:3px;background:transparent;border:0}
+.row-icon.mixed {color:var(--accent);box-shadow:inset 0 -2px var(--accent)}
+.row-icon {min-width:21px}
+.layer-bar {flex-wrap:nowrap;gap:4px;container-type:inline-size}
+.layer-bar .layer-filters,.layer-bar .layer-options {flex-wrap:nowrap;gap:3px}
+.layer-bar .layer-options {padding-left:4px}
+.layer-bar .snap-dd {min-width:0;width:105px;font-size:11px}
+.layer-bar .check {white-space:nowrap;font-size:11px}
+.link-short {display:none}
+.layer-bar button {padding-left:4px;padding-right:4px}
+@container (max-width:800px) {.layer-filters button span,.layer-options .link-label {display:none}.layer-options .link-short {display:inline}.snap-dd {width:92px!important}}
+.energy-components {gap:2px!important}
+.energy-components button {padding:0 5px;font-size:11px;height:23px}
+.energy-legend {color:var(--text-strong);font-size:11px;padding:3px 0;white-space:normal}
+.energy-strip {flex-wrap:wrap}
+.rebuild-indicator {visibility:hidden;flex:0 0 103px;position:relative;font-size:11px;height:16px;color:var(--text-strong)!important}
+.rebuild-indicator i {display:block;position:absolute;bottom:0;height:1px;width:30%;background:var(--accent);animation:rebuild-activity 1.3s ease-in-out infinite alternate}
+.footer {display:grid;grid-template-columns:minmax(0,1fr) 103px minmax(0,1fr) auto;gap:8px}
+.footer>span:first-child {min-width:0;max-width:none!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rebuilding .rebuild-indicator {visibility:visible}
+.rebuilding .decay-graph canvas,.rebuilding .rt-large,.rebuilding .rt-band {opacity:.45}
+.decay-graph {position:relative}
+.updating-label {display:none;position:absolute;right:12px;top:28px;color:var(--muted);font-size:11px}
+.rebuilding .updating-label {display:block}
+@keyframes rebuild-activity {from {left:0}to {left:65%}}
+@media (prefers-reduced-motion:reduce){.rebuild-indicator i {animation:none;width:100%}}
+@media (max-width:1100px){.footer>span:first-child {max-width:33%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.footer-status {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}}
+@media (max-width:1100px){.nav-tools svg {width:12px;height:12px}}

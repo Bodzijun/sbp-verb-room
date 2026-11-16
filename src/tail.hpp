@@ -40,6 +40,8 @@ TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Tra
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene&, const Transducer&,
     const std::vector<Transducer>&, int order, int rays, int seed,
     const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {});
+// Analysis coordinator only: bounded ray-segment batches, exact ordered per-cell replay.
+std::vector<std::array<double,NB>> traceTailEnergyAnalysis(const Scene&,const Transducer&,const std::vector<Transducer>&,int,int,int,const std::function<bool()>&,const std::function<void(double)>&,const TailExecution&);
 // E4a: the cheap late-energy estimate that lets the late field follow a moving listener/source. Same physics as traceTail
 // (transmission, occlusion, detection-sphere clipping), integrated over time, but ray i uses its own random generator seeded
 // from (seed, i): the same ray set traced from two nearby poses gives strongly correlated results (common random numbers), so
@@ -53,8 +55,8 @@ std::vector<std::array<double, NB>> traceTailEnergyCRN(const Scene&, const Trans
 std::vector<std::array<double, NB>> traceLateReciprocal(const Scene&, Vec3 origin, const std::vector<Transducer>& ears,
     const std::vector<Transducer>& sources, int order, int rays, int seed, double stopDb, const std::function<bool()>& cancelled = {}, long long* work = nullptr,
     std::vector<std::array<double, NB>>* sumSq = nullptr);
-// Length probes use the legacy envelope so scene duration remains compatible.
-// Production tails additionally regularize the diffuse transition using raw h2.
+// Production tails regularize the diffuse transition using raw h2.
+// Length probes use raw Schroeder EDC, without this extrapolation.
 void finalizeTail(TailHist& hist, bool smoothTransition = true);
 
 // Immutable UI snapshot, generated off the audio thread from the modeled tail.
@@ -80,7 +82,7 @@ struct TailDiagnostics {
 bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized);
 TailHist traceTailAdaptive(const Scene&, const Transducer&, const std::vector<Transducer>&,
                            int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore = nullptr, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, TailHist* retainedRaw = nullptr);
-// Same decay rule as the legacy length probe, applied to a full-cap raw trace.
+// Pooled-band raw Schroeder EDC: max over receivers of -60 dB crossing + 0.8 s.
 double tailSecondsFromTrace(const TailHist&, double minimum);
 TailDiagnostics analyzeTail(const TailHist& finalized);
 // Worker/offline only. Unity is an exact no-op; extends the finalized histogram up to 20 seconds.
@@ -89,8 +91,8 @@ void reshapeTailDecay(TailHist&, const std::array<double, 3>& multipliers);
 Scene withAbsorptionScale(const Scene&, double scale);
 std::array<double, NB> estimateRoomRT60(const Scene&);
 
-// How long the late tail has to be so that nothing audible is cut off: the time (a quick trace of the room, mid bands) at
-// which the remaining energy has fallen 80 dB, plus a margin for the final fade. The scene's own length is the minimum; at most 20 s.
+// Full-budget parallel raw probe over all receivers; -60 dB remaining energy,
+// plus 0.8 s fade margin. Authored length is the minimum; capped at 20 s.
 double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, int probeRays = 48000);
 
 // Fades the last part of every channel of a tail IR to silence (a raised cosine), so that a tail that is still audible at the

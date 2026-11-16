@@ -12,12 +12,32 @@
 namespace verbweb {
 namespace {
 juce::var tagJson(const verb::SurfaceTag& t) { return obj({{"name", juce::String(t.name)}, {"group", juce::String(t.group)}, {"hidden", t.hidden}, {"locked", t.locked}}); }
+juce::var polarSlicesJson(const verb::DirectivityProfile& p, double amount, double aimAzDeg = 0.0, double aimElDeg = 0.0, double aimRollDeg = 0.0) {
+    juce::Array<juce::var> bands;
+    for (int b : {0, 3, 6}) {
+        const auto s = p.horizontalSlice(b, 72, amount, aimAzDeg, aimElDeg, aimRollDeg);
+        juce::Array<juce::var> slice;
+        for (float v : s) slice.add(std::max(0.0, (double)v));
+        bands.add(slice);
+    }
+    return bands;
+}
 juce::var sourceJson(const verbp::SourceCfg& s) {
     juce::Array<juce::var> offsets;
     if (s.freePoints) for (size_t i = 0; i < s.ox.size() && i < s.oy.size() && i < s.oz.size(); ++i) offsets.add(array({s.ox[i], s.oy[i], s.oz[i]}));
-    return obj({{"name", juce::String(s.name)}, {"format", s.format}, {"channels", s.channels}, {"firstIn", s.firstIn}, {"sum", s.sum}, {"spreadM", s.spread}, {"pattern", s.pattern}, {"freePoints", s.freePoints}, {"offsetsM", offsets}});
+    auto r = obj({{"name", juce::String(s.name)}, {"format", s.format}, {"channels", s.channels}, {"firstIn", s.firstIn}, {"sum", s.sum}, {"spreadM", s.spread}, {"pattern", s.pattern}, {"freePoints", s.freePoints}, {"offsetsM", offsets},
+        {"instrument", juce::String(s.instrument.empty() ? "none" : s.instrument)}, {"instrumentAmount", std::clamp(s.instrumentAmount, 0.0, 1.0)},
+        {"customDirectivityName", juce::String(s.customDirectivityName)}, {"directivityWarning", juce::String(s.directivityWarning)}});
+    if (!s.instrument.empty() && s.instrument != "none") {
+        if (s.aimAzDeg != 0.0) r.getDynamicObject()->setProperty("aimAzDeg", s.aimAzDeg);
+        if (s.aimElDeg != 0.0) r.getDynamicObject()->setProperty("aimElDeg", s.aimElDeg);
+        if (s.aimRollDeg != 0.0) r.getDynamicObject()->setProperty("aimRollDeg", s.aimRollDeg);
+    }
+    if (s.directivity != nullptr) r.getDynamicObject()->setProperty("polarSlices", polarSlicesJson(*s.directivity, s.instrumentAmount, s.aimAzDeg, s.aimElDeg, s.aimRollDeg));
+    return r;
 }
 juce::File libraryDir() { return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("SBP/Verb Room/Rooms"); }
+juce::File profilesDir() { return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("SBP/Verb Room/Profiles"); }
 }
 juce::var materialJson(const verb::Material& m) {
     return obj({{"name", juce::String(m.name)}, {"classId", m.cls}, {"alpha", numbers(m.alpha)}, {"tau", numbers(m.tau)}, {"scatterLF", m.scatter}, {"scatterHF", m.scatterHf < 0 ? juce::var() : juce::var(m.scatterHf)}});
@@ -27,7 +47,9 @@ juce::var sceneJson(const verb::Scene& s, const double* home) {
     for (const auto& m : s.mats) mats.add(materialJson(m));
     for (const auto& w : s.walls) walls.add(obj({{"a", array({w.ax, w.ay})}, {"b", array({w.bx, w.by})}, {"zBottomM", w.z0}, {"zTopM", w.z1 >= 1e5 ? juce::var() : juce::var(w.z1)}, {"material", w.mat}, {"editor", tagJson(w.editor)}}));
     const auto zones = [](const std::vector<verb::Zone>& list) { juce::Array<juce::var> a; for (const auto& z : list) { juce::Array<juce::var> vertices; for (const auto& p : z.poly) vertices.add(array({p.first, p.second})); a.add(obj({{"vertices", vertices}, {"heightM", z.z < 0 ? juce::var() : juce::var(z.z)}, {"material", z.mat < 0 ? juce::var() : juce::var(z.mat)}, {"editor", tagJson(z.editor)}})); } return juce::var(a); };
-    auto r = obj({{"heightM", s.height}, {"tempC", s.tempC}, {"humidityPct", s.humidity}, {"floorMaterial", s.floorMat}, {"ceilingMaterial", s.ceilMat < 0 ? juce::var() : juce::var(s.ceilMat)},
+    juce::Array<juce::var> footprint;
+    for(const auto& p : verb::CeilingPlan(s).polygons) { juce::Array<juce::var> vertices; for(auto v:p.poly) vertices.add(array({v.first,v.second})); footprint.add(vertices); }
+    auto r = obj({{"ceilingExtent", s.ceilingInfinite ? "infinite" : "walls"}, {"ceilingFootprint", footprint}, {"heightM", s.height}, {"tempC", s.tempC}, {"humidityPct", s.humidity}, {"floorMaterial", s.floorMat}, {"ceilingMaterial", s.ceilMat < 0 ? juce::var() : juce::var(s.ceilMat)},
         {"materials", mats}, {"walls", walls}, {"floorZones", zones(s.floorZones)}, {"ceilingZones", zones(s.ceilZones)}, {"floorEditor", tagJson(s.floorEditor)}, {"ceilingEditor", tagJson(s.ceilEditor)},
         {"clutter", obj({{"count", s.clutter.count}, {"minLenM", s.clutter.minLen}, {"maxLenM", s.clutter.maxLen}, {"minHeightM", s.clutter.hMin}, {"maxHeightM", s.clutter.hMax}, {"tlMinDb", s.clutter.tlMin}, {"tlMaxDb", s.clutter.tlMax}, {"minDistM", s.clutter.minDist}, {"seed", s.clutter.seed}})},
         {"roughness", s.roughness}, {"roughSeed", s.roughSeed}, {"diffraction", s.diffraction}, {"preserved", obj({{"sr", s.sr}, {"lengthS", s.length}, {"order", s.order}, {"rays", s.rays}, {"seed", s.seed}, {"detectRadiusM", s.detectRadius}})}});
@@ -45,6 +67,7 @@ juce::var EditorBridge::ack(const juce::String& id, const juce::String& job) con
 juce::var EditorBridge::error(const juce::String& id, const char* code, const juce::String& message, bool resync) const {
     auto p = obj({{"code", code}, {"message", message}, {"currentRevision", decimal(proc.getRevision())}, {"resync", resync}}); if (id.isNotEmpty()) p.getDynamicObject()->setProperty("requestId", id); return envelope("error", p, id);
 }
+juce::String EditorBridge::hostSignature() const { return juce::JSON::toString(host(), true); }
 juce::var EditorBridge::host() const { return obj({{"inputChannels", proc.hostInputChannels()}, {"outputChannels", proc.hostOutputChannels()}, {"renderedChannels", proc.numOutputChannels()}, {"effectiveLayout", proc.effectiveLayout()}, {"numPoints", proc.numPoints()}, {"sampleRate", proc.getSampleRate()}}); }
 juce::var EditorBridge::history() {
     auto& s = proc.getEditorSession(); return obj({{"event", "history.changed"}, {"canUndo", s.canUndo()}, {"undoDepth", s.undoDepth()}, {"canRedo", s.canRedo()}, {"undoLabel", juce::String(s.undoLabel()).substring(0, 60)}, {"redoLabel", juce::String(s.redoLabel()).substring(0, 60)}});
@@ -54,9 +77,9 @@ juce::var EditorBridge::document() const {
     for (const auto& s : proc.getSources()) sources.add(sourceJson(s));
     const auto output = proc.getOutputCfg(); const auto tail = proc.getTailSettings(); const auto layers = proc.getLayerModes();
     juce::Array<juce::var> paths;
-    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);juce::Array<juce::var> pts;for(auto& q:p.points)pts.add(array({q[0],q[1],q[2]}));paths.add(obj({{"points",pts},{"enabled",p.enabled},{"closed",p.closed},{"smooth",p.smooth},{"orient",p.orient},{"laps",p.laps}}));}
+    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);juce::Array<juce::var> pts;for(auto& q:p.points)pts.add(array({q[0],q[1],q[2]}));auto po=obj({{"points",pts},{"enabled",p.enabled},{"closed",p.closed},{"smooth",p.smooth},{"orient",p.orient},{"laps",p.laps}});if(p.lookAt){po.getDynamicObject()->setProperty("lookAt",true);if(p.lookPoint)po.getDynamicObject()->setProperty("lookPos",array({p.lookPos[0],p.lookPos[1],p.lookPos[2]}));else if(p.lookTarget>=0)po.getDynamicObject()->setProperty("lookTarget",p.lookTarget);}if(p.orientOffset!=0.0)po.getDynamicObject()->setProperty("orientOffset",p.orientOffset);if(p.group>=0)po.getDynamicObject()->setProperty("group",p.group);if(p.start!=0.0)po.getDynamicObject()->setProperty("start",p.start);if(p.end!=100.0)po.getDynamicObject()->setProperty("end",p.end);bool anyTime=false;for(const auto& t:p.times)if(t.has_value()){anyTime=true;break;}if(anyTime&&p.times.size()==p.points.size()){juce::Array<juce::var> ts;for(const auto& t:p.times)ts.add(t.has_value()?juce::var(*t):juce::var());po.getDynamicObject()->setProperty("times",ts);}bool anyEase=false;for(auto e:p.easings)if(e!=verbp::PathEasing::Linear){anyEase=true;break;}if(anyEase&&p.easings.size()==p.points.size()){juce::Array<juce::var> es;for(auto e:p.easings){const char* en="linear";if(e==verbp::PathEasing::EaseIn)en="easeIn";else if(e==verbp::PathEasing::EaseOut)en="easeOut";else if(e==verbp::PathEasing::EaseInOut)en="easeInOut";es.add(juce::String(en));}po.getDynamicObject()->setProperty("easings",es);}paths.add(po);}
     return obj({{"paths",paths},{"sceneName", proc.getSceneName()}, {"scene", sceneJson(scene, home)}, {"sources", sources}, {"output", obj({{"layout", output.layout}, {"radiusM", output.radius}, {"micPattern", output.micPattern}})},
-        {"tail", obj({{"baseRays", tail.rays}, {"adaptive", tail.adaptive}})}, {"editorFlags", obj({{"navLocked", proc.navigationLocked()}, {"outlinerVisible", proc.outlinerVisible()}, {"mixerCompact", proc.mixerCompactEnabled()}, {"inputMeters", proc.inputMetersEnabled()}, {"keepRouting", proc.keepRoutingEnabled()},
+        {"tail", obj({{"baseRays", tail.rays}, {"adaptive", tail.adaptive}})}, {"editorFlags", obj({{"navLocked", proc.navigationLocked()}, {"outlinerVisible", proc.outlinerVisible()}, {"mixerCompact", proc.mixerCompactEnabled()}, {"inputMeters", proc.inputMetersEnabled()}, {"keepRouting", proc.keepRoutingEnabled()}, {"keepProcessing", proc.keepProcessingEnabled()},
         {"layerModes", obj({{"walls", layers[0]}, {"floors", layers[1]}, {"ceilings", layers[2]}, {"plates", layers[3]}})}})}});
 }
 juce::var EditorBridge::snapshot() { return snapshotAttempt(2); }
@@ -72,7 +95,7 @@ juce::var EditorBridge::snapshotAttempt(int retries) {
         {"jobs", obj({{"export", obj({{"state", proc.getExportState()}, {"message", proc.getExportMessage()}})}, {"rt60", obj({{"state", proc.getTargetRT60State()}})}, {"analysis", analysisRunning ? obj({{"jobId", analysisId}, {"state", "running"}, {"progress", analysisProgress.load()}}) : juce::var()}})}});
     if (retries > 0 && (revision != proc.getRevision() || sceneSerial != proc.getSceneSerial() || loadSerial != proc.getLoadSerial() || loadState != proc.getLoadState())) return snapshotAttempt(retries - 1);
     // Track exactly the serials sent. Even a continuously changing loader will force another snapshot.
-    sentRevision = revision; sentScene = sceneSerial; sentLoad = loadSerial; lastState = loadState;
+    sentRevision = revision; sentScene = sceneSerial; sentLoad = loadSerial; lastState = loadState; sentHost = hostSignature();
     return envelope("snapshot", payload);
 }
 void EditorBridge::emitEvent(juce::var e) {
@@ -97,6 +120,7 @@ juce::var EditorBridge::handle(const juce::var& message) {
 }
 juce::var EditorBridge::dispatch(const juce::var& message) {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    checkAnalysisRoom();
     const auto id = prop(message, "requestId").toString();
     const auto result = [&](juce::var r) { return array({r}); };
     if (juce::JSON::toString(message, true).getNumBytesAsUTF8() > (1u << 20)) return result(error(id, "invalid", "Control payload exceeds 1 MiB"));
@@ -117,24 +141,25 @@ juce::var EditorBridge::dispatch(const juce::var& message) {
             const auto resultId = prop(analysisDescriptor, "resultId");
             replies.add(envelope("event", obj({{"event", "analysis.result"}, {"jobId", resultId}, {"outcome", "done"}, {"result", analysisDescriptor}})));
             if (staleSent) replies.add(envelope("event", obj({{"event", "analysis.stale"}, {"resultId", resultId}, {"stale", true}})));
-        }
+        } else replies.add(envelope("event", obj({{"event", "analysis.cleared"}})));
         return replies;
     }
     if (!ready) return result(error(id, "notReady", "Send hello before commands"));
     if (prop(message, "kind").toString() != "command" || id.isEmpty()) return result(error(id, "invalid", "Expected command with requestId"));
     const auto payload = prop(message, "payload"); const auto op = prop(payload, "op").toString();
-    const bool service = op == "telemetry.subscribe" || op == "preferences.set" || op == "preset.list" || op == "catalogs.list" || op == "preset.load" || op == "preset.save" || op == "ir.export" || op == "analysis.start" || op == "analysis.cancel" || op == "rt60.start" || op == "rt60.cancel" || op == "reflections.query" || op == "editor.setFlags";
+    const bool service = op == "output.resetClip" || op == "telemetry.subscribe" || op == "preferences.set" || op == "preset.list" || op == "catalogs.list" || op == "preset.load" || op == "preset.save" || op == "ir.export" || op == "source.loadDirectivityFile" || op == "analysis.start" || op == "analysis.cancel" || op == "rt60.start" || op == "rt60.cancel" || op == "reflections.query" || op == "editor.setFlags";
     if (service && prop(message, "baseRevision").toString() != decimal(proc.getRevision())) return array({error(id, "staleRevision", "Structural revision changed", true), snapshot()});
+    if(op=="output.resetClip"){const auto channel=prop(payload,"channel");if(!channel.isInt()||(int)channel<0||(int)channel>=verbp::kMaxReceivers)return result(error(id,"invalid","Invalid output meter channel"));proc.clearOutputClip((int)channel);return result(ack(id));}
     if (op == "telemetry.subscribe") {
         topics.clear(); if (const auto* a = prop(payload, "topics").getArray()) for (const auto& t : *a) topics.push_back(t.toString()); return result(ack(id));
     }
     if (op == "editor.setFlags") {
         const auto flags = prop(payload, "flags"); if (!flags.isObject()) return result(error(id, "invalid", "Expected flags object"));
         for (const auto& f : flags.getDynamicObject()->getProperties()) {
-            if (!f.value.isBool() || !(f.name.toString() == "navLocked" || f.name.toString() == "outlinerVisible" || f.name.toString() == "mixerCompact" || f.name.toString() == "inputMeters" || f.name.toString() == "keepRouting")) return result(error(id, "invalid", "Unknown or invalid editor flag"));
+            if (!f.value.isBool() || !(f.name.toString() == "navLocked" || f.name.toString() == "outlinerVisible" || f.name.toString() == "mixerCompact" || f.name.toString() == "inputMeters" || f.name.toString() == "keepRouting" || f.name.toString() == "keepProcessing")) return result(error(id, "invalid", "Unknown or invalid editor flag"));
         }
         const auto set = [&](const char* k, auto fn) { if (flags.hasProperty(k)) (proc.*fn)((bool)prop(flags, k)); };
-        set("navLocked", &VerbProcessor::setNavigationLocked); set("outlinerVisible", &VerbProcessor::setOutlinerVisible); set("mixerCompact", &VerbProcessor::setMixerCompactEnabled); set("inputMeters", &VerbProcessor::setInputMetersEnabled); set("keepRouting", &VerbProcessor::setKeepRoutingEnabled);
+        set("navLocked", &VerbProcessor::setNavigationLocked); set("outlinerVisible", &VerbProcessor::setOutlinerVisible); set("mixerCompact", &VerbProcessor::setMixerCompactEnabled); set("inputMeters", &VerbProcessor::setInputMetersEnabled); set("keepRouting", &VerbProcessor::setKeepRoutingEnabled); set("keepProcessing", &VerbProcessor::setKeepProcessingEnabled);
         proc.bumpRevision(); return array({ack(id), snapshot()});
     }
     if (op == "preferences.set") {
@@ -147,6 +172,52 @@ juce::var EditorBridge::dispatch(const juce::var& message) {
         return array({ack(id), snapshot()});
     }
     if (op == "preset.list" || op == "catalogs.list") return array({ack(id), envelope("event", catalogs(id))});
+    if (op == "source.loadDirectivityFile") {
+        if (chooser) return result(error(id, "notReady", "A file chooser is already open"));
+        const auto idxVar = prop(payload, "index");
+        if (!idxVar.isInt() || (int)idxVar < 0 || (int)idxVar >= (int)proc.getSources().size()) return result(error(id, "invalid", "Invalid source index"));
+        const int srcIndex = (int)idxVar;
+        emitEvent(obj({{"event", "status.file"}, {"operation", op}, {"state", "choosing"}, {"message", "Choose a .verbdir directivity file"}}));
+        chooser = std::make_unique<juce::FileChooser>("Load source directivity (.verbdir)", directivityInitialDir(true), "*.verbdir", true);
+        const std::weak_ptr<int> weak = lifetime;
+        chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this, weak, srcIndex, id, op](const juce::FileChooser& c) {
+            if (weak.expired()) return;
+            const auto file = c.getResult();
+            if (file == juce::File()) {
+                emitEvent(obj({{"event", "status.file"}, {"operation", op}, {"state", "cancelled"}, {"message", "File selection cancelled"}}));
+            } else if (!file.existsAsFile() || file.getSize() <= 0 || file.getSize() > (int64_t)verb::kMaxVerbdirBytes) {
+                if (emit) emit("verb.message", error(id, "invalid", "Directivity file must exist and be <= 64 KB"));
+                emitEvent(obj({{"event", "status.file"}, {"operation", op}, {"state", "error"}, {"message", "Directivity file exceeds 64 KB or cannot be read"}}));
+            } else {
+                const auto text = file.loadFileAsString().toStdString();
+                verb::DirectivityProfile parsed; std::string parseErr;
+                if (!verb::parseVerbdir(text, parsed, parseErr)) {
+                    if (emit) emit("verb.message", error(id, "invalid", "Invalid .verbdir file: " + juce::String(parseErr)));
+                    emitEvent(obj({{"event", "status.file"}, {"operation", op}, {"state", "error"}, {"message", "Invalid .verbdir file"}}));
+                } else {
+                    const auto parent = file.getParentDirectory();
+                    if (parent.isDirectory()) {
+                        preferences.getDynamicObject()->setProperty("lastDirectivityDir", parent.getFullPathName());
+                        if (preferenceLocation != juce::File()) {
+                            preferenceLocation.getParentDirectory().createDirectory();
+                            preferenceLocation.replaceWithText(juce::JSON::toString(preferences));
+                        }
+                    }
+                    const auto sources = proc.getSources();
+                    const double curAmt = (srcIndex >= 0 && srcIndex < (int)sources.size()) ? sources[(size_t)srcIndex].instrumentAmount : 1.0;
+                    const juce::String customName = parsed.name.empty() ? file.getFileNameWithoutExtension() : juce::String(parsed.name);
+                    auto cmd = obj({{"schemaVersion", 1}, {"sessionId", sessionId}, {"kind", "command"}, {"requestId", id + "-apply"}, {"baseRevision", decimal(proc.getRevision())},
+                        {"payload", obj({{"op", "source.setDirectivity"}, {"index", srcIndex}, {"instrument", "custom"}, {"amount", curAmt},
+                            {"customData", juce::String(text)}, {"customName", customName.substring(0, 128)}, {"customPath", file.getFullPathName().substring(0, 512)}})}});
+                    proc.getEditorSession().execute(cmd);
+                    emitEvent(obj({{"event", "status.file"}, {"operation", op}, {"state", "done"}, {"message", "Loaded " + file.getFileName()}}));
+                }
+            }
+            chooser.reset();
+            publishSnapshot();
+        });
+        return array({ack(id), snapshot()});
+    }
     if (op == "preset.save" || op == "preset.load" || op == "ir.export") {
         if (chooser) return result(error(id, "notReady", "A file chooser is already open"));
         if ((op == "preset.save" || op == "ir.export") && proc.isRoomLoadPending()) return result(error(id,"notReady","Wait for the room load"));
@@ -179,17 +250,33 @@ void EditorBridge::suspend() { visible = false; proc.setWebMetersActive(false); 
 void EditorBridge::setPreferenceLocation(const juce::File& f) { preferenceLocation = f; if (f.existsAsFile()) { const auto p = juce::JSON::parse(f); if (p.isObject()) preferences = p; } }
 void EditorBridge::windowSize(int w, int h) { preferences.getDynamicObject()->setProperty("windowWidth", std::clamp(w, 900, 2600)); preferences.getDynamicObject()->setProperty("windowHeight", std::clamp(h, 600, 1800)); }
 std::pair<int, int> EditorBridge::preferredSize() const { return {std::clamp((int)preferences.getProperty("windowWidth", 1280), 900, 2600), std::clamp((int)preferences.getProperty("windowHeight", 800), 600, 1800)}; }
+juce::File EditorBridge::directivityInitialDir(bool createDefault) const {
+    const auto saved = preferences.getProperty("lastDirectivityDir", juce::var()).toString().trim();
+    if (saved.isNotEmpty()) {
+        const juce::File dir(saved);
+        if (dir.isDirectory()) return dir;
+    }
+    const auto def = profilesDir();
+    if (createDefault) def.createDirectory();
+    return def;
+}
 
 juce::var EditorBridge::catalogs(const juce::String& id) {
-    juce::Array<juce::var> materials, rooms, users;
+    juce::Array<juce::var> materials, rooms, users, directivityProfiles;
     for (const auto& m : verb::surfacePresets()) materials.add(materialJson(m));
     const auto builtins = verbp::builtinRooms(); for (size_t i = 0; i < builtins.size(); ++i) rooms.add(obj({{"id", (int)i}, {"name", juce::String(builtins[i].name)}}));
+    for (const auto& dp : verb::builtinDirectivities()) {
+        if (!dp) continue;
+        directivityProfiles.add(obj({{"id", juce::String(dp->id)}, {"name", juce::String(dp->name)}, {"category", juce::String(dp->category)},
+            {"license", juce::String(dp->license)}, {"attribution", juce::String(dp->attribution)}, {"isModel", dp->isModel},
+            {"polarSlices", polarSlicesJson(*dp, 1.0)}}));
+    }
     userRooms.clear();
     const auto dir = libraryDir();
     if (dir.isDirectory()) { for (const auto& f : dir.findChildFiles(juce::File::findFiles, false, "*.txt;*.verbroom")) { if (userRooms.size() >= 4096) break; userRooms.push_back(f); } }
     std::sort(userRooms.begin(), userRooms.end(), [](const juce::File& a, const juce::File& b) { return a.getFileName().compareIgnoreCase(b.getFileName()) < 0; });
     for (const auto& f : userRooms) users.add(obj({{"id", f.getFileName()}, {"name", f.getFileNameWithoutExtension()}, {"format", f.hasFileExtension("verbroom") ? "verbroom" : "txt"}}));
-    return obj({{"event", "catalogs.list"}, {"requestId", id}, {"materials", materials}, {"builtinRooms", rooms}, {"userPresets", users}});
+    return obj({{"event", "catalogs.list"}, {"requestId", id}, {"materials", materials}, {"builtinRooms", rooms}, {"userPresets", users}, {"directivityProfiles", directivityProfiles}});
 }
 bool EditorBridge::loadFile(const juce::File& f) {
     if (!f.existsAsFile() || f.getSize() > (16 << 20)) { if (emit) emit("verb.message", error({}, "ioError", "Preset does not exist or exceeds 16 MiB")); return false; }
@@ -237,6 +324,7 @@ void EditorBridge::tick(bool isVisible, double now) {
     if (!isVisible || !ready) { if (visible) suspend(); return; }
     if (!documentAvailable && proc.getLoadState() != 2) return;
     const bool resumed = !visible; visible = true;
+    checkAnalysisRoom();
     if (resumed) { lastEvents.clear(); lastDiagnostics.reset(); lastMeterSent = -1e20; }
     const auto wants = [&](const char* topic) { return std::find(topics.begin(), topics.end(), juce::String(topic)) != topics.end(); };
     proc.setWebMetersActive(wants("meters"));
@@ -245,7 +333,8 @@ void EditorBridge::tick(bool isVisible, double now) {
     if(sceneCurrent!=clutterSceneCurrentSeen){clutterSceneCurrentSeen=sceneCurrent;clutterDirty=true;}
     if (modelSeen != proc.getWebGeometrySerial()) { modelSeen = proc.getWebGeometrySerial(); pathsDirty = true; clutterDirty = true; }
     if (paramChanged || proc.apvts.getRawParameterValue("duck")->load()>0) { pathsDirty = true; if (emit) emit("verb.parameters", parameters.snapshot(tailCurrent)); }
-    if (resumed || sentRevision != proc.getRevision() || sentLoad != proc.getLoadSerial() || lastState != proc.getLoadState()) {
+    // A host channel-count / layout / sample-rate change alone (no scene edit) must reach the UI without reopening the window.
+    if (resumed || sentRevision != proc.getRevision() || sentLoad != proc.getLoadSerial() || lastState != proc.getLoadState() || (documentAvailable && sentHost != hostSignature())) {
         if (!resumed && sentRevision != proc.getRevision()) {
             proc.getEditorSession().abortTransaction();
             emitEvent(obj({{"event", "resync.required"}, {"reason", "structuralChange"}, {"currentRevision", decimal(proc.getRevision())}}));
@@ -254,6 +343,9 @@ void EditorBridge::tick(bool isVisible, double now) {
         pathsDirty = true; clutterDirty = true; publishSnapshot();
     }
     if (wants("meters") && now - lastMeters >= 1000.0 / 30.0) {
+        juce::Array<juce::var> outputs,rms,clips;const int count=std::min(verbp::kMaxReceivers,proc.hostOutputChannels());
+        for(int ch=0;ch<count;++ch){outputs.add(proc.takeWebOutputPeak(ch));rms.add(lastAudioActivity>=0&&now-lastAudioActivity>250?0.f:proc.outputRms(ch));clips.add(proc.outputClipped(ch));}
+        emitEvent(obj({{"event","meters.output"},{"seq",(int)(meterSeq++ & 0x7fffffff)},{"outputChannels",count},{"peaks",outputs},{"rms",rms},{"clips",clips}}));
         lastMeters = now; juce::Array<juce::var> peaks; const int n = proc.hostInputChannels(); for (int i = 0; i < n; ++i) peaks.add(proc.takeWebInputPeak(i));
         const bool audible = std::any_of(peaks.begin(), peaks.end(), [](const juce::var& p) { return (double)p > 1e-5; });
         if (audible || now - lastMeterSent >= 1000) { lastMeterSent = now; emitEvent(obj({{"event", "meters.input"}, {"seq", (int)(meterSeq++ & 0x7fffffff)}, {"hostInputChannels", n}, {"peaks", peaks}})); }
@@ -323,6 +415,19 @@ void EditorBridge::tick(bool isVisible, double now) {
 juce::String EditorBridge::analysisSignature(int source) const {
     return decimal(proc.getRevision()) + ":" + juce::String(source) + ":" + juce::JSON::toString(prop(parameters.snapshot(tailCurrent), "values"), true);
 }
+void EditorBridge::checkAnalysisRoom() {
+    const auto generation = proc.analysisRoomGeneration();
+    if (generation == analysisRoomGeneration) return;
+    analysisRoomGeneration = generation;
+    analysisCancel = true;
+    analysisId.clear(); // suppress a cancelled worker's late publication
+    analysisDescriptor = juce::var(); analysisBinary.clear();
+    for (auto& band : analysisBands) band.clear();
+    resourceCache.clear(); resourceIds.clear();
+    resultSignature.clear(); staleSent = false;
+    { std::lock_guard<std::mutex> lock(analysisMutex); analysisPending.reset(); }
+    emitEvent(obj({{"event", "analysis.cleared"}}));
+}
 void EditorBridge::startAnalysis(const juce::var& p) {
     if (analysisWorker.joinable()) analysisWorker.join();
     analysisSource = (int)prop(p, "source");
@@ -332,10 +437,11 @@ void EditorBridge::startAnalysis(const juce::var& p) {
     analysisId = "energy-" + juce::String(++analysisCounter); analysisRevision = decimal(proc.getRevision()); analysisInputSignature = analysisSignature(analysisSource);
     analysisCancel = false; analysisProgress = 0; analysisRunning = true;
     { std::lock_guard<std::mutex> lock(analysisMutex); analysisPending.reset(); analysisError.clear(); }
-    analysisWorker = std::thread([this, scene = std::move(scene), options] {
+    auto pool=proc.getAnalysisPool();
+    analysisWorker = std::thread([this, scene = std::move(scene), options, pool] {
         verb::BakePool::lowerCurrentThread(true);
         std::shared_ptr<const verb::EnergyMap> result; juce::String why;
-        try { result = std::make_shared<const verb::EnergyMap>(verb::analyzeEnergyMap(scene, options, [this] { return analysisCancel.load(); }, [this](double p) { analysisProgress = p; })); }
+        try { result = std::make_shared<const verb::EnergyMap>(verb::analyzeEnergyMap(scene, options, [this] { return analysisCancel.load(); }, [this](double p) { analysisProgress = p; }, {pool,pool?pool->size():1})); }
         catch (const std::exception& e) { why = e.what(); }
         { std::lock_guard<std::mutex> lock(analysisMutex); analysisPending = std::move(result); analysisError = why; }
         analysisRunning = false;
@@ -403,10 +509,15 @@ juce::var EditorBridge::reflectionPaths(const juce::var& request) {
         const double size=proc.webAppliedSize()*.01;
         const double top=scene.ceilMat<0?30.*size:scene.height,c=verb::speedOfSound(scene.tempC);
         verb::Vec3 receiver=verb::Vec3{proc.apvts.getRawParameterValue("lx")->load(),proc.apvts.getRawParameterValue("ly")->load(),std::clamp((double)proc.apvts.getRawParameterValue("lz")->load(),0.,top/size)}*size;
+        const auto configs=proc.getSources();
         const auto lp=proc.getMovementPath(verbp::kListener);
-        if(lp.enabled && lp.points.size()>=2){verbp::CompiledPath clp;clp.build(lp);const auto q=clp.evaluate(proc.apvts.getRawParameterValue(VerbProcessor::pathParamId(verbp::kListener))->load());receiver=verb::Vec3{q[0],q[1],std::clamp(q[2],0.,top/size)}*size;}
+        if(lp.enabled && lp.points.size()>=2){
+            int driver=verbp::kListener;
+            if(lp.group>=0)for(int d=0;d<(int)configs.size();++d){const auto sp=proc.getMovementPath(d);if(sp.enabled&&sp.points.size()>=2&&sp.group==lp.group){driver=d;break;}}
+            verbp::CompiledPath clp;clp.build(lp);const auto q=clp.evaluate(proc.apvts.getRawParameterValue(VerbProcessor::pathParamId(driver))->load());receiver=verb::Vec3{q[0],q[1],std::clamp(q[2],0.,top/size)}*size;
+        }
         const double earlyDb=proc.apvts.getRawParameterValue("mode")->load()>=.5f?proc.apvts.getRawParameterValue("early")->load():0.;
-        const auto configs=proc.getSources();std::vector<int> channels;
+        std::vector<int> channels;
         for(const auto& pm:verbp::buildPoints(configs))if(pm.source==source)channels.push_back(pm.channel);
         std::vector<int> points;
         if(request.hasProperty("pointIndex"))points.push_back(std::clamp((int)prop(request,"pointIndex"),0,(int)scene.sources.size()-1));
@@ -420,10 +531,17 @@ juce::var EditorBridge::reflectionPaths(const juce::var& request) {
             if(length/c>=.75)return;
             const auto& src=scene.sources[(size_t)pointIndex];
             const auto direction=vertices[1]-src.pos;const double distance=verb::norm(direction);
-            const double directional=distance>1e-9?verb::dirGain(src,direction*(1./distance)):1.;
-            const double gain=directional/std::max(.05,length)*(order?std::pow(10.,earlyDb/20.):1.);
+            double sg[7];
+            if (src.directivity != nullptr) {
+                if (distance > 1e-9) verb::dirGainBands(src, direction * (1. / distance), sg);
+                else for (int b = 0; b < 7; ++b) sg[b] = 1.;
+            } else {
+                const double directional=distance>1e-9?verb::dirGain(src,direction*(1./distance)):1.;
+                for (int b = 0; b < 7; ++b) sg[b] = directional;
+            }
+            const double baseScale=1./std::max(.05,length)*(order?std::pow(10.,earlyDb/20.):1.);
             juce::Array<juce::var> energy;
-            for(int band=0;band<7;++band){const double e=gain*gain*amp[band]*amp[band]*std::pow(10.,-verb::airAbsDbPerM(verb::kBandHz[band],scene.tempC,scene.humidity)*length/10.);if(!std::isfinite(e)||e<0){truncated=true;return;}energy.add(e);}
+            for(int band=0;band<7;++band){const double gain=sg[band]*baseScale;const double e=gain*gain*amp[band]*amp[band]*std::pow(10.,-verb::airAbsDbPerM(verb::kBandHz[band],scene.tempC,scene.humidity)*length/10.);if(!std::isfinite(e)||e<0){truncated=true;return;}energy.add(e);}
             juce::Array<juce::var> positions,surfaces;for(const auto& p:vertices)positions.add(array({p.x,p.y,p.z}));
             if(surf>=0){const char* kind=surf<geo.W?"wall":surf==geo.floorId()?"floor":"ceiling";int index=surf<geo.W?surf:0;
                 if(geo.isPlate(surf)){const auto* pl=&geo.plate(surf);bool found=false;for(size_t i=0;i<scene.floorZones.size();++i)if(&scene.floorZones[i]==pl){kind="floorZone";index=(int)i;found=true;break;}if(!found)for(size_t i=0;i<scene.ceilZones.size();++i)if(&scene.ceilZones[i]==pl){kind="ceilingZone";index=(int)i;break;}}

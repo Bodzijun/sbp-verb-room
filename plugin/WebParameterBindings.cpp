@@ -37,8 +37,10 @@ juce::var WebParameterBindings::descriptors() const {
         else {
             const auto& r = p->getNormalisableRange();
             o->setProperty("type", "float"); o->setProperty("relay", "slider"); o->setProperty("min", r.start); o->setProperty("max", r.end); o->setProperty("step", r.interval); o->setProperty("decimals", 3);
-            const bool centre = id == "absorption" || id.startsWith("decay") || id=="predelay" || id=="stereoWidth" || id=="freeze" || id=="duck" || id=="duckRelease";
-            o->setProperty("skew", centre ? obj({{"type", "centre"}, {"centre", 1.0}}) : obj({{"type", "none"}}));
+            // The knob must follow the host parameter's own mapping: a centre skew only where the range really has one
+            // (absorption / decay multipliers, centre 1); linear ranges such as Stereo width 0..200 % stay linear.
+            const bool centre = std::abs(r.skew - 1.0f) > 1e-6f && !r.symmetricSkew;
+            o->setProperty("skew", centre ? obj({{"type", "centre"}, {"centre", (double) r.convertFrom0to1(0.5f)}}) : obj({{"type", "none"}}));
             o->setProperty("unit", id.endsWith("path") ? "" : source || listener ? (id.endsWith("az") ? "deg" : id.endsWith("g") ? "dB" : "m") : id == "gain" || id == "makeup" || id == "early" || id == "tail" || id=="duck" ? "dB" : id=="predelay" || id=="duckRelease"?"ms":id == "mix" || id=="size" || id=="stereoWidth" ? "%" : "");
         }
         list.add(d);
@@ -65,24 +67,25 @@ juce::var WebParameterBindings::snapshot(bool tailCurrent) const {
     return obj({{"values", values}, {"effective", effective}, {"texts", texts}});
 }
 juce::var WebParameterBindings::apply(const juce::var& batch) {
+    const auto reject=[&](const char* why){ endAll(); return obj({{"error",why}}); };
     const auto* list = batch.getArray();
-    if (!list || list->size() > 1024) return obj({{"error", "Invalid parameter batch"}});
+    if (!list || list->size() > 1024) return reject("Invalid parameter batch");
     // Validate the entire batch before any host notification.
     auto active = std::vector<bool>(); for (const auto& b : bindings) active.push_back(b.gesture);
     bool creative = proc.apvts.getRawParameterValue("mode")->load() >= .5f;
     for (const auto& a : *list) {
         auto it = std::find_if(bindings.begin(), bindings.end(), [&](const Binding& b) { return b.id == prop(a, "id").toString(); });
-        if (it == bindings.end()) return obj({{"error", "Unknown parameter"}});
+        if (it == bindings.end()) return reject("Unknown parameter");
         const auto i = (size_t)(it - bindings.begin()); const auto type = prop(a, "type").toString();
-        if (type == "begin") { if (active[i]) return obj({{"error", "Gesture already open"}}); active[i] = true; }
-        else if (type == "end") { if (!active[i]) { if (it->staleEnded) continue; return obj({{"error", "Gesture is not open"}}); } active[i] = false; }
+        if (type == "begin") { if (active[i]) return reject("Gesture already open"); active[i] = true; }
+        else if (type == "end") { if (!active[i]) { if (it->staleEnded) continue; return reject("Gesture is not open"); } active[i] = false; }
         else if (type == "change") {
             if (!active[i] && it->staleEnded) continue;
             auto value = prop(a, "value"); const double v = (double)value;
-            if (!active[i] || !(value.isInt() || value.isInt64() || value.isDouble()) || !std::isfinite(v) || (!creative && creativeOnly(it->id))) return obj({{"error", "Invalid or mode-locked parameter change"}});
-            const auto& r = it->parameter->getNormalisableRange(); if (v < r.start || v > r.end) return obj({{"error", "Parameter out of range"}});
+            if (!active[i] || !(value.isInt() || value.isInt64() || value.isDouble()) || !std::isfinite(v) || (!creative && creativeOnly(it->id))) return reject("Invalid or mode-locked parameter change");
+            const auto& r = it->parameter->getNormalisableRange(); const double epsilon = 1e-6 * std::max(1., (double)r.end-r.start); if (v < r.start-epsilon || v > r.end+epsilon) return reject("Parameter out of range");
             if (it->id == "mode") creative = v >= .5;
-        } else return obj({{"error", "Unknown parameter action"}});
+        } else return reject("Unknown parameter action");
     }
     for (const auto& a : *list) {
         auto& b = *std::find_if(bindings.begin(), bindings.end(), [&](const Binding& x) { return x.id == prop(a, "id").toString(); });
@@ -90,7 +93,7 @@ juce::var WebParameterBindings::apply(const juce::var& batch) {
         if (type == "begin") { b.gesture = true; b.staleEnded = false; b.parameter->beginChangeGesture(); }
         else if (!b.gesture && b.staleEnded) continue;
         else if (type == "end") { b.gesture = false; b.parameter->endChangeGesture(); }
-        else b.parameter->setValueNotifyingHost(b.parameter->convertTo0to1((float)(double)prop(a, "value")));
+        else { const auto& r=b.parameter->getNormalisableRange(); b.parameter->setValueNotifyingHost(b.parameter->convertTo0to1(std::clamp((float)(double)prop(a,"value"),r.start,r.end))); }
     }
     return obj({{"ok", true}});
 }

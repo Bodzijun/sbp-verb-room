@@ -185,6 +185,9 @@ static void stage2ExportAndLoader(VerbProcessor& p) {
     // actual modeled obstacles and current audible IR, not a regenerated room.
     auto furnished=verb::loadScene("scenes/demo_furnished.txt");furnished.sources.resize(1);
     p.loadSceneText(verb::serializeScene(furnished),"furnished export",true);check(waitReady(p,90),"furnished export geometry loads");
+    // E11 room-load action resets per-room overrides. Reapply this test's
+    // original acoustic setup before checking non-default export/live parity.
+    for(int band=0;band<3;++band)setP(p,band==0?"decayLow":band==1?"decayMid":"decayHigh",storedDecay[(size_t)band]);
     setP(p,"absorption",1.4);setP(p,"s1x",p.apvts.getRawParameterValue("s1x")->load()+.01);
     check(stage2Settle(p,storedDecay,1.4),"furnished absorption reaches live tail before export");
     setP(p,"doppler",1); // compare static geometry, without a prior motion-reference trajectory

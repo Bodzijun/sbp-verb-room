@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(verb VERSION 0.1.16 LANGUAGES C CXX)
+project(verb VERSION 0.2.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -38,6 +38,9 @@ endif()
 
 add_executable(verb src/main.cpp)
 target_link_libraries(verb PRIVATE verbcore)
+
+add_executable(verbdir_tool src/verbdir_tool.cpp)
+target_link_libraries(verbdir_tool PRIVATE verbcore)
 
 add_executable(rt_test src/rt_test.cpp)
 target_link_libraries(rt_test PRIVATE verbcore)
@@ -98,3 +101,9 @@ if(VERB_BUILD_PLUGIN AND EXISTS "${CMAKE_SOURCE_DIR}/archive/pre-stage2-2026-11-
   target_compile_definitions(E1LegacyParser PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
   target_link_libraries(E1LegacyParser PRIVATE e1_old_core juce::juce_audio_utils juce::juce_recommended_config_flags)
 endif()
+
+# E13f profile ownership, live tails and normalization regressions.
+add_executable(directivity_test src/directivity_test.cpp)
+target_link_libraries(directivity_test PRIVATE verbcore)
+add_test(NAME directivity_profiles COMMAND directivity_test)
+set_tests_properties(directivity_profiles PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 180)

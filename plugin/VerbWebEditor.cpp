@@ -1,9 +1,13 @@
 #include "VerbWebEditor.h"
 
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <cmath>
 #include <map>
@@ -17,7 +21,9 @@
 #endif
 
 namespace verbweb {
+#ifdef _WIN32
 bool probeWebView2RuntimeVersion(std::wstring& version, long& hresult);  // WebRuntimeProbe.cpp
+#endif
 
 // ---------------------------------------------------------------- settings, preference, diagnostics
 Settings& settings() {
@@ -28,11 +34,17 @@ Settings& settings() {
 namespace {
 juce::CriticalSection& diagLock() { static juce::CriticalSection c; return c; }
 juce::String& diagText() { static juce::String s; return s; }
+juce::String& uiErrorText() { static juce::String s; return s; }
 
 juce::File sbpRoot() {
+#ifdef _WIN32
     // %LOCALAPPDATA% (not roaming): a browser profile must never follow the user to another machine.
     const auto local = juce::SystemStats::getEnvironmentVariable("LOCALAPPDATA", {});
     const juce::File base = local.isNotEmpty() ? juce::File(local) : juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory);
+#else
+    // macOS: ~/Library/SBP/VerbRoom (JUCE userApplicationDataDirectory).
+    const juce::File base = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory);
+#endif
     return base.getChildFile("SBP").getChildFile("VerbRoom");
 }
 }  // namespace
@@ -45,7 +57,7 @@ juce::File preferenceFile() {
 UiChoice preferredUi() {
     const auto env = juce::SystemStats::getEnvironmentVariable("VERB_UI", {}).trim().toLowerCase();
     if (env == "web") return UiChoice::web;
-    if (env == "native") return UiChoice::native;
+    if (env == "native" || env == "classic") return UiChoice::native;
     if (env.isNotEmpty()) return UiChoice::native;  // unknown value: stay on the default
     const auto f = preferenceFile();
     if (f.existsAsFile()) {
@@ -56,7 +68,7 @@ UiChoice preferredUi() {
             if (line.startsWithIgnoreCase("ui=")) return line.fromFirstOccurrenceOf("=", false, false).trim().equalsIgnoreCase("web") ? UiChoice::web : UiChoice::native;
         }
     }
-    return UiChoice::native;
+    return UiChoice::web;  // the web UI is the default on every platform that has it; the classic UI stays one click (or VERB_UI=classic) away
 }
 
 void setPreferredUi(UiChoice choice) {
@@ -67,7 +79,7 @@ void setPreferredUi(UiChoice choice) {
 
 juce::String diagnosticsLine() {
     const juce::ScopedLock l(diagLock());
-    return diagText();
+    return diagText() + (uiErrorText().isEmpty()?juce::String():"; last UI error: " + uiErrorText());
 }
 
 void recordDiagnostics(const juce::String& reason) {
@@ -77,7 +89,11 @@ void recordDiagnostics(const juce::String& reason) {
 
 bool webEditorAvailable(juce::String& why) {
     const auto rt = probeRuntime();
+#ifdef _WIN32
     if (!rt.available) { why = "WebView2 Runtime is not available (" + rt.error + ")"; return false; }
+#else
+    if (!rt.available) { why = "the WKWebView backend is not available (" + rt.error + ")"; return false; }
+#endif
     const auto writable = [](const juce::File& dir) {
         if (!dir.createDirectory().wasOk() || !dir.isDirectory()) return false;
         const auto probe = dir.getChildFile(".verb-write-probe-" + juce::String(juce::Time::getMillisecondCounter()));
@@ -85,7 +101,9 @@ bool webEditorAvailable(juce::String& why) {
         probe.deleteFile();
         return ok;
     };
+#ifdef _WIN32
     if (!writable(userDataRoot())) { why = "the user-data folder is not writable: " + userDataRoot().getFullPathName(); return false; }
+#endif
     if (!writable(preferenceFile().getParentDirectory())) { why = "the preference folder is not writable: " + preferenceFile().getParentDirectory().getFullPathName(); return false; }
     return true;
 }
@@ -96,6 +114,7 @@ RuntimeInfo probeRuntime() {
         r.error = "forced by test (forceRuntimeMissing)";
         return r;
     }
+#ifdef _WIN32
     std::wstring version;
     long hr = 0;
     if (probeWebView2RuntimeVersion(version, hr)) {
@@ -104,6 +123,15 @@ RuntimeInfo probeRuntime() {
     } else {
         r.error = "GetAvailableCoreWebView2BrowserVersionString failed, HRESULT 0x" + juce::String::toHexString((int)hr);
     }
+#else
+    // macOS: the system WKWebView is always part of the OS; ask JUCE whether the default backend can be created.
+    if (juce::WebBrowserComponent::areOptionsSupported(juce::WebBrowserComponent::Options{})) {
+        r.available = true;
+        r.version = "WKWebView";
+    } else {
+        r.error = "juce::WebBrowserComponent::areOptionsSupported returned false";
+    }
+#endif
     return r;
 }
 
@@ -135,6 +163,7 @@ bool parseHostKey(const juce::var& p, HostKeyEvent& e) {
     return true;
 }
 
+#ifdef _WIN32
 bool hostKeyIsSys(const HostKeyEvent& e) {
     // Windows sends the SYS variants while Alt is held (not with AltGr = Ctrl+Alt) and for F10.
     return (e.alt && !e.ctrl) || e.vk == VK_F10 || e.vk == VK_MENU;
@@ -159,6 +188,11 @@ HostKeyMessage buildHostKeyMessage(const HostKeyEvent& e, bool sys) {
     m.lParam = l;
     return m;
 }
+#else
+// macOS: the page cannot hand keys to the host (no Win32 message route); the page keeps them. See the release notes.
+bool hostKeyIsSys(const HostKeyEvent&) { return false; }
+HostKeyMessage buildHostKeyMessage(const HostKeyEvent&, bool) { return {}; }
+#endif
 
 // ---------------------------------------------------------------- user-data folder (UDF)
 juce::File userDataRoot() {
@@ -177,7 +211,11 @@ juce::File userDataFolderFor(const void* processorKey) {
     const auto it = paths.find(processorKey);
     // A changed root (tests) invalidates the remembered path.
     if (it != paths.end() && it->second.isAChildOf(userDataRoot())) return it->second;
+#ifdef _WIN32
     const auto session = juce::String((int)GetCurrentProcessId());
+#else
+    const auto session = juce::String((int)getpid());
+#endif
     const auto token = juce::String::toHexString(juce::Random::getSystemRandom().nextInt64()).paddedLeft('0', 16).substring(0, 12);
     const auto dir = userDataRoot().getChildFile(session).getChildFile(token);
     paths[processorKey] = dir;
@@ -189,11 +227,13 @@ juce::File userDataFolderFor(const void* processorKey) {
 struct UdfLease {
     juce::File dir;
     juce::File lockFile;
+#ifdef _WIN32
     HANDLE handle = INVALID_HANDLE_VALUE;
     ~UdfLease() {
         if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
         lockFile.setLastModificationTime(juce::Time::getCurrentTime());  // the age of a dead folder counts from here
     }
+#endif
 };
 
 namespace {
@@ -209,6 +249,10 @@ bool isLeasedHere(const juce::File& dir) {
 }
 }  // namespace
 
+#ifndef _WIN32
+// macOS: WKWebView needs no user-data folder, so there is nothing to clean.
+int cleanStaleUserDataFolders(const std::function<bool()>&, int) { return 0; }
+#else
 int cleanStaleUserDataFolders(const std::function<bool()>& shouldStop, int minAgeMinutes) {
     int removed = 0;
     const auto root = userDataRoot();
@@ -234,6 +278,7 @@ int cleanStaleUserDataFolders(const std::function<bool()>& shouldStop, int minAg
     }
     return removed;
 }
+#endif
 
 // Background removal of dead user-data folders; the stop flag is checked between folders so that closing an editor never waits long.
 class StaleUdfCleaner : public juce::Thread {
@@ -269,6 +314,14 @@ private:
 };
 
 namespace {
+#ifndef _WIN32
+// macOS: no user-data folder and no lock file; the lease only carries the (unused) path.
+std::shared_ptr<UdfLease> acquireLease(const void* key, juce::String&) {
+    auto lease = std::make_shared<UdfLease>();
+    lease->dir = userDataFolderFor(key);
+    return lease;
+}
+#else
 std::shared_ptr<UdfLease> acquireLease(const void* key, juce::String& reason) {
     const auto dir = userDataFolderFor(key);
     std::lock_guard<std::mutex> g(gUdfMutex);
@@ -289,13 +342,18 @@ std::shared_ptr<UdfLease> acquireLease(const void* key, juce::String& reason) {
     weak = lease;
     return lease;
 }
+#endif
 }  // namespace
 
 // ---------------------------------------------------------------- the editor
 std::unique_ptr<VerbWebEditor> VerbWebEditor::create(VerbProcessor& proc, juce::String& reason) {
     const auto rt = probeRuntime();
     if (!rt.available) {
+#ifdef _WIN32
         reason = "WebView2 Runtime is not available (" + rt.error + ")";
+#else
+        reason = "the WKWebView backend is not available (" + rt.error + ")";
+#endif
         return nullptr;
     }
     auto lease = acquireLease(&proc, reason);
@@ -322,6 +380,7 @@ VerbWebEditor::VerbWebEditor(VerbProcessor& p, std::shared_ptr<UdfLease> l, juce
     createBrowser();
     startTimer(34);
 
+#ifdef _WIN32
     static std::atomic<juce::uint32> lastCleanup{0};
     const auto now = juce::Time::getMillisecondCounter();
     const auto last = lastCleanup.load();
@@ -330,6 +389,7 @@ VerbWebEditor::VerbWebEditor(VerbProcessor& p, std::shared_ptr<UdfLease> l, juce
         cleaner = std::make_unique<StaleUdfCleaner>();
         cleaner->startThread(juce::Thread::Priority::low);
     }
+#endif
 }
 
 VerbWebEditor::~VerbWebEditor() {
@@ -367,6 +427,7 @@ void VerbWebEditor::createBrowser() {
         return baseProvider(url);
     };
 
+#ifdef _WIN32
     auto options = Opt{}
         .withBackend(Opt::Backend::webview2)
         .withWinWebView2Options(Opt::WinWebView2{}
@@ -374,14 +435,21 @@ void VerbWebEditor::createBrowser() {
                                     .withStatusBarDisabled()
                                     .withBuiltInErrorPageDisabled()
                                     .withBackgroundColour(juce::Colour(0xff101513)))
+#else
+    auto options = Opt{}  // macOS: the default backend is the system WKWebView
+#endif
         .withNativeIntegrationEnabled()
         .withResourceProvider(provider)
         .withNativeFunction("verbMessage", [self](const juce::Array<juce::var>& a, Done done) {
+            const double start=juce::Time::getMillisecondCounterHiRes();
             done(self && self->bridge && !a.isEmpty() ? self->bridge->handle(a[0]) : juce::var());
+            if(self)recordDiagnostics("watchdog: last call verbMessage " + juce::String(juce::Time::getMillisecondCounterHiRes()-start,1) + " ms; max message-thread gap " + juce::String(self->maxTimerGapMs,1) + " ms");
         })
         .withNativeFunction("verbParameters", [self](const juce::Array<juce::var>& a, Done done) {
             done(self && self->bridge && !a.isEmpty() ? self->bridge->parameterBatch(a[0]) : juce::var());
         })
+        .withNativeFunction("verbDiagnostics", [](const juce::Array<juce::var>&, Done done) { done(diagnosticsLine()); })
+        .withNativeFunction("verbUiError", [](const juce::Array<juce::var>& a, Done done) { if(!a.isEmpty()){const juce::ScopedLock l(diagLock());uiErrorText()=a[0].toString().substring(0,512);} done(true); })
         .withNativeFunction("ready", [self](const juce::Array<juce::var>& a, Done done) {
             if (self == nullptr) { done(juce::var()); return; }
             self->onNativeReady(a.isEmpty() ? juce::var() : a[0], std::move(done));
@@ -459,6 +527,19 @@ void VerbWebEditor::onNativePing(const juce::var& args, juce::WebBrowserComponen
     done(juce::var(reply.release()));
 }
 
+#ifndef _WIN32
+// macOS: the page has no route to hand keys to the host.
+void* VerbWebEditor::hostWindow() const { return nullptr; }
+void VerbWebEditor::releaseHostKeys() { hostKeysDown.clear(); }
+bool VerbWebEditor::handleHostKey(const juce::var& payload) {
+    JUCE_ASSERT_MESSAGE_THREAD
+    ++hostKeysReceived;
+    HostKeyEvent e;
+    if (parseHostKey(payload, e)) { ++hostKeysDropped; hostKeyLog.push_back(e); if (hostKeyLog.size() > 64) hostKeyLog.erase(hostKeyLog.begin()); }
+    else ++hostKeysDropped;
+    return false;
+}
+#else
 void* VerbWebEditor::hostWindow() const {
     if (auto* peer = getPeer())
         if (auto* own = static_cast<HWND>(peer->getNativeHandle()))
@@ -522,6 +603,7 @@ bool VerbWebEditor::handleHostKey(const juce::var& payload) {
     if (hostKeyLog.size() > 64) hostKeyLog.erase(hostKeyLog.begin());
     return true;
 }
+#endif
 
 void VerbWebEditor::timerCallback() {
     const double tickAt=juce::Time::getMillisecondCounterHiRes();
@@ -531,6 +613,7 @@ void VerbWebEditor::timerCallback() {
     if (bridge) bridge->tick(mode == Mode::web && isShowing(), juce::Time::getMillisecondCounterHiRes());
     const double bridgeMs=juce::Time::getMillisecondCounterHiRes()-tickAt;
     maxBridgeTickMs=std::max(maxBridgeTickMs,bridgeMs);
+    if(mode==Mode::web) recordDiagnostics("watchdog: max message-thread gap " + juce::String(maxTimerGapMs,1) + " ms; max bridge tick " + juce::String(maxBridgeTickMs,1) + " ms; last blocking call: EditorBridge::tick");
     const auto now=juce::Time::getMillisecondCounter();
     // A heartbeat cannot be delivered while native dispatch is unavailable. Give
     // the page a complete response window after dispatch resumes or a room loads.
