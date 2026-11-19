@@ -34,12 +34,15 @@ struct TailHist {
 // (lower orders are covered by the deterministic image-source part).
 // finalize=false retains raw first/second moments so independent traces can be
 // pooled before estimating confidence and decay. Finalize a histogram only once.
-TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize = true, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {});
+// minDetectRadius > 0 raises the receiver detection sphere to at least that radius (P3 bake-only override;
+// 0 keeps the production radius, bit-identical).
+TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize = true, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, double minDetectRadius = 0.);
 // Integrated late energy for offline spatial analysis. No time histogram or
 // extrapolation is allocated; callbacks run only on the caller's worker thread.
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene&, const Transducer&,
     const std::vector<Transducer>&, int order, int rays, int seed,
-    const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {});
+    const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {},
+    double minDetectRadius = 0.);
 // Analysis coordinator only: bounded ray-segment batches, exact ordered per-cell replay.
 std::vector<std::array<double,NB>> traceTailEnergyAnalysis(const Scene&,const Transducer&,const std::vector<Transducer>&,int,int,int,const std::function<bool()>&,const std::function<void(double)>&,const TailExecution&);
 // E4a: the cheap late-energy estimate that lets the late field follow a moving listener/source. Same physics as traceTail
@@ -81,7 +84,7 @@ struct TailDiagnostics {
 // Is a significant part of the energy already relying on a sparse population?
 bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized);
 TailHist traceTailAdaptive(const Scene&, const Transducer&, const std::vector<Transducer>&,
-                           int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore = nullptr, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, TailHist* retainedRaw = nullptr);
+                           int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore = nullptr, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, TailHist* retainedRaw = nullptr, double minDetectRadius = 0.);
 // Pooled-band raw Schroeder EDC: max over receivers of -60 dB crossing + 0.8 s.
 double tailSecondsFromTrace(const TailHist&, double minimum);
 TailDiagnostics analyzeTail(const TailHist& finalized);

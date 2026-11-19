@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -158,9 +160,10 @@ struct Tap {
     uint32_t key = 0;
     double d0 = 0, d1 = 0;
     double ref = 0;  // slowly smoothed true delay: the Doppler-free reference
-    float g0[NB] = {}, g1[NB] = {};
+    float g0[8] = {}, g1[8] = {};
     float fadeStart[NB] = {}, fadeTarget[NB] = {};
     int fadeLeft = 0, fadeTotal = 0;
+    int glideIdx = 0, glideLen = 1;
     bool seen = false;
     bool jumpFadeIn = false;
     bool jumpFadeOut = false;
@@ -181,9 +184,13 @@ struct Slot {
     std::vector<float> re, im;  // [receiver][partition][bin]
     bool isJump = false;
     std::vector<double> bakeEnergy;
+    std::vector<double> bakeWinEnergy,bakeWinEss; // P6: [window][receiver][band]
     std::array<double,8> bakePose{};
-    mutable std::vector<std::array<float,NB>> bakeEqGain;
+    mutable std::vector<std::array<std::array<float,NB>,kBakeWinCount>> bakeEqGain;
+    mutable std::vector<std::array<std::array<float,NB-1>,kBakeWinCount>> bakeEqLp;   // P2/P6: per-receiver per-window one-pole memories
+    mutable std::vector<uint64_t> bakeEqSeen;
     mutable uint64_t bakeJumpSeen=0;
+    mutable uint64_t bakeInvalidSince=~0ull;  // P5: sample count when the baked projection was first lost (~0 = valid); bounds the gain hold
 };
 
 struct TailConv {
@@ -320,7 +327,7 @@ struct Engine::Impl {
     int S, R;
     double sr, c;
     // geometry: audio thread uses `wd`; setScene() publishes through `pendingWorld`; the worker frees old worlds
-    std::mutex worldMx;
+    mutable std::mutex worldMx; // P4: const content-signature helpers lock it too (control/worker only)
     std::vector<std::shared_ptr<World>> worlds;
     std::shared_ptr<World> latest;
     std::shared_ptr<const Scene> analysisScene;
@@ -356,6 +363,8 @@ struct Engine::Impl {
         uint64_t earlyEpoch=0;
         int quiet = 0;                           // periods since the source/listener last moved
         int fadeLeftPeriods = 0;                 // remaining periods of jump crossfade
+        int stillPeriods = 0;                    // P7: consecutive periods with unchanged resolved source position
+        bool pendingSolve = false;               // P7: source needs an early-path solve on its next round-robin turn
         Transducer t;
         DirectivityMailbox directivityState;
         std::atomic<uint64_t> directivitySerial{0};
@@ -366,6 +375,11 @@ struct Engine::Impl {
         double solvedAimAz = 0.0, solvedAimEl = 0.0, solvedAimRoll = 0.0;
     };
     std::vector<std::unique_ptr<Src>> srcs;
+    std::vector<uint8_t> spNeedSolve, spDoSolve;
+    std::vector<double> spPatCache, spAmtCache, spAimAzCache, spAimElCache, spAimRollCache;
+    std::vector<const DirectivityProfile*> spDirCache;
+    std::vector<Vec3> spPnowCache;
+    int rrCursor = 0, rrStrideLast = 1;
     size_t ringMask = 0;
     std::vector<std::vector<Tap>> links;  // [s*R + r]
     // E3b: the way round the wall ends is a function of (source position, pickup position, needClear, world, speed of sound)
@@ -411,6 +425,7 @@ struct Engine::Impl {
             const bool ok=softReflectionLeg(G(),a,b,surf,-1,c,v,side==0?1:2,far);
             const auto after=softProfile;
             softSpent+=softWork(after)-softWork(before);++softEvals;
+            if (p7Enabled && !warmingSoft) ++p7.validateSoftLegEvals;
             m.a=a;m.b=b;m.point=far;m.serial=wd->serial;m.speed=c;m.ok=ok;++m.generation;std::copy_n(v,NB,m.gain);
         } else {diffPendingNow=true;++softHits;if(slot>=softCursor&&!softDeferred){softDeferred=true;softNext=slot;}}
         if(m.serial!=wd->serial || m.speed!=c)return false;
@@ -434,6 +449,7 @@ struct Engine::Impl {
             bool ok=crossSurfaceSoft(G(),a,b,surf,P,c,v);
             profilingSoftLeg=previous;
             softSpent+=softWork(softProfile)-softWork(before)+1;++softEvals;
+            if (p7Enabled && !warmingSoft) ++p7.validateSupportEvals;
             m.a=a;m.b=b;m.point=P;m.serial=wd->serial;m.speed=c;m.ok=ok;++m.generation;std::copy_n(v,NB,m.gain);
         } else {diffPendingNow=true;++softHits;if(slot>=softCursor&&!softDeferred){softDeferred=true;softNext=slot;}}
         if(m.serial!=wd->serial||m.speed!=c||!m.ok)return false;
@@ -605,10 +621,37 @@ struct Engine::Impl {
     std::vector<float> tailRing;  // [receiver][ringSize]
     size_t tailMask = 0;
     std::vector<float> tmpOut, tailTmp, accRe, accIm, accRe2, accIm2;
+    // P2/P6: pending baked equalizer for the next inverse() (set by bakeEqualize inside accumulate), and the fresh bank kept apart
+    // while it is pending (the equalizer must only see the old bank).
+    mutable const Slot* eqSlot = nullptr;
+    mutable int eqR = 0;
+    mutable bool eqPending = false, eqFilter = false, eqHasFresh = false;
+    mutable std::array<std::array<float, NB>, kBakeWinCount> eqOldWin{}, eqNewWin{};
+    std::array<int, kBakeWinCount> eqWinEndK{};
+    float eqA[NB] = {};
+    mutable std::vector<float> eqWinRe, eqWinIm;
+    std::vector<float> eqWinTmp, eqFreshOut;
     std::vector<cf> fftBuf;
     FFTf fft;
     int tapsActive = 0;
     std::atomic<int> refreshCount{0};
+
+    bool p7Enabled = false;
+    struct P7Prof {
+        uint64_t processCalls = 0, processTotalNs = 0;
+        uint64_t startPeriodCalls = 0, startPeriodTotalNs = 0;
+        uint64_t spSetupNs = 0, spPoseNs = 0, spBuildImagesNs = 0;
+        uint64_t spSolveDirectNs = 0, spSolveValidateNs = 0, spSolveTapsNs = 0, spDiffJobsNs = 0;
+        uint64_t spSourceSkips = 0, spSourceSolves = 0;
+        uint64_t validateCalls = 0, validateSupportEvals = 0, validateSoftLegEvals = 0;
+        uint64_t validateAmpMemoHit = 0, validateAmpMemoEval = 0, validateAmpMemoDeferred = 0;
+        uint64_t bandSplitNs = 0, lateFeedNs = 0, renderTapsNs = 0, diffuseNs = 0;
+        uint64_t creativeWetNs = 0, endPeriodNs = 0, tailBlockNs = 0;
+        uint64_t tapsSkipped = 0, tapsStat = 0, tapsMoving = 0;
+        std::atomic<uint64_t> workerStepCalls{0}, workerRebuilds{0}, workerRebuildsCancelled{0};
+        std::atomic<uint64_t> workerMotionEsts{0}, workerRebuildNs{0}, workerMotionEstNs{0}, workerBakeStepNs{0};
+        std::atomic<uint64_t> workerSettleTriggers{0}, workerLegacyTriggers{0}, workerJumpTriggers{0};
+    } p7;
 
     std::atomic<bool> running{true};
     std::thread worker;
@@ -617,6 +660,7 @@ struct Engine::Impl {
         : sc(scene), cfg(c_), S((int)scene.sources.size()), R((int)scene.receivers.size()), sr(scene.sr),
           c(speedOfSound(scene.tempC)), fft(c_.tailBlock * 2),
           bakeObjectRevision((size_t)scene.sources.size() + 1) {
+        if (const char* pe = std::getenv("VERB_P7_PROFILE")) p7Enabled = (std::atoi(pe) != 0);
         if (cfg.erOrder < 1 || cfg.erOrder > 4) throw std::runtime_error("erOrder must be 1..4");
         currentAbsorption=cfg.absorptionScale;
         requestedRays = cfg.tailRays; requestedAdaptive = cfg.adaptiveTail;
@@ -797,8 +841,12 @@ struct Engine::Impl {
         bakeObjectTouched.assign((size_t)S + 1, 0);
         bakeAudioSourceValid.assign((size_t)S, 0);
         bakeLookupScratch.assign((size_t)S * R * NB, 0.);
+        bakeLookupWinEnergyScratch.assign((size_t)S * kBakeWinCount * R * NB, 0.);
+        bakeLookupWinEssScratch.assign((size_t)S * kBakeWinCount * R * NB, 0.);
         bakeProjectHints.assign((size_t)S + 2, 0);
-        bakeAudioEnergy.assign((size_t)S*R*NB,0.);bakeAudioNorm.assign((size_t)R*NB,0.);bakeAudioRefPose.assign((size_t)(S+1)*4,0.);if(shared)bakeReferenceGain.assign((size_t)R*S*8,0.f);
+        bakeAudioEnergy.assign((size_t)S*R*NB,0.);bakeAudioNorm.assign((size_t)R*NB,0.);
+        bakeAudioWinEnergy.assign((size_t)S*kBakeWinCount*R*NB,0.);bakeAudioWinEss.assign((size_t)S*kBakeWinCount*R*NB,0.);
+        bakeAudioRefPose.assign((size_t)(S+1)*4,0.);if(shared)bakeReferenceGain.assign((size_t)R*S*8,0.f);
         srcHist.resize((size_t)S); shapedHist.resize((size_t)S); sourceSeconds.assign((size_t)S,0.);
         sourcePhysicalSeconds.assign(S,sc.length);
         histRays.assign((size_t)S, 0);
@@ -809,6 +857,14 @@ struct Engine::Impl {
         tmpOut.assign((size_t)R * cfg.ctrlInterval, 0.f);
         tailTmp.assign((size_t)R * B, 0.f);
         accRe.assign(B + 1, 0.f); accIm.assign(B + 1, 0.f); accRe2.assign(B + 1, 0.f); accIm2.assign(B + 1, 0.f);
+        eqWinRe.assign((size_t)kBakeWinCount * (size_t)(B + 1), 0.f);
+        eqWinIm.assign((size_t)kBakeWinCount * (size_t)(B + 1), 0.f);
+        eqWinTmp.assign(B, 0.f);
+        for (int w = 0; w + 1 < kBakeWinCount; ++w)
+            eqWinEndK[(size_t)w] = std::max(0, (int)std::llround(kBakeWinEndSec[w] * sr / (double)B) - 1);
+        eqWinEndK[(size_t)(kBakeWinCount - 1)] = std::numeric_limits<int>::max();
+        eqFreshOut.assign(B, 0.f); eqPending = eqHasFresh = eqFilter = false;
+        for (int band = 0; band < NB - 1; ++band) eqA[band] = (float)(1 - std::exp(-2 * kPi * kBandHz[band] * std::sqrt(2.) / sr));
         fftBuf.assign(2 * B, {0, 0});
         blkA.assign(B, 0.f); blkB.assign(B, 0.f);
 
@@ -818,6 +874,15 @@ struct Engine::Impl {
         nodes.reserve(cnt + 8);
         found.reserve(2048);
         links.resize((size_t)S * RM);
+        spNeedSolve.assign((size_t)S, 0);
+        spDoSolve.assign((size_t)S, 0);
+        spPatCache.assign((size_t)S, 0.0);
+        spAmtCache.assign((size_t)S, 0.0);
+        spAimAzCache.assign((size_t)S, 0.0);
+        spAimElCache.assign((size_t)S, 0.0);
+        spAimRollCache.assign((size_t)S, 0.0);
+        spDirCache.assign((size_t)S, nullptr);
+        spPnowCache.assign((size_t)S, Vec3{});
         diffMemo.assign((size_t)S * (size_t)RM * 2, DiffMemo{});
         softStride=maxWalls+2+kMaxPlates;
         softMemo.resize((size_t)S*RM*softStride*4);
@@ -834,6 +899,7 @@ struct Engine::Impl {
             for (int k = 0; k < 4; ++k) srcs[s]->lastLst[k] = effL0[k];
             srcs[s]->lastGeom = geomSerial.load();
             srcs[s]->hist.assign(kHist, srcs[s]->t.pos);
+            srcs[s]->stillPeriods = (int)kHist;
             if (!shared) {
                 Transducer st = currentSource(s);
                 buildTail(s, latest->sc, st, initRc, 0, latest->serial);
@@ -858,12 +924,12 @@ struct Engine::Impl {
             }
         }
         warmingSoft=true;
-        for(int source=0;source<S;++source){buildImages(srcs[source]->t.pos);for(int receiver=0;receiver<RM;++receiver)for(size_t idx=1;idx<nodes.size();++idx)if(nodes[idx].order==1){Found f;validate((int)idx,*srcs[source],rcvAbs[receiver],srcs[source]->t,f,source,receiver);}}
+        for(int source=0;source<S;++source){buildImages(srcs[source]->t.pos);for(int receiver=0;receiver<RM;++receiver){if(G().separatedShell(srcs[source]->t.pos,rcvAbs[receiver].pos,false))continue;for(size_t idx=1;idx<nodes.size();++idx)if(nodes[idx].order==1){Found f;validate((int)idx,*srcs[source],rcvAbs[receiver],srcs[source]->t,f,source,receiver);}}}
         warmingSoft=false;
         softSpent=0;softEvals=softHits=0;softProfile={};softCursor=0;softDeferred=false;
         cfg.cancelled = {};
         lastLegacy = std::chrono::steady_clock::now();
-        if (cfg.tailThread && !cfg.manualWorker) worker = std::thread([this] { if (shared) workerLoopShared(); else workerLoop(); });
+        if (cfg.tailThread && !cfg.manualWorker) worker = std::thread([this] { BakePool::lowerCurrentThread(false); if (shared) workerLoopShared(); else workerLoop(); });
     }
 
     ~Impl() {
@@ -941,16 +1007,14 @@ struct Engine::Impl {
     }
 
     static unsigned defaultPoolWorkers(unsigned hw) noexcept {
-        if (hw <= 1) return 1;
-        if (hw <= 4) return hw - 1;
-        return std::max(1u, hw - std::max(2u, hw / 4));
+        return std::max(1u, hw / 2u);
     }
     unsigned rebuildWidth() const {
-        const auto hw=std::thread::hardware_concurrency();const unsigned available=hw>1?hw-1:1;
+        const auto hw=BakePool::effectiveCpuCount();const unsigned available=hw>1?hw-1:1;
         return cfg.rebuildWorkers?std::clamp(cfg.rebuildWorkers,1u,available):defaultPoolWorkers(hw);
     }
     void ensureRebuildPool(unsigned needed=0){
-        const auto hw=std::thread::hardware_concurrency();const unsigned available=hw>1?hw-1:1;
+        const auto hw=BakePool::effectiveCpuCount();const unsigned available=hw>1?hw-1:1;
         const unsigned target=std::clamp(std::max(defaultPoolWorkers(hw),needed),1u,available);
         if(!bakePool||(target>bakePoolCount&&bakeActiveEmpty()&&bakePool.use_count()==1)){bakePoolCount=target;std::atomic_store(&bakePool,std::make_shared<BakePool>(bakePoolCount));}
     }
@@ -964,16 +1028,42 @@ struct Engine::Impl {
         return {width>1?bakePool.get():nullptr,width,cancel};
     }
 
-    void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx, uint64_t sceneRevision, const std::function<bool()>& extraCancel = {}) {
+    void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx, uint64_t sceneRevision, const std::function<bool()>& extraCancel = {}, bool cancelOnPose = true) {
         bakePreempt.fetch_add(1);if(bakeRequested.load())bakeWaitReason=7;
         TailConv& t = srcs[s]->tail;
         bool sparse = false;
         const auto rebuildPose=livePose();
-        const auto cancelled = [&]{return !running || geomSerial.load()!=sceneRevision || qualitySerial.load()!=workerQuality || (cfg.cancelled && cfg.cancelled()) || (extraCancel && extraCancel()) || livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg);};
+        const auto cancelled = [&]{return !running || geomSerial.load()!=sceneRevision || qualitySerial.load()!=workerQuality || (cfg.cancelled && cfg.cancelled()) || (extraCancel && extraCancel()) || (cancelOnPose && livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
         const auto execution=tailExecution(cancelled);
-        TailHist h = traceTailAdaptive(scn, st, rc, cfg.erOrder, cfg.tailRays, rayLimit(cfg.tailRays), scn.seed+131*s, histRays[s], &sparse, cancelled, execution);
-        auto& bakeSlot=t.slot[slotIdx];bakeSlot.bakeEnergy.assign((size_t)R*NB,0.);bakeSlot.bakeEqGain.assign((size_t)R,std::array<float,NB>{{1,1,1,1,1,1,1}});bakeSlot.bakeJumpSeen=0;
-        for(int r=0;r<R;++r)for(int b=0;b<NB;++b)for(double e:h.h[r][b])bakeSlot.bakeEnergy[(size_t)r*NB+b]+=e;
+        TailHist rawH;
+        TailHist h = traceTailAdaptive(scn, st, rc, cfg.erOrder, cfg.tailRays, rayLimit(cfg.tailRays), scn.seed+131*s, histRays[s], &sparse, cancelled, execution, &rawH);
+        auto& bakeSlot=t.slot[slotIdx];
+        bakeSlot.bakeEnergy.assign((size_t)R*NB,0.);
+        bakeSlot.bakeWinEnergy.assign((size_t)kBakeWinCount*R*NB,0.);
+        bakeSlot.bakeWinEss.assign((size_t)kBakeWinCount*R*NB,0.);
+        bakeSlot.bakeEqGain.assign((size_t)R,{});
+        for(auto& g:bakeSlot.bakeEqGain)for(auto& wg:g)wg={{1,1,1,1,1,1,1}};
+        bakeSlot.bakeEqLp.assign((size_t)R,{});
+        bakeSlot.bakeEqSeen.assign((size_t)R,~0ull);bakeSlot.bakeJumpSeen=0;bakeSlot.bakeInvalidSince=~0ull;
+        for(int r=0;r<R;++r)for(int b=0;b<NB;++b){
+            double totE=0.,sum1[kBakeWinCount]={},sum2[kBakeWinCount]={};
+            const size_t nK=h.h[r][b].size();
+            const bool has2=!rawH.h2.empty()&&rawH.h2[r][b].size()>=nK;
+            for(size_t k=0;k<nK;++k){
+                const double e=h.h[r][b][k];
+                totE+=e;
+                const double tSec=((double)k+0.5)*h.binDur;
+                int w=0;while(w+1<kBakeWinCount&&tSec>=kBakeWinEndSec[w])++w;
+                sum1[w]+=e;
+                if(has2)sum2[w]+=rawH.h2[r][b][k];
+            }
+            bakeSlot.bakeEnergy[(size_t)r*NB+b]=totE;
+            for(int w=0;w<kBakeWinCount;++w){
+                const size_t wk=((size_t)w*R+r)*NB+b;
+                bakeSlot.bakeWinEnergy[wk]=sum1[w];
+                bakeSlot.bakeWinEss[wk]=(sum2[w]>0.&&sum1[w]>0.)?(sum1[w]*sum1[w]/sum2[w]):0.;
+            }
+        }
         double bl[4];for(int k=0;k<4;++k)bl[k]=params[S*4+k].load();bakeSlot.bakePose={st.pos.x,st.pos.y,st.pos.z,st.azimuthDeg,bl[0],bl[1],bl[2],bl[3]};
         histSparse[s] = sparse;
         srcHist[s] = h;
@@ -1165,7 +1255,8 @@ struct Engine::Impl {
                                 : (jumpRebuild ? (initial || tsStart != 0 || !pubIsRef || wsnap->serial != sLastGeom || workerQuality != sLastQuality || dl > 0.001 || dYawL > 0.1)
                                                : (initial || wsnap->serial != sLastGeom || workerQuality != sLastQuality || dl > 0.05 || std::fabs(lst[3] - sLastLst[3]) > 2));
         const auto rebuildPose=livePose();
-        const auto cancelled=[&]{return !running||geomSerial.load()!=wsnap->serial||qualitySerial.load()!=workerQuality||(cfg.cancelled&&cfg.cancelled())||(settleCancel&&settleCancel())||livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg);};
+        const bool cancelOnPose = (settle != nullptr) || (!jumpRebuild && cfg.motionMode <= 0);
+        const auto cancelled=[&]{return !running||geomSerial.load()!=wsnap->serial||qualitySerial.load()!=workerQuality||(cfg.cancelled&&cfg.cancelled())||(settleCancel&&settleCancel())||(cancelOnPose&&livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
         const auto execution=tailExecution(cancelled);
         const int rays = std::max(1500, cfg.tailRays / std::max(1, S));
         std::vector<int> dirty;
@@ -1597,6 +1688,7 @@ struct Engine::Impl {
 
     // One pass of the shared-tail worker (every 10 ms on the worker thread, or Engine::runWorkerStep()).
     void sharedWorkerStep() {
+        if (p7Enabled) p7.workerStepCalls.fetch_add(1, std::memory_order_relaxed);
         syncQuality();
         {
             std::lock_guard<std::mutex> lk(worldMx);
@@ -1630,6 +1722,7 @@ struct Engine::Impl {
         {std::lock_guard<std::mutex> lk(worldMx);wsnap=latest;}
         if (poseScaleReady.load(std::memory_order_acquire) != wsnap->constructionPoseScale) return;
         if (jumpPending) {
+            if (p7Enabled) p7.workerJumpTriggers.fetch_add(1, std::memory_order_relaxed);
             anchorValid = false; lastEstEpoch = ~0ull; mref.recValid = false;
             if (jser != workerHistJumpSeen) {
                 workerLstHist.reset(wsnap->serial);
@@ -1640,17 +1733,25 @@ struct Engine::Impl {
             transState.compare_exchange_strong(exp, 0, std::memory_order_acq_rel);
             const auto t0 = std::chrono::steady_clock::now();
             try {
+                if (p7Enabled) p7.workerRebuilds.fetch_add(1, std::memory_order_relaxed);
                 if (sharedRebuild(false, nullptr, [this, jser] { return jumpSerial.load(std::memory_order_acquire) != jser; }, true, jser)) {
                     const double ms = 1000 * std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                     stLastRetraceMs.store(ms); if (ms > stMaxRetraceMs.load()) stMaxRetraceMs.store(ms);
                 }
+                if (p7Enabled) p7.workerRebuildNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
                 if (jumpSerial.load(std::memory_order_acquire) == jser) {
                     workerJumpSeen = jser;
                     anchor = workerResolvedPose(*wsnap); rawAnchor = livePose(); anchorStream = streamPos.load(std::memory_order_acquire);
                     anchorWall = std::chrono::steady_clock::now(); anchorValid = true;
                     lastLegacy = anchorWall;
                 }
-            } catch (const std::runtime_error&) { sharedBusy = false; ++stCancelled; }
+            } catch (const std::runtime_error&) {
+                sharedBusy = false; ++stCancelled;
+                if (p7Enabled) {
+                    p7.workerRebuildsCancelled.fetch_add(1, std::memory_order_relaxed);
+                    p7.workerRebuildNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+                }
+            }
             return;
         }
         // geometry, materials, quality, decay, directivity: the immediate re-trace and short swap, as before
@@ -1659,8 +1760,20 @@ struct Engine::Impl {
         if (legacy) {
             if (ts == 1 || ts == 2) return;  // the long crossfade finishes first (motionFadeSec at most)
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLegacy).count() < cfg.tailRefreshMs) return;
-            try {if (sharedRebuild(false, nullptr, [this, jser]{ return jumpSerial.load(std::memory_order_acquire) != jser; })) lastLegacy = std::chrono::steady_clock::now();}
-            catch(const std::runtime_error&) {sharedBusy=false;sLastGeom=0;for(auto& sp:srcs)sp->lastGeom=0;}
+            if (p7Enabled) p7.workerLegacyTriggers.fetch_add(1, std::memory_order_relaxed);
+            const auto t0 = std::chrono::steady_clock::now();
+            try {
+                if (p7Enabled) p7.workerRebuilds.fetch_add(1, std::memory_order_relaxed);
+                if (sharedRebuild(false, nullptr, [this, jser]{ return jumpSerial.load(std::memory_order_acquire) != jser; })) lastLegacy = std::chrono::steady_clock::now();
+                if (p7Enabled) p7.workerRebuildNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+            }
+            catch(const std::runtime_error&) {
+                sharedBusy=false;sLastGeom=0;for(auto& sp:srcs)sp->lastGeom=0;
+                if (p7Enabled) {
+                    p7.workerRebuildsCancelled.fetch_add(1, std::memory_order_relaxed);
+                    p7.workerRebuildNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+                }
+            }
             return;
         }
         const double dm = cfg.motionDeadbandM, dd = cfg.motionDeadbandDeg;
@@ -1677,14 +1790,23 @@ struct Engine::Impl {
             || (!cfg.manualWorker && std::chrono::duration<double>(now - anchorWall).count() >= cfg.motionSettleSec);
         if (settled) {
             if (ts != 0) return;  // the previous transition is still running
+            if (p7Enabled) p7.workerSettleTriggers.fetch_add(1, std::memory_order_relaxed);
             const auto t0 = std::chrono::steady_clock::now();
             const std::vector<double> ra = rawAnchor.empty() ? rawP : rawAnchor;
             try {
+                if (p7Enabled) p7.workerRebuilds.fetch_add(1, std::memory_order_relaxed);
                 if (sharedRebuild(false, &ra, [this, ra, dm, dd, jser] { return livePoseFar(ra,dm,dd) || jumpSerial.load(std::memory_order_acquire) != jser; })) {
                     const double ms = 1000 * std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                     stLastRetraceMs.store(ms); if (ms > stMaxRetraceMs.load()) stMaxRetraceMs.store(ms);
                 }
-            } catch (const std::runtime_error&) { sharedBusy = false; ++stCancelled; }
+                if (p7Enabled) p7.workerRebuildNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+            } catch (const std::runtime_error&) {
+                sharedBusy = false; ++stCancelled;
+                if (p7Enabled) {
+                    p7.workerRebuildsCancelled.fetch_add(1, std::memory_order_relaxed);
+                    p7.workerRebuildNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+                }
+            }
             return;
         }
         if (cfg.motionMode < 2) return;
@@ -1692,10 +1814,15 @@ struct Engine::Impl {
         const bool due = cfg.manualWorker ? (double)(pos - lastEstStream) >= cfg.motionIntervalMs * 1e-3 * sr
                                           : std::chrono::duration<double>(now - lastEstWall).count() >= cfg.motionIntervalMs * 1e-3;
         if (!due && lastEstEpoch == mref.epoch) return;
+        const auto est0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         try {
             motionEstimate(P, *wsnap);
             // the interval counts from the end of an estimate: the worker rests at least motionIntervalMs between two
             lastEstPose = P; lastEstEpoch = mref.epoch; lastEstStream = pos; lastEstWall = std::chrono::steady_clock::now();
+            if (p7Enabled) {
+                p7.workerMotionEsts.fetch_add(1, std::memory_order_relaxed);
+                p7.workerMotionEstNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - est0).count(), std::memory_order_relaxed);
+            }
         } catch (const std::runtime_error&) {}
     }
 
@@ -1703,7 +1830,14 @@ struct Engine::Impl {
         while (running) {
             if (jumpSerial.load(std::memory_order_acquire) == workerJumpSeen)
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            sharedWorkerStep(); bakeWorkerStep();
+            sharedWorkerStep();
+            if (p7Enabled) {
+                const auto t0 = std::chrono::steady_clock::now();
+                bakeWorkerStep();
+                p7.workerBakeStepNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+            } else {
+                bakeWorkerStep();
+            }
         }
     }
 
@@ -1840,13 +1974,13 @@ struct Engine::Impl {
                         psRR = (s + 1) % S;
                         break;
                     }
-                    buildTail(s, settledScene, st, rc, w, wsnap->serial, [this, rawAnchorNow, dm, dd, jser] { return livePoseFar(rawAnchorNow,dm,dd) || jumpSerial.load(std::memory_order_acquire) != jser; });
+                    buildTail(s, settledScene, st, rc, w, wsnap->serial, [this, rawAnchorNow, dm, dd, jser] { return livePoseFar(rawAnchorNow,dm,dd) || jumpSerial.load(std::memory_order_acquire) != jser; }, true);
                     psLengthCheck[(size_t)s] = false;
                 } else if (jumpPending) {
                     settledScene.length = jumpTailLength(*wsnap, lst, rc, cacheHit, &effSrcs);
-                    buildTail(s, settledScene, st, rc, w, wsnap->serial, [this, jser] { return jumpSerial.load(std::memory_order_acquire) != jser; });
+                    buildTail(s, settledScene, st, rc, w, wsnap->serial, [this, jser] { return jumpSerial.load(std::memory_order_acquire) != jser; }, false);
                     psLengthCheck[(size_t)s] = !cacheHit;
-                } else buildTail(s, wsnap->sc, st, rc, w, wsnap->serial);
+                } else buildTail(s, wsnap->sc, st, rc, w, wsnap->serial, {}, cfg.motionMode <= 0);
             }
             catch(const std::runtime_error&) {
                 sp.tail.workerBusy=false;if(longFade||jumpPending)++stCancelled;else sp.lastGeom=0;if(jumpPending){jumpDeferred=true;break;}continue;
@@ -1984,6 +2118,7 @@ struct Engine::Impl {
     // Vector from the image source to the receiver, with the image taken where the source *was* when the
     // sound that arrives now was emitted (retarded time, solved from the position history; no velocity needed).
     Vec3 retardedD(const Src& sp, int idx, Vec3 R) const {
+        if (sp.stillPeriods >= (int)kHist - 2) return R - nodes[idx].pos;
         Vec3 D = R - nodes[idx].pos;
         for (int it = 0; it < 3; ++it) {
             double u = norm(D) / c * sr / cfg.ctrlInterval;
@@ -2013,7 +2148,7 @@ struct Engine::Impl {
 
     template<bool Profile>
     bool validateProfile(int idx, const Src& sp, const Transducer& rc, const Transducer& src, Found& f,int source,int receiver) {
-        if(G().separatedShell(src.pos,rc.pos,false))return false;
+        if (p7Enabled && !warmingSoft) ++p7.validateCalls;
         Vec3 cur = rc.pos, first{}, last{};
         int prevSurf = -1, n = idx;
         float amp[NB];
@@ -2047,8 +2182,9 @@ struct Engine::Impl {
             const size_t base=mi*4;
             const uint64_t revision=softMemo[base].generation+softMemo[base+1].generation+softMemo[base+2].generation;
             const bool same=memo->serial==wd->serial&&memo->speed==c&&memo->epoch==sp.earlyEpoch&&memo->revision==revision&&memo->len==length&&memo->early==earlyG;
-            if(same){f=memo->value;++softHits;return true;}
+            if(same){if(p7Enabled&&!warmingSoft)++p7.validateAmpMemoHit;f=memo->value;++softHits;return true;}
             if(!warmingSoft && (slot<softCursor || softSpent>=diffBudget/8)){
+                if(p7Enabled)++p7.validateAmpMemoDeferred;
                 diffPendingNow=true;if(slot>=softCursor&&!softDeferred){softDeferred=true;softNext=slot;}++softHits;
                 if(memo->serial!=wd->serial||memo->speed!=c)return false;
                 f=memo->value;f.delay=std::max(2.,length/c*sr);
@@ -2056,6 +2192,7 @@ struct Engine::Impl {
                 for(int band=0;band<NB;++band)f.amp[band]=std::clamp(f.amp[band],-cap,cap);
                 return true;
             }
+            if(p7Enabled&&!warmingSoft)++p7.validateAmpMemoEval;
             softSpent+=NB*8+16;++softEvals;
             memo->serial=wd->serial;memo->speed=c;memo->epoch=sp.earlyEpoch;memo->revision=revision;memo->len=length;memo->early=earlyG;
         }
@@ -2089,7 +2226,8 @@ struct Engine::Impl {
     }
 
     template<bool Profile>
-    void solveLink(int s, int r, const Transducer& src, bool jumpNow, int fadePeriods) {
+    void solveLink(int s, int r, const Transducer& src, bool jumpNow, int fadePeriods, int nextGlideLen = 1) {
+        const auto td0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         found.clear();
         const Src& sp = *srcs[s];
         const Transducer& rc = rcvAbs[r];
@@ -2147,23 +2285,44 @@ struct Engine::Impl {
         } else if (diffr) {  // blocked: the sound bends round the nearest wall end
             addDiffracted(false);
         }
-        for (size_t i = 1; i < nodes.size(); ++i) {
-            Found f;
-            if (found.size() < found.capacity() && validateProfile<Profile>((int)i, sp, rc, src, f,s,r)) found.push_back(f);
+        const auto tv0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (p7Enabled) p7.spSolveDirectNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(tv0 - td0).count();
+        if (!G().separatedShell(src.pos, rc.pos, false)) {
+            for (size_t i = 1; i < nodes.size(); ++i) {
+                Found f;
+                if (found.size() < found.capacity() && validateProfile<Profile>((int)i, sp, rc, src, f,s,r)) found.push_back(f);
+            }
         }
+        const auto tt0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (p7Enabled) p7.spSolveValidateNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(tt0 - tv0).count();
         const double maxDelay = (double)ringMask - 16;
         auto& taps = links[(size_t)s * RM + r];
         const int fadeN = std::max(1, fadePeriods);
+        const int glideN = std::max(1, nextGlideLen);
+        auto snapTapToStart = [](Tap& t) {
+            if (t.glideIdx + 1 >= t.glideLen) {
+                t.d0 = t.d1;
+                std::memcpy(t.g0, t.g1, sizeof(float) * NB);
+            } else {
+                const double frac = (double)(t.glideIdx + 1) / (double)std::max(1, t.glideLen);
+                t.d0 = t.d0 + (t.d1 - t.d0) * frac;
+                const float ff = (float)frac;
+                for (int b = 0; b < NB; ++b) t.g0[b] = t.g0[b] + (t.g1[b] - t.g0[b]) * ff;
+            }
+            t.g0[7] = 0.f;
+        };
         if (jumpNow) {
             for (auto& t : taps) {
-                t.d0 = t.d1;
-                std::memcpy(t.g0, t.g1, sizeof t.g0);
+                snapTapToStart(t);
+                t.d1 = t.d0;
+                t.glideIdx = 0;
+                t.glideLen = 1;
                 t.jumpFadeIn = false;
                 if (!t.jumpFadeOut && t.key != 0xFFFFFFFFu) {
                     t.jumpFadeOut = true;
                     t.fadeTotal = fadeN;
                     t.fadeLeft = fadeN - 1;
-                    std::memcpy(t.fadeStart, t.g0, sizeof t.fadeStart);
+                    std::memcpy(t.fadeStart, t.g0, sizeof(float) * NB);
                 } else if (t.fadeTotal > 0 && t.fadeLeft > 0) {
                     --t.fadeLeft;
                 }
@@ -2191,6 +2350,7 @@ struct Engine::Impl {
                 if (fc.delay >= maxDelay) continue;
                 Tap t;
                 t.key = fc.key; t.seen = true; t.d0 = t.d1 = fc.delay; t.ref = fc.delay;
+                t.glideIdx = 0; t.glideLen = 1;
                 t.jumpFadeIn = true;
                 t.fadeTotal = fadeN;
                 t.fadeLeft = fadeN - 1;
@@ -2199,11 +2359,13 @@ struct Engine::Impl {
                 for (int b = 0; b < NB; ++b) { t.g0[b] = 0.f; t.g1[b] = fc.amp[b] * frac; }
                 appendTap(t);
             }
+            if (p7Enabled) p7.spSolveTapsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tt0).count();
             return;
         }
         for (auto& t : taps) {
-            t.d0 = t.d1;
-            std::memcpy(t.g0, t.g1, sizeof t.g0);
+            snapTapToStart(t);
+            t.glideIdx = 0;
+            t.glideLen = glideN;
             if ((t.jumpFadeOut || t.key == 0xFFFFFFFFu) && t.fadeTotal > 0) {
                 if (t.fadeLeft > 0) --t.fadeLeft;
                 const float frac = (float)t.fadeLeft / (float)t.fadeTotal;
@@ -2213,6 +2375,7 @@ struct Engine::Impl {
                 t.seen = false;
             }
         }
+        const double effDopA = (glideN <= 1) ? dopA : (1.0 - std::pow(1.0 - dopA, glideN));
         for (const Found& fc : found) {
             Found f = fc;
             if (f.delay >= maxDelay) continue;
@@ -2223,12 +2386,13 @@ struct Engine::Impl {
             if (tp) {
                 // Doppler strength: blend the true delay with its slow average (k=1: physical, 0: pitch-free)
                 if (firstSolve) tp->ref = tru;
-                else tp->ref += dopA * (tru - tp->ref);
+                else tp->ref += effDopA * (tru - tp->ref);
                 if (dopK != 1.0) f.delay = std::max(2.0, tp->ref + dopK * (tru - tp->ref));
-                if (!firstSolve && std::fabs(f.delay - tp->d0) > 0.5 * cfg.ctrlInterval && taps.size() < taps.capacity()) {
+                if (!firstSolve && std::fabs(f.delay - tp->d0) > 0.5 * cfg.ctrlInterval * glideN && taps.size() < taps.capacity()) {
                     Tap dying = *tp;  // teleport: let the old one fade out in place, start a new one
                     dying.jumpFadeOut = true; dying.seen = true; dying.d1 = dying.d0;
                     dying.jumpFadeIn = false; dying.fadeTotal = 0; dying.fadeLeft = 0;
+                    dying.glideIdx = 0; dying.glideLen = glideN;
                     for (int b = 0; b < NB; ++b) dying.g1[b] = 0.f;
                     for (int b = 0; b < NB; ++b) { tp->g0[b] = 0.f; }
                     tp->d0 = f.delay;
@@ -2240,6 +2404,8 @@ struct Engine::Impl {
                 }
                 tp->seen = true;
                 tp->d1 = f.delay;
+                tp->glideIdx = 0;
+                tp->glideLen = glideN;
                 if (tp->jumpFadeIn && tp->fadeTotal > 0) {
                     if (tp->fadeLeft > 0) --tp->fadeLeft;
                     const float frac = 1.f - (float)tp->fadeLeft / (float)tp->fadeTotal;
@@ -2247,19 +2413,21 @@ struct Engine::Impl {
                     for (int b = 0; b < NB; ++b) tp->g1[b] = f.amp[b] * frac;
                     if (tp->fadeLeft == 0) { tp->jumpFadeIn = false; tp->fadeTotal = 0; }
                 } else {
-                    std::memcpy(tp->g1, f.amp, sizeof tp->g1);
+                    std::memcpy(tp->g1, f.amp, sizeof(float) * NB);
                 }
-                if (firstSolve) { tp->d0 = tp->d1; std::memcpy(tp->g0, tp->g1, sizeof tp->g0); }
+                if (firstSolve) { tp->d0 = tp->d1; std::memcpy(tp->g0, tp->g1, sizeof tp->g0); tp->glideIdx = 0; tp->glideLen = 1; }
             } else if (taps.size() < taps.capacity()) {
                 Tap t;
                 t.key = f.key; t.seen = true; t.d0 = t.d1 = f.delay; t.ref = tru;
-                std::memcpy(t.g1, f.amp, sizeof t.g1);
+                t.glideIdx = 0; t.glideLen = firstSolve ? 1 : glideN;
+                std::memcpy(t.g1, f.amp, sizeof(float) * NB);
                 if (firstSolve) std::memcpy(t.g0, t.g1, sizeof t.g0);
                 taps.push_back(t);
             }
         }
         for (auto& t : taps)
-            if (!t.seen) { t.jumpFadeIn = false; t.fadeTotal = 0; t.fadeLeft = 0; for (int b = 0; b < NB; ++b) t.g1[b] = 0.f; }
+            if (!t.seen) { t.d1 = t.d0; t.jumpFadeIn = false; t.fadeTotal = 0; t.fadeLeft = 0; for (int b = 0; b < NB; ++b) t.g1[b] = 0.f; }
+        if (p7Enabled) p7.spSolveTapsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tt0).count();
     }
 
     void placeReceivers(const double* lst, double spread) {
@@ -2346,7 +2514,7 @@ struct Engine::Impl {
                 int best = -1;
                 for (size_t q = 0; q < diffMemo.size(); ++q) {
                     const DiffMemo& m = diffMemo[q];
-                    if (!m.want || m.wantPeriod != diffPeriod || m.epoch != diffJumpEpoch) continue;
+                    if (!m.want || m.wantPeriod + (uint64_t)std::max(1, rrStrideLast) <= diffPeriod || m.epoch != diffJumpEpoch) continue;
                     if (best < 0) { best = (int)q; continue; }
                     const DiffMemo& b = diffMemo[(size_t)best];
                     if ((m.urgent && !b.urgent) || (m.urgent == b.urgent && m.wantSince < b.wantSince)) best = (int)q;
@@ -2402,6 +2570,8 @@ struct Engine::Impl {
     }
 
     void startPeriod() {
+        const auto sp0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (p7Enabled) ++p7.startPeriodCalls;
         const auto freezeRevision=freezeRtRevision.load(std::memory_order_acquire);
         if(freezeRtSeen!=freezeRevision){std::array<double,7> rt;for(int b=0;b<7;++b)rt[b]=freezeRt60[b].load(std::memory_order_relaxed);tailFreeze.setRoomDecay(rt);freezeRtSeen=freezeRevision;}
         const int mask = soloMask.load(std::memory_order_relaxed);
@@ -2457,6 +2627,7 @@ struct Engine::Impl {
                 srcs[s]->histMinPeriod = srcs[s]->period + 1;
                 srcs[s]->fadeLeftPeriods = fadePeriods;
                 srcs[s]->quiet = 0;
+                srcs[s]->stillPeriods = 0;
             }
             lateGjumpLeft = 0;
             if (shared) {
@@ -2474,7 +2645,12 @@ struct Engine::Impl {
             }
         }
         double lst[4];
-        resolvePose4(G(), wd->serial, audioLstHist, rawLst, lst);
+        if (!firstSolve && !worldChanged && !audioJumped && audioLstHist.worldSerial == wd->serial
+            && rawLst[0] == lastRawListener[0] && rawLst[1] == lastRawListener[1] && rawLst[2] == lastRawListener[2]) {
+            lst[0] = lastListener[0]; lst[1] = lastListener[1]; lst[2] = lastListener[2]; lst[3] = rawLst[3];
+        } else {
+            resolvePose4(G(), wd->serial, audioLstHist, rawLst, lst);
+        }
         bool lmoved = firstSolve || worldChanged || audioJumped || spread != lastSpread || earlyDb != lastEarlyDb;
         // Settings that ease towards their targets do so once per control period (fixed in stream time), so the output
         // does not depend on how the host chops the audio into blocks.
@@ -2614,12 +2790,25 @@ struct Engine::Impl {
             for (int i = 0; i < 4; ++i) lastListener[i] = lst[i];
             lastSpread = spread;
         }
+        const auto sp1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (p7Enabled) p7.spSetupNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(sp1 - sp0).count();
+        const int settle = (int)(ringMask / cfg.ctrlInterval) + 2 + (dopK != 1.0 ? (int)(50.0 * sr / cfg.ctrlInterval) : 0);
+        int dirtyCount = 0;
+        const auto tpPose0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         for (int s = 0; s < S; ++s) {
             Src& sp = *srcs[s];
             double rawPose[4], pose[4];
             for (int i = 0; i < 4; ++i) rawPose[i] = params[s * 4 + i].load(std::memory_order_relaxed);
-            resolvePose4(G(), wd->serial, audioSrcHist[(size_t)s], rawPose, pose);
+            if (!firstSolve && !worldChanged && !audioJumped && audioSrcHist[(size_t)s].worldSerial == wd->serial
+                && rawPose[0] == sp.solvedRawPose[0] && rawPose[1] == sp.solvedRawPose[1] && rawPose[2] == sp.solvedRawPose[2]) {
+                pose[0] = sp.solvedPose[0]; pose[1] = sp.solvedPose[1]; pose[2] = sp.solvedPose[2]; pose[3] = rawPose[3];
+            } else {
+                resolvePose4(G(), wd->serial, audioSrcHist[(size_t)s], rawPose, pose);
+            }
             Vec3 pnow{pose[0], pose[1], pose[2]};
+            const Vec3 prevHist = sp.hist[sp.period & (kHist - 1)];
+            if (pnow.x != prevHist.x || pnow.y != prevHist.y || pnow.z != prevHist.z) sp.stillPeriods = 0;
+            else if (sp.stillPeriods < (int)kHist) ++sp.stillPeriods;
             ++sp.period;
             sp.hist[sp.period & (kHist - 1)] = pnow;
             const auto& state = sp.directivityState.audioRead();
@@ -2627,7 +2816,7 @@ struct Engine::Impl {
             const auto* curDir = state.profile.get();
             const double curAmt = state.amount;
             const double curAimAz = state.aimAzDeg, curAimEl = state.aimElDeg, curAimRoll = state.aimRollDeg;
-            bool changed = lmoved || firstSolve || worldChanged || dopK != lastDopK || pat != sp.solvedPattern
+            bool changed = lmoved || firstSolve || worldChanged || audioJumped || dopK != lastDopK || pat != sp.solvedPattern
                 || curDir != sp.solvedDirectivity
                 || (curDir != nullptr && (curAmt != sp.solvedAmount || curAimAz != sp.solvedAimAz || curAimEl != sp.solvedAimEl || curAimRoll != sp.solvedAimRoll));
             sp.solvedPattern = pat;
@@ -2636,38 +2825,89 @@ struct Engine::Impl {
             sp.solvedAimAz = curAimAz;
             sp.solvedAimEl = curAimEl;
             sp.solvedAimRoll = curAimRoll;
+            spPatCache[(size_t)s] = pat;
+            spAmtCache[(size_t)s] = curAmt;
+            spAimAzCache[(size_t)s] = curAimAz;
+            spAimElCache[(size_t)s] = curAimEl;
+            spAimRollCache[(size_t)s] = curAimRoll;
+            spDirCache[(size_t)s] = curDir;
+            spPnowCache[(size_t)s] = pnow;
             for (int i = 0; i < 4; ++i) if(pose[i]!=sp.solvedPose[i]) {changed=true; if(!firstSolve)autoMovingUntil.store(gcount+(uint64_t)(.4*sr),std::memory_order_relaxed);}
             if(changed&&!firstSolve)++sp.earlyEpoch;
-            if (changed) sp.quiet = 0;
-            else if (sp.quiet < (1 << 30)) ++sp.quiet;
+            if (changed) { sp.quiet = 0; sp.pendingSolve = true; }
+            else if (!sp.pendingSolve && sp.quiet < (1 << 30)) ++sp.quiet;
             for (int i = 0; i < 4; ++i) { sp.solvedPose[i] = pose[i]; sp.solvedRawPose[i] = rawPose[i]; }
-            // Delays depend on where the source was up to one max-delay ago: keep solving until the history is still.
-            // (with reduced/boosted Doppler the smoothed reference delay needs ~5 time constants to converge)
-            const int settle = (int)(ringMask / cfg.ctrlInterval) + 2 + (dopK != 1.0 ? (int)(50.0 * sr / cfg.ctrlInterval) : 0);
-            if (sp.quiet > settle && sp.fadeLeftPeriods <= 0) {
+            const bool want = sp.pendingSolve || (sp.quiet <= settle) || (sp.fadeLeftPeriods > 0);
+            spNeedSolve[(size_t)s] = want ? 1 : 0;
+            spDoSolve[(size_t)s] = 0;
+            if (want) ++dirtyCount;
+        }
+        const int rrStride = (S <= 4) ? 1 : (S <= 20 ? 4 : 6);
+        rrStrideLast = rrStride;
+        const bool forceAll = firstSolve || worldChanged || audioJumped || (rrStride == 1);
+        const int rrBatch = forceAll ? S : std::max(1, (S + rrStride - 1) / rrStride);
+        const int nextGlideLen = forceAll ? 1 : std::max(1, (dirtyCount + rrBatch - 1) / rrBatch);
+        int rrPicked = 0;
+        int rrLast = rrCursor;
+        for (int s = 0; s < S; ++s) {
+            if (spNeedSolve[(size_t)s] && (forceAll || srcs[s]->fadeLeftPeriods > 0)) {
+                spDoSolve[(size_t)s] = 1;
+            }
+        }
+        if (!forceAll && dirtyCount > 0) {
+            for (int k = 0; k < S && rrPicked < rrBatch; ++k) {
+                const int s = (rrCursor + k) % S;
+                if (!spNeedSolve[(size_t)s] || spDoSolve[(size_t)s]) continue;
+                spDoSolve[(size_t)s] = 1;
+                ++rrPicked;
+                rrLast = s;
+            }
+            if (rrPicked > 0) rrCursor = (rrLast + 1) % S;
+        }
+        if (p7Enabled) p7.spPoseNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tpPose0).count();
+        for (int s = 0; s < S; ++s) {
+            Src& sp = *srcs[s];
+            if (!spDoSolve[(size_t)s]) {
                 for (int r = 0; r < RM; ++r)
-                    for (auto& t : links[(size_t)s * RM + r]) { t.d0 = t.d1; std::memcpy(t.g0, t.g1, sizeof t.g0); }
+                    for (auto& t : links[(size_t)s * RM + r]) {
+                        if (t.glideIdx + 1 < t.glideLen) {
+                            ++t.glideIdx;
+                        } else {
+                            t.d0 = t.d1;
+                            std::memcpy(t.g0, t.g1, sizeof t.g0);
+                            t.glideIdx = 0;
+                            t.glideLen = 1;
+                        }
+                    }
+                if (p7Enabled) ++p7.spSourceSkips;
                 continue;
             }
+            if (p7Enabled) ++p7.spSourceSolves;
+            sp.pendingSolve = false;
+            const int srcGlideLen = (forceAll || sp.fadeLeftPeriods > 0) ? 1 : nextGlideLen;
             if (sp.fadeLeftPeriods > 0) --sp.fadeLeftPeriods;
             // Acoustic fields only: a long source name must never allocate here.
             Transducer st;
             st.elevationDeg=sp.t.elevationDeg;st.patternHf=sp.t.patternHf;st.gainDb=sp.t.gainDb;
-            st.pattern = pat;
-            st.instrumentAmount = curAmt;
-            st.aimAzDeg = curAimAz;
-            st.aimElDeg = curAimEl;
-            st.aimRollDeg = curAimRoll;
-            st.directivityView = curDir;
-            st.pos = pnow;
-            st.azimuthDeg = pose[3];
+            st.pattern = spPatCache[(size_t)s];
+            st.instrumentAmount = spAmtCache[(size_t)s];
+            st.aimAzDeg = spAimAzCache[(size_t)s];
+            st.aimElDeg = spAimElCache[(size_t)s];
+            st.aimRollDeg = spAimRollCache[(size_t)s];
+            st.directivityView = spDirCache[(size_t)s];
+            st.pos = spPnowCache[(size_t)s];
+            st.azimuthDeg = sp.solvedPose[3];
+            const auto tb0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             if (!buildImages(st.pos)) nodes.resize(1);
+            if (p7Enabled) p7.spBuildImagesNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tb0).count();
             diffPendingNow = false;
-            if (curDir) {for (int r=0;r<RM;++r) solveLink<true>(s,r,st,audioJumped,fadePeriods);}
-            else {for (int r=0;r<RM;++r) solveLink<false>(s,r,st,audioJumped,fadePeriods);}
-            if (diffPendingNow) sp.quiet = 0;  // an answer is still being searched for: keep solving this source
+            if (st.directivityView) {for (int r=0;r<RM;++r) solveLink<true>(s,r,st,audioJumped,fadePeriods,srcGlideLen);}
+            else {for (int r=0;r<RM;++r) solveLink<false>(s,r,st,audioJumped,fadePeriods,srcGlideLen);}
+            if (diffPendingNow) { sp.quiet = 0; sp.pendingSolve = true; }  // an answer is still being searched for: keep solving this source
         }
+        const auto tdj0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         runDiffractionJobs();
+        if (p7Enabled) p7.spDiffJobsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tdj0).count();
         ++diffPeriod;
         ++dstats.periods;
         softCursor=softDeferred?softNext:0;softDeferred=false;
@@ -2684,6 +2924,7 @@ struct Engine::Impl {
         diffUnitsNow = 0;
         firstSolve = false;
         lastDopK = dopK;
+        if (p7Enabled) p7.startPeriodTotalNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sp0).count();
     }
 
     void endPeriod() {
@@ -2693,7 +2934,7 @@ struct Engine::Impl {
                 Tap& t = l[i];
                 float m = 0;
                 for (int b = 0; b < NB; ++b) m = std::max(m, std::fabs(t.g1[b]));
-                if (m == 0.f) { l[i] = l.back(); l.pop_back(); }
+                if (m == 0.f && t.glideIdx + 1 >= t.glideLen) { l[i] = l.back(); l.pop_back(); }
                 else ++i;
             }
             tapsActive += (int)l.size();
@@ -2724,11 +2965,35 @@ struct Engine::Impl {
 
     template<bool dual>
     void foldFrames(const float* g0, const float* g1, const float* ring, int64_t begin, int count, float* s0, float* s1) const {
-        int u=0;
-        for(;u<count;++u) {
-            const float* fr=ring+(((size_t)(begin+u)&ringMask)*8);
-            s0[u]=foldFrame(g0,fr);
-            if constexpr(dual)s1[u]=foldFrame(g1,fr);
+        int u = 0;
+       #if VERB_REQUIRE_AVX2
+        const size_t idx0 = (size_t)begin & ringMask;
+        if (idx0 + (size_t)count <= ringMask + 1) {
+            const __m256 vg0 = _mm256_setr_ps(g0[0], g0[1], g0[2], g0[3], g0[4], g0[5], g0[6], 0.f);
+            const __m256 vg1 = dual ? _mm256_setr_ps(g1[0], g1[1], g1[2], g1[3], g1[4], g1[5], g1[6], 0.f) : _mm256_setzero_ps();
+            const float* fr = ring + idx0 * 8;
+            for (; u + 4 <= count; u += 4, fr += 32) {
+                const __m256 f0 = _mm256_loadu_ps(fr);
+                const __m256 f1 = _mm256_loadu_ps(fr + 8);
+                const __m256 f2 = _mm256_loadu_ps(fr + 16);
+                const __m256 f3 = _mm256_loadu_ps(fr + 24);
+                const __m256 h01 = _mm256_hadd_ps(_mm256_mul_ps(vg0, f0), _mm256_mul_ps(vg0, f1));
+                const __m256 h23 = _mm256_hadd_ps(_mm256_mul_ps(vg0, f2), _mm256_mul_ps(vg0, f3));
+                const __m256 s0v = _mm256_hadd_ps(h01, h23);
+                _mm_storeu_ps(s0 + u, _mm_add_ps(_mm256_castps256_ps128(s0v), _mm256_extractf128_ps(s0v, 1)));
+                if constexpr (dual) {
+                    const __m256 d01 = _mm256_hadd_ps(_mm256_mul_ps(vg1, f0), _mm256_mul_ps(vg1, f1));
+                    const __m256 d23 = _mm256_hadd_ps(_mm256_mul_ps(vg1, f2), _mm256_mul_ps(vg1, f3));
+                    const __m256 s1v = _mm256_hadd_ps(d01, d23);
+                    _mm_storeu_ps(s1 + u, _mm_add_ps(_mm256_castps256_ps128(s1v), _mm256_extractf128_ps(s1v, 1)));
+                }
+            }
+        }
+       #endif
+        for (; u < count; ++u) {
+            const float* fr = ring + (((size_t)(begin + u) & ringMask) * 8);
+            s0[u] = foldFrame(g0, fr);
+            if constexpr (dual) s1[u] = foldFrame(g1, fr);
         }
     }
 
@@ -2738,75 +3003,169 @@ struct Engine::Impl {
         const float* ring = sp.ring.data();
         const float invCtrl = 1.f / cfg.ctrlInterval;
         for (const Tap& t : links[(size_t)s * RM + r]) {
-            float gmax = 0;bool gainsStat=true;
-            for (int k = 0; k < NB; ++k) {gmax = std::max(gmax, std::max(std::fabs(t.g0[k]), std::fabs(t.g1[k])));gainsStat=gainsStat&&t.g0[k]==t.g1[k];}
-            if (gmax < 3e-5f) continue;  // below -90 dB: inaudible, not worth rendering
+            float gmax = 0; bool gainsStat = true;
+            for (int k = 0; k < NB; ++k) {
+                gmax = std::max(gmax, std::max(std::fabs(t.g0[k]), std::fabs(t.g1[k])));
+                gainsStat = gainsStat && t.g0[k] == t.g1[k];
+            }
+            if (gmax < 3e-5f) { if (p7Enabled) ++p7.tapsSkipped; continue; }  // below -90 dB: inaudible, not worth rendering
             float* const dst = (t.key == 0 || t.key == kDiffKey) ? out : early;
-            const bool stat = t.d0 == t.d1 && gainsStat;
+            const bool constDelay = (t.d0 == t.d1);
             // The band gains do not depend on the interpolation phase, so each frame is first folded into ONE value
             // (7 products), and the 4-point interpolation then runs on those values: ~3x cheaper than weighting
             // all 7 bands of 4 frames per output sample.
-            if (stat) {
+            if (constDelay && gainsStat) {
+                if (p7Enabled) ++p7.tapsStat;
                 // constant delay and gains for the whole period: fractional position and weights are constant
                 const double pos0 = (double)(int64_t)gcount - t.d1;
                 const int64_t i00 = (int64_t)std::floor(pos0);
                 const float f = (float)(pos0 - (double)i00), f2 = f * f, f3 = f2 * f;
                 const float w0 = -0.5f * f3 + f2 - 0.5f * f, w1 = 1.5f * f3 - 2.5f * f2 + 1.f, w2 = -1.5f * f3 + 2.f * f2 + 0.5f * f, w3 = 0.5f * f3 - 0.5f * f2;
                 float* sb = sbA.data();
-                foldFrames<false>(t.g1,nullptr,ring,i00-1,m+3,sb,nullptr);
-                for (int j = 0; j < m; ++j) dst[j] += w0 * sb[j] + w1 * sb[j + 1] + w2 * sb[j + 2] + w3 * sb[j + 3];
+                foldFrames<false>(t.g1, nullptr, ring, i00 - 1, m + 3, sb, nullptr);
+                int j = 0;
+               #if VERB_REQUIRE_AVX2
+                const __m256 vw0 = _mm256_set1_ps(w0), vw1 = _mm256_set1_ps(w1), vw2 = _mm256_set1_ps(w2), vw3 = _mm256_set1_ps(w3);
+                for (; j + 8 <= m; j += 8) {
+                    __m256 v = _mm256_mul_ps(vw0, _mm256_loadu_ps(sb + j));
+                    v = _mm256_add_ps(v, _mm256_mul_ps(vw1, _mm256_loadu_ps(sb + j + 1)));
+                    v = _mm256_add_ps(v, _mm256_mul_ps(vw2, _mm256_loadu_ps(sb + j + 2)));
+                    v = _mm256_add_ps(v, _mm256_mul_ps(vw3, _mm256_loadu_ps(sb + j + 3)));
+                    _mm256_storeu_ps(dst + j, _mm256_add_ps(_mm256_loadu_ps(dst + j), v));
+                }
+               #endif
+                for (; j < m; ++j) dst[j] += w0 * sb[j] + w1 * sb[j + 1] + w2 * sb[j + 2] + w3 * sb[j + 3];
+                continue;
+            }
+            if (constDelay) {
+                if (p7Enabled) ++p7.tapsMoving;
+                const int glen = std::max(1, t.glideLen);
+                const int gph = t.glideIdx * cfg.ctrlInterval + ph;
+                const float invGlide = (glen == 1) ? invCtrl : (1.f / (float)(glen * cfg.ctrlInterval));
+                const double pos0 = (double)(int64_t)gcount - t.d1;
+                const int64_t i00 = (int64_t)std::floor(pos0);
+                const float f = (float)(pos0 - (double)i00), f2 = f * f, f3 = f2 * f;
+                const float w0 = -0.5f * f3 + f2 - 0.5f * f, w1 = 1.5f * f3 - 2.5f * f2 + 1.f, w2 = -1.5f * f3 + 2.f * f2 + 0.5f * f, w3 = 0.5f * f3 - 0.5f * f2;
+                float* s0 = sbA.data();
+                float* s1 = sbB.data();
+                foldFrames<true>(t.g0, t.g1, ring, i00 - 1, m + 3, s0, s1);
+                int j = 0;
+               #if VERB_REQUIRE_AVX2
+                const __m256 vw0 = _mm256_set1_ps(w0), vw1 = _mm256_set1_ps(w1), vw2 = _mm256_set1_ps(w2), vw3 = _mm256_set1_ps(w3);
+                __m256 vtt = _mm256_mul_ps(_mm256_setr_ps((float)(gph + 1), (float)(gph + 2), (float)(gph + 3), (float)(gph + 4),
+                                                          (float)(gph + 5), (float)(gph + 6), (float)(gph + 7), (float)(gph + 8)), _mm256_set1_ps(invGlide));
+                const __m256 vdt = _mm256_set1_ps(8.f * invGlide);
+                for (; j + 8 <= m; j += 8) {
+                    __m256 a = _mm256_mul_ps(vw0, _mm256_loadu_ps(s0 + j));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(vw1, _mm256_loadu_ps(s0 + j + 1)));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(vw2, _mm256_loadu_ps(s0 + j + 2)));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(vw3, _mm256_loadu_ps(s0 + j + 3)));
+                    __m256 b = _mm256_mul_ps(vw0, _mm256_loadu_ps(s1 + j));
+                    b = _mm256_add_ps(b, _mm256_mul_ps(vw1, _mm256_loadu_ps(s1 + j + 1)));
+                    b = _mm256_add_ps(b, _mm256_mul_ps(vw2, _mm256_loadu_ps(s1 + j + 2)));
+                    b = _mm256_add_ps(b, _mm256_mul_ps(vw3, _mm256_loadu_ps(s1 + j + 3)));
+                    const __m256 val = _mm256_add_ps(a, _mm256_mul_ps(vtt, _mm256_sub_ps(b, a)));
+                    _mm256_storeu_ps(dst + j, _mm256_add_ps(_mm256_loadu_ps(dst + j), val));
+                    vtt = _mm256_add_ps(vtt, vdt);
+                }
+               #endif
+                for (; j < m; ++j) {
+                    const float tt = (gph + j + 1) * invGlide;
+                    const float a = w0 * s0[j] + w1 * s0[j + 1] + w2 * s0[j + 2] + w3 * s0[j + 3];
+                    const float b = w0 * s1[j] + w1 * s1[j + 1] + w2 * s1[j + 2] + w3 * s1[j + 3];
+                    dst[j] += a + tt * (b - a);
+                }
                 continue;
             }
             // moving tap: delay and gains glide over the period. Two folded streams (gains at the period start and
             // end) over the frames this tap touches; interpolate, then cross-fade between them.
             {
-                const double dA = t.d0 + (t.d1 - t.d0) * (ph + 1) * invCtrl, dB = t.d0 + (t.d1 - t.d0) * (ph + m) * invCtrl;
+                if (p7Enabled) ++p7.tapsMoving;
+                const int glen = std::max(1, t.glideLen);
+                const int gph = t.glideIdx * cfg.ctrlInterval + ph;
+                const float invGlide = (glen == 1) ? invCtrl : (1.f / (float)(glen * cfg.ctrlInterval));
+                const double dA = t.d0 + (t.d1 - t.d0) * (gph + 1) * invGlide, dB = t.d0 + (t.d1 - t.d0) * (gph + m) * invGlide;
                 const double pA = (double)(int64_t)gcount - dA, pB = (double)(int64_t)(gcount + m - 1) - dB;
-                const int64_t iLo = (int64_t)std::floor(std::min(pA, pB)) - 1, iHi = (int64_t)std::floor(std::max(pA, pB)) + 2;
+                const int64_t iLo = (int64_t)std::floor(std::min(pA, pB)) - 2, iHi = (int64_t)std::floor(std::max(pA, pB)) + 3;
                 const int cnt = (int)(iHi - iLo) + 1;
                 if (cnt > (int)sbA.size()) continue;  // cannot happen (delay steps are limited), but never overrun
                 float* s0 = sbA.data();
                 float* s1 = sbB.data();
-                if(gainsStat){foldFrames<false>(t.g0,nullptr,ring,iLo,cnt,s0,nullptr);s1=s0;}
-                else foldFrames<true>(t.g0,t.g1,ring,iLo,cnt,s0,s1);
-                int j=0;
+                if (gainsStat) { foldFrames<false>(t.g0, nullptr, ring, iLo, cnt, s0, nullptr); s1 = s0; }
+                else foldFrames<true>(t.g0, t.g1, ring, iLo, cnt, s0, s1);
+                int j = 0;
                #if VERB_REQUIRE_AVX2
-                const auto d0=_mm256_set1_pd(t.d0), dd=_mm256_set1_pd(t.d1-t.d0);
-                const auto origin=_mm256_set1_pd((double)(iLo+1));
-                for(;j+4<=m;j+=4) {
-                    const auto tt=_mm_mul_ps(_mm_setr_ps((float)(ph+j+1),(float)(ph+j+2),(float)(ph+j+3),(float)(ph+j+4)),_mm_set1_ps(invCtrl));
-                    const auto time=_mm256_setr_pd((double)(int64_t)(gcount+j),(double)(int64_t)(gcount+j+1),(double)(int64_t)(gcount+j+2),(double)(int64_t)(gcount+j+3));
-                    const auto pos=_mm256_sub_pd(time,_mm256_add_pd(d0,_mm256_mul_pd(dd,_mm256_cvtps_pd(tt))));
-                    const auto whole=_mm256_floor_pd(pos);
-                    const auto indices=_mm256_cvtpd_epi32(_mm256_sub_pd(whole,origin));
-                    const auto f=_mm256_cvtpd_ps(_mm256_sub_pd(pos,whole));
-                    const auto f2=_mm_mul_ps(f,f),f3=_mm_mul_ps(f2,f);
-                    const auto w0=_mm_sub_ps(_mm_add_ps(_mm_mul_ps(_mm_set1_ps(-.5f),f3),f2),_mm_mul_ps(_mm_set1_ps(.5f),f));
-                    const auto w1=_mm_add_ps(_mm_sub_ps(_mm_mul_ps(_mm_set1_ps(1.5f),f3),_mm_mul_ps(_mm_set1_ps(2.5f),f2)),_mm_set1_ps(1.f));
-                    const auto w2=_mm_add_ps(_mm_add_ps(_mm_mul_ps(_mm_set1_ps(-1.5f),f3),_mm_mul_ps(_mm_set1_ps(2.f),f2)),_mm_mul_ps(_mm_set1_ps(.5f),f));
-                    const auto w3=_mm_sub_ps(_mm_mul_ps(_mm_set1_ps(.5f),f3),_mm_mul_ps(_mm_set1_ps(.5f),f2));
-                    const int index=_mm_cvtsi128_si32(indices);
-                    const bool contiguous=_mm_movemask_epi8(_mm_cmpeq_epi32(indices,_mm_add_epi32(_mm_set1_epi32(index),_mm_setr_epi32(0,1,2,3))))==0xffff;
-                    auto interpolate=[&](const float* values) {
-                        auto read=[&](int offset) {return contiguous?_mm_loadu_ps(values+index+offset):_mm_i32gather_ps(values+offset,indices,4);};
-                        auto a=_mm_add_ps(_mm_mul_ps(w0,read(0)),_mm_mul_ps(w1,read(1)));
-                        a=_mm_add_ps(a,_mm_mul_ps(w2,read(2)));
-                        return _mm_add_ps(a,_mm_mul_ps(w3,read(3)));
-                    };
-                    const auto a=interpolate(s0),b=gainsStat?a:interpolate(s1);
-                    const auto value=_mm_add_ps(a,_mm_mul_ps(tt,_mm_sub_ps(b,a)));
-                    _mm_storeu_ps(dst+j,_mm_add_ps(_mm_loadu_ps(dst+j),value));
+                const double ddScalar = t.d1 - t.d0;
+                const double posBase = (double)(int64_t)gcount - (t.d0 + ddScalar * (double)(gph + 1) * (double)invGlide);
+                const double dPos = 1.0 - ddScalar * (double)invGlide;
+                const double relBase = posBase - (double)(iLo + 1);
+                __m256d vRel0 = _mm256_setr_pd(relBase, relBase + dPos, relBase + 2.0 * dPos, relBase + 3.0 * dPos);
+                __m256d vRel1 = _mm256_add_pd(vRel0, _mm256_set1_pd(4.0 * dPos));
+                const __m256d vStep8 = _mm256_set1_pd(8.0 * dPos);
+                __m256 vtt = _mm256_mul_ps(_mm256_setr_ps((float)(gph + 1), (float)(gph + 2), (float)(gph + 3), (float)(gph + 4),
+                                                          (float)(gph + 5), (float)(gph + 6), (float)(gph + 7), (float)(gph + 8)), _mm256_set1_ps(invGlide));
+                const __m256 vdt = _mm256_set1_ps(8.f * invGlide);
+                const __m256 halfNeg = _mm256_set1_ps(-0.5f), halfPos = _mm256_set1_ps(0.5f), one = _mm256_set1_ps(1.f);
+                const __m256 c15 = _mm256_set1_ps(1.5f), c25 = _mm256_set1_ps(2.5f), c15n = _mm256_set1_ps(-1.5f), c2 = _mm256_set1_ps(2.f);
+                const __m256i vSeq = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+                for (; j + 8 <= m; j += 8) {
+                    const __m256d w0d = _mm256_floor_pd(vRel0);
+                    const __m256d w1d = _mm256_floor_pd(vRel1);
+                    const __m128i i0_4 = _mm256_cvtpd_epi32(w0d);
+                    const __m128i i1_4 = _mm256_cvtpd_epi32(w1d);
+                    const __m256i indices = _mm256_inserti128_si256(_mm256_castsi128_si256(i0_4), i1_4, 1);
+                    const __m128 f0_4 = _mm256_cvtpd_ps(_mm256_sub_pd(vRel0, w0d));
+                    const __m128 f1_4 = _mm256_cvtpd_ps(_mm256_sub_pd(vRel1, w1d));
+                    const __m256 f = _mm256_insertf128_ps(_mm256_castps128_ps256(f0_4), f1_4, 1);
+                    const __m256 f2 = _mm256_mul_ps(f, f), f3 = _mm256_mul_ps(f2, f);
+                    const __m256 w0 = _mm256_sub_ps(_mm256_add_ps(_mm256_mul_ps(halfNeg, f3), f2), _mm256_mul_ps(halfPos, f));
+                    const __m256 w1 = _mm256_add_ps(_mm256_sub_ps(_mm256_mul_ps(c15, f3), _mm256_mul_ps(c25, f2)), one);
+                    const __m256 w2 = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(c15n, f3), _mm256_mul_ps(c2, f2)), _mm256_mul_ps(halfPos, f));
+                    const __m256 w3 = _mm256_sub_ps(_mm256_mul_ps(halfPos, f3), _mm256_mul_ps(halfPos, f2));
+                    const int idx0 = _mm_cvtsi128_si32(i0_4);
+                    const bool contiguous = (_mm256_movemask_epi8(_mm256_cmpeq_epi32(indices, _mm256_add_epi32(_mm256_set1_epi32(idx0), vSeq))) == -1);
+                    __m256 a, b;
+                    if (contiguous) {
+                        const float* base0 = s0 + idx0;
+                        a = _mm256_mul_ps(w0, _mm256_loadu_ps(base0));
+                        a = _mm256_add_ps(a, _mm256_mul_ps(w1, _mm256_loadu_ps(base0 + 1)));
+                        a = _mm256_add_ps(a, _mm256_mul_ps(w2, _mm256_loadu_ps(base0 + 2)));
+                        a = _mm256_add_ps(a, _mm256_mul_ps(w3, _mm256_loadu_ps(base0 + 3)));
+                        if (gainsStat) {
+                            b = a;
+                        } else {
+                            const float* base1 = s1 + idx0;
+                            b = _mm256_mul_ps(w0, _mm256_loadu_ps(base1));
+                            b = _mm256_add_ps(b, _mm256_mul_ps(w1, _mm256_loadu_ps(base1 + 1)));
+                            b = _mm256_add_ps(b, _mm256_mul_ps(w2, _mm256_loadu_ps(base1 + 2)));
+                            b = _mm256_add_ps(b, _mm256_mul_ps(w3, _mm256_loadu_ps(base1 + 3)));
+                        }
+                    } else {
+                        auto gatherInterp = [&](const float* vals) {
+                            __m256 res = _mm256_mul_ps(w0, _mm256_i32gather_ps(vals, indices, 4));
+                            res = _mm256_add_ps(res, _mm256_mul_ps(w1, _mm256_i32gather_ps(vals + 1, indices, 4)));
+                            res = _mm256_add_ps(res, _mm256_mul_ps(w2, _mm256_i32gather_ps(vals + 2, indices, 4)));
+                            return _mm256_add_ps(res, _mm256_mul_ps(w3, _mm256_i32gather_ps(vals + 3, indices, 4)));
+                        };
+                        a = gatherInterp(s0);
+                        b = gainsStat ? a : gatherInterp(s1);
+                    }
+                    const __m256 val = _mm256_add_ps(a, _mm256_mul_ps(vtt, _mm256_sub_ps(b, a)));
+                    _mm256_storeu_ps(dst + j, _mm256_add_ps(_mm256_loadu_ps(dst + j), val));
+                    vRel0 = _mm256_add_pd(vRel0, vStep8);
+                    vRel1 = _mm256_add_pd(vRel1, vStep8);
+                    vtt = _mm256_add_ps(vtt, vdt);
                 }
                #endif
                 for (; j < m; ++j) {
-                    const float tt = (ph + j + 1) * invCtrl;
+                    const float tt = (gph + j + 1) * invGlide;
                     const double pos = (double)(int64_t)(gcount + j) - (t.d0 + (t.d1 - t.d0) * tt);
                     const int64_t i0 = (int64_t)std::floor(pos);
                     const float f = (float)(pos - (double)i0), f2 = f * f, f3 = f2 * f;
                     const float w0 = -0.5f * f3 + f2 - 0.5f * f, w1 = 1.5f * f3 - 2.5f * f2 + 1.f, w2 = -1.5f * f3 + 2.f * f2 + 0.5f * f, w3 = 0.5f * f3 - 0.5f * f2;
                     const int u = (int)(i0 - 1 - iLo);
                     const float A = w0 * s0[u] + w1 * s0[u + 1] + w2 * s0[u + 2] + w3 * s0[u + 3];
-                    const float Bv = gainsStat?A:w0 * s1[u] + w1 * s1[u + 1] + w2 * s1[u + 2] + w3 * s1[u + 3];
+                    const float Bv = gainsStat ? A : w0 * s1[u] + w1 * s1[u + 1] + w2 * s1[u + 2] + w3 * s1[u + 3];
                     dst[j] += A + tt * (Bv - A);
                 }
             }
@@ -2814,11 +3173,12 @@ struct Engine::Impl {
     }
 
     // ---- tail convolution ----
-    void accumulateFdl(const TailConv& t, const Slot& sl, int r, const float* fdlRe, const float* fdlIm, float* ar, float* ai) const {
+    void accumulateFdlRange(const TailConv& t, const Slot& sl, int r, int k0, int k1, const float* fdlRe, const float* fdlIm, float* ar, float* ai) const {
         std::fill(ar, ar + t.bins, 0.f);
         std::fill(ai, ai + t.bins, 0.f);
+        const int hiK = std::min(k1, sl.partitions);
         const size_t base = (size_t)r * sl.partitions * t.bins;
-        for (int k = 0; k < sl.partitions; ++k) {
+        for (int k = std::max(0, k0); k < hiK; ++k) {
             int e = t.head - k;
             if (e < 0) e += t.P;
             const float* xr = &fdlRe[(size_t)e * t.bins];
@@ -2844,16 +3204,35 @@ struct Engine::Impl {
             }
         }
     }
+    void accumulateFdl(const TailConv& t, const Slot& sl, int r, const float* fdlRe, const float* fdlIm, float* ar, float* ai) const {
+        accumulateFdlRange(t, sl, r, 0, sl.partitions, fdlRe, fdlIm, ar, ai);
+    }
+    void accumulateWindows(const TailConv& t, const Slot& sl, int r, const float* fdlRe, const float* fdlIm) const {
+        int k0 = 0;
+        for (int w = 0; w < kBakeWinCount; ++w) {
+            const int k1 = (w + 1 == kBakeWinCount) ? sl.partitions : std::min(sl.partitions, eqWinEndK[(size_t)w]);
+            accumulateFdlRange(t, sl, r, k0, k1, fdlRe, fdlIm, &eqWinRe[(size_t)w * (size_t)t.bins], &eqWinIm[(size_t)w * (size_t)t.bins]);
+            k0 = std::max(k0, k1);
+        }
+    }
     void accumulate(const TailConv& t, const Slot& sl, int r, float* ar, float* ai) const {
         const bool useClean = !shared && t.hoSlot < 0 && t.cleanSynced.load(std::memory_order_acquire) < t.P;
-        accumulateFdl(t, sl, r, useClean ? t.cleanRe.data() : t.fdlRe.data(), useClean ? t.cleanIm.data() : t.fdlIm.data(), ar, ai);
+        const float* fRe = useClean ? t.cleanRe.data() : t.fdlRe.data();
+        const float* fIm = useClean ? t.cleanIm.data() : t.fdlIm.data();
         bakeEqualize(t,sl,r,ar,ai);
+        if (eqPending) { accumulateWindows(t, sl, r, fRe, fIm); return; }
+        accumulateFdl(t, sl, r, fRe, fIm, ar, ai);
     }
     void accumulateClean(const TailConv& t, const Slot& sl, int r, float* ar, float* ai) const {
         accumulateFdl(t, sl, r, t.cleanRe.data(), t.cleanIm.data(), ar, ai);
     }
 
     void inverse(const float* ar, const float* ai, float* out) {
+        if (eqPending) { eqPending = false; eqApplyBank(out); }
+        else inverseRaw(ar, ai, out);
+        if (eqHasFresh) { eqHasFresh = false; for (int i = 0; i < B; ++i) out[i] += eqFreshOut[(size_t)i]; }
+    }
+    void inverseRaw(const float* ar, const float* ai, float* out) {
         for (int b = 0; b <= B; ++b) fftBuf[b] = {ar[b], ai[b]};
         fftBuf[0].im = 0; fftBuf[B].im = 0;
         for (int b = 1; b < B; ++b) fftBuf[2 * B - b] = {ar[b], -ai[b]};
@@ -2889,8 +3268,15 @@ struct Engine::Impl {
         t.prevIn.swap(t.freshPrev);t.inAcc.swap(t.freshIn);
     }
     void accumulateHandover(TailConv& t,int old,int r,float* ar,float* ai) {
-        accumulateFdl(t,t.slot[old],r,t.fdlRe.data(),t.fdlIm.data(),ar,ai);
         bakeEqualize(t,t.slot[old],r,ar,ai);
+        if(eqPending){
+            accumulateWindows(t,t.slot[old],r,t.fdlRe.data(),t.fdlIm.data());
+            accumulateFresh(t,t.slot[t.hoSlot],r,accRe2.data(),accIm2.data());
+            inverseRaw(accRe2.data(),accIm2.data(),eqFreshOut.data());
+            eqHasFresh=true;
+            return;
+        }
+        accumulateFdl(t,t.slot[old],r,t.fdlRe.data(),t.fdlIm.data(),ar,ai);
         accumulateFresh(t,t.slot[t.hoSlot],r,accRe2.data(),accIm2.data());
         for(int b=0;b<t.bins;++b){ar[b]+=accRe2[b];ai[b]+=accIm2[b];}
     }
@@ -3001,7 +3387,8 @@ struct Engine::Impl {
                 } else if(fromSplit && !shared) {
                     accumulate(t,t.slot[t.cur],r,accRe.data(),accIm.data());
                     accumulateFresh(t,t.slot[t.cur],r,accRe2.data(),accIm2.data());
-                    for(int b=0;b<t.bins;++b){accRe[b]+=accRe2[b];accIm[b]+=accIm2[b];}
+                    if(eqPending){inverseRaw(accRe2.data(),accIm2.data(),eqFreshOut.data());eqHasFresh=true;}
+                    else for(int b=0;b<t.bins;++b){accRe[b]+=accRe2[b];accIm[b]+=accIm2[b];}
                 } else accumulate(t, t.slot[t.cur], r, accRe.data(), accIm.data());
                 inverse(accRe.data(), accIm.data(), blkA.data());
                 if (fromSplit) {
@@ -3131,12 +3518,15 @@ struct Engine::Impl {
     std::vector<float> blkA, blkB;
 
     void process(const float* const* in, float* const* out, int n, const float* dryDetector) {
+        const auto tp0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (p7Enabled) ++p7.processCalls;
         const int ctrl = cfg.ctrlInterval;
         int done = 0;
         while (done < n) {
             int ph = (int)(gcount % ctrl);
             int m = std::min(n - done, ctrl - ph);
             if (ph == 0) startPeriod();
+            const auto tbs0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             for (int s = 0; s < S; ++s) {
                 Src& sp = *srcs[s];
                 for (int j = 0; j < m; ++j) {
@@ -3160,7 +3550,10 @@ struct Engine::Impl {
                     }
                 }
             }
+            const auto tbs1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            if (p7Enabled) p7.bandSplitNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(tbs1 - tbs0).count();
             if (shared) {
+                const auto tlf0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 // late-field feed: per receiver, the sum over sources of band-weighted source signals
                 for (int r = 0; r < R; ++r) {
                     TailConv& t = *sconv[(size_t)r];
@@ -3195,6 +3588,7 @@ struct Engine::Impl {
                         }
                     } else for (int j = 0; j < m; ++j) t.inAcc[(gcount + j) % B] = requestedFreeze.load(std::memory_order_relaxed) ? 0.f : y[j];
                 }
+                if (p7Enabled) p7.lateFeedNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tlf0).count();
             }
             for (int j = 0; j < m; ++j)
                 for (int k = 0; k < 3; ++k) {
@@ -3205,6 +3599,7 @@ struct Engine::Impl {
                     componentMix[(size_t)k * ctrl + j] = componentGain[k];
                 }
             for (int r = 0; r < R; ++r) {
+                const auto trt0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 float* acc = &tmpOut[(size_t)r * ctrl];
                 float* ear = &tmpEarly[(size_t)r * ctrl];
                 std::fill(acc, acc + m, 0.f);
@@ -3215,7 +3610,11 @@ struct Engine::Impl {
                     const float inv = 1.f / (float)M;
                     for (int j = 0; j < m; ++j) { acc[j] *= inv; ear[j] *= inv; }
                 }
+                const auto trt1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                if (p7Enabled) p7.renderTapsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(trt1 - trt0).count();
                 diffuse(r, ear, m, diffG);
+                const auto tdf1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                if (p7Enabled) p7.diffuseNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(tdf1 - trt1).count();
                 const size_t tr = tailMask + 1;
                 for (int j = 0; j < m; ++j) {
                     const float tg = tailGa + (tailGb - tailGa) * (float)(ph + j + 1) / (float)ctrl;
@@ -3225,7 +3624,9 @@ struct Engine::Impl {
                     out[r][done+j]=componentMix[j]*acc[j]+componentMix[ctrl+j]*ear[j]
                         +componentMix[2*ctrl+j]*tg*tailRing[(size_t)r*tr+((gcount+j)&tailMask)];
                 }
+                if (p7Enabled) p7.creativeWetNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tdf1).count();
             }
+            const auto tcw0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             const double pd=requestedPredelay.load(std::memory_order_relaxed);
             const float width=(float)(requestedWidth.load(std::memory_order_relaxed)*.01);
             const float duck=(float)requestedDuck.load(std::memory_order_relaxed);
@@ -3259,13 +3660,23 @@ struct Engine::Impl {
                 wetPredelay.end();
             }
             publishedDuck.store(wetDuck.reductionDb(),std::memory_order_relaxed);
+            if (p7Enabled) p7.creativeWetNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tcw0).count();
             gcount += m;
             done += m;
-            if (ph + m == ctrl) endPeriod();
-            if (gcount % B == 0) tailBlock();
+            if (ph + m == ctrl) {
+                const auto tep0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                endPeriod();
+                if (p7Enabled) p7.endPeriodNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tep0).count();
+            }
+            if (gcount % B == 0) {
+                const auto ttb0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                tailBlock();
+                if (p7Enabled) p7.tailBlockNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ttb0).count();
+            }
         }
         publishedDiffractionMisses.store(diffractionScratch.capacityMisses + quickScratch.capacityMisses,std::memory_order_relaxed);
         streamPos.store(gcount, std::memory_order_release);
+        if (p7Enabled) p7.processTotalNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tp0).count();
     }
 };
 
@@ -3561,6 +3972,7 @@ void Engine::Impl::applyBakedPathsLocked(const std::vector<BakedPath>& declared)
     std::atomic_store(&bakeDiagnosticList,std::shared_ptr<const std::vector<BakedTable>>(keptDiag));
     std::atomic_store(&bakeDiagnostic,keptDiag->empty()?std::shared_ptr<const BakedTable>{}:std::make_shared<BakedTable>(keptDiag->front()));
     bakeGroups=std::move(nextGroups);
+    bakeRestored=0; // P4: group layout changed; a later install/restore stamps its own hint
     if(newSpecs.empty()){
         bakeState=Engine::BakeState::NotBaked;
     }else if(!canBake){
@@ -3612,15 +4024,16 @@ void Engine::requestPathBake(unsigned workers) {
             const int idx=o<0?0:o+1;if(idx>=0&&idx<(int)p_->bakeObjectTouched.size())p_->bakeObjectTouched[(size_t)idx]=1;
         }
     }
-    p_->bakeWantedWorkers=workers;p_->bakePercent=0;p_->bakeDone=0;p_->bakeTotal=0;p_->bakeWaitReason=0;p_->bakeState=BakeState::Baking;++p_->bakeAction;p_->bakeRequested=true;
+    p_->bakeWantedWorkers=workers;p_->bakePercent=0;p_->bakeDone=0;p_->bakeTotal=0;p_->bakeWaitReason=0;p_->bakeState=BakeState::Baking;++p_->bakeAction;p_->bakeRequested=true;p_->bakeRestored=0;
 }
 void Engine::cancelPathBake() {
     std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
-    p_->bakeRequested=false;++p_->bakeAction;p_->bakePercent=0;p_->bakeState=BakeState::Cancelled;p_->bakeWaitReason=13;
+    p_->bakeRequested=false;++p_->bakeAction;p_->bakePercent=0;p_->bakeState=BakeState::Cancelled;p_->bakeWaitReason=13;p_->bakeRestored=0;
     for(auto&gr:p_->bakeGroups)if(gr.state==BakeState::Baking||gr.dirty)gr.state=BakeState::Cancelled;
 }
 void Engine::clearPathBake() {
     std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    p_->bakeCache.clear();p_->bakeRestored=0;p_->bakeRestoreTriedKey=0; // P4: an explicit clear is never silently undone
     for(auto&r:p_->bakeObjectRevision)r.fetch_add(1,std::memory_order_release);  // the audio thread stops using every table at once
     p_->bakeRequested=false;++p_->bakeAction;++p_->bakeRevision;p_->bakePercent=0;p_->bakeWaitReason=0;
     std::atomic_store(&p_->bakeDiagnosticList,std::shared_ptr<const std::vector<BakedTable>>(std::make_shared<std::vector<BakedTable>>()));
@@ -3630,6 +4043,11 @@ void Engine::clearPathBake() {
     for(auto&gr:p_->bakeGroups){gr.table.reset();gr.done=0;gr.total=0;gr.percent=0;gr.discontinuities=0;gr.dirty=true;gr.touched=false;gr.state=canBake?BakeState::NotBaked:BakeState::Blocked;}
     p_->bakeState=p_->bakeGroups.empty()?BakeState::NotBaked:canBake?BakeState::NotBaked:BakeState::Blocked;
     if(!canBake&&!p_->bakeGroups.empty())p_->bakeWaitReason=10;
+}
+Engine::BakeTrace Engine::bakeTrace() const {
+    BakeTrace t;std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    t.stations=p_->bakeTraceStations;t.decisions=p_->bakeTraceDecisions;t.maxStepGapMs=p_->bakeMaxGapMs;t.stepCalls=p_->bakeStepCalls;t.waitSteps=p_->bakeWaitSteps;t.activeLimit=(int)p_->bakeActiveLimit;t.workers=p_->bakeWorkers.load();
+    return t;
 }
 Engine::BakeStats Engine::bakeStats() const {
     BakeStats s;
@@ -3661,7 +4079,51 @@ Engine::BakeStats Engine::bakeStats() const {
     }
     s.discontinuities=p_->bakeDiscontinuities.load();s.hash=p_->bakeHash.load();
     s.lookups=p_->bakeLookups.load();s.milliseconds=p_->bakeMilliseconds.load();
+    s.restored=p_->bakeRestored.load();
     return s;
+}
+bool Engine::installBakedTables(const std::vector<BakedTable>& tables) {
+    std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    auto&q=*p_;
+    auto reject=[](const char*){return false;}; // the reason string at each call site documents why a table is refused
+    if(!q.bakeEnabled.load()||q.bakeRequested.load()||q.bakeGroups.empty()||q.cfg.motionMode<2)return reject("precondition");
+    if(tables.size()!=q.bakeGroups.size())return reject("group count");
+    std::vector<BakedTable> list,shaped;list.reserve(tables.size());
+    bool deferred=false;
+    for(size_t gi=0;gi<q.bakeGroups.size();++gi){
+        const auto&gr=q.bakeGroups[gi];
+        const BakedTable* match=nullptr;
+        for(const auto&t:tables)if(t.movingPaths==gr.spec.paths&&t.movesListener==gr.spec.movesListener){match=&t;break;}
+        if(!match)return reject("path match");
+        BakedTable t=*match;
+        if(t.estimator!=kBakeEstimatorVersion||t.u.size()<2||t.contentSig==0)return reject("estimator/sig");
+        if(t.sources!=(int)gr.spec.groupSources.size()||t.receivers!=q.R||t.groupSources!=gr.spec.groupSources)return reject("sources/receivers");
+        if(t.staticPose.size()!=(size_t)(q.S+1)*4||t.patterns.size()!=(size_t)q.S)return reject("pose/patterns size");
+        if(t.amplitude.size()!=t.energy.size()||t.energy.size()!=t.u.size()*t.stride())return reject("payload size");
+        if(t.winAmplitude.size()!=t.winEnergy.size()||t.winEnergy.size()!=t.u.size()*t.winStride()||t.winEss.size()!=t.winEnergy.size())return reject("win payload size");
+        shaped.push_back(t);
+        // The live world may still be settling right after a rebuild (the auto tail/pose is applied a moment later), so a
+        // mismatch now is not final: the verified-shape tables are parked in the cache and the worker re-checks the content
+        // signature until it matches (restored) or never does (edited elsewhere / old estimator / other layout: stays notBaked).
+        if(t.contentSig!=q.groupContentSig(gr.spec)){deferred=true;continue;}
+        q.restampBakedTableLocked(t);
+        if(!q.bakeContextTable(t,true))return reject("context after restamp");
+        list.push_back(std::move(t));
+    }
+    if(deferred){for(const auto&t:shaped)q.pushBakeCacheLocked(t,true);return reject("content signature (deferred to the cache)");}
+    q.publishBakedTablesLocked(std::move(list),1,true);
+    q.bakeRestoreTriedKey=0;
+    return true;
+}
+std::vector<uint64_t> Engine::bakeContentSignatures() const {
+    std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    std::vector<uint64_t> out;out.reserve(p_->bakeGroups.size());
+    for(const auto&gr:p_->bakeGroups)out.push_back(p_->groupContentSig(gr.spec));
+    return out;
+}
+int Engine::bakedCacheEntries() const {
+    std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    return (int)p_->bakeCache.size();
 }
 
 }
@@ -3673,5 +4135,74 @@ std::vector<std::shared_ptr<const BakedTable>> Engine::bakedTablesSnapshot() con
     auto list=std::atomic_load(&p_->bakeDiagnosticList);
     if(list)for(const auto&t:*list)out.push_back(std::make_shared<BakedTable>(t));
     return out;
+}
+
+Engine::P7ProfileStats Engine::p7ProfileStats() const {
+    P7ProfileStats s{};
+    const auto& q = p_->p7;
+    s.processCalls = q.processCalls;
+    s.processTotalNs = q.processTotalNs;
+    s.startPeriodCalls = q.startPeriodCalls;
+    s.startPeriodTotalNs = q.startPeriodTotalNs;
+    s.spSetupNs = q.spSetupNs;
+    s.spPoseNs = q.spPoseNs;
+    s.spBuildImagesNs = q.spBuildImagesNs;
+    s.spSolveDirectNs = q.spSolveDirectNs;
+    s.spSolveValidateNs = q.spSolveValidateNs;
+    s.spSolveTapsNs = q.spSolveTapsNs;
+    s.spDiffJobsNs = q.spDiffJobsNs;
+    s.spSourceSkips = q.spSourceSkips;
+    s.spSourceSolves = q.spSourceSolves;
+    s.validateCalls = q.validateCalls;
+    s.validateSupportEvals = q.validateSupportEvals;
+    s.validateSoftLegEvals = q.validateSoftLegEvals;
+    s.validateAmpMemoHit = q.validateAmpMemoHit;
+    s.validateAmpMemoEval = q.validateAmpMemoEval;
+    s.validateAmpMemoDeferred = q.validateAmpMemoDeferred;
+    s.bandSplitNs = q.bandSplitNs;
+    s.lateFeedNs = q.lateFeedNs;
+    s.renderTapsNs = q.renderTapsNs;
+    s.diffuseNs = q.diffuseNs;
+    s.creativeWetNs = q.creativeWetNs;
+    s.endPeriodNs = q.endPeriodNs;
+    s.tailBlockNs = q.tailBlockNs;
+    s.tapsSkipped = q.tapsSkipped;
+    s.tapsStat = q.tapsStat;
+    s.tapsMoving = q.tapsMoving;
+    s.workerStepCalls = q.workerStepCalls.load(std::memory_order_relaxed);
+    s.workerRebuilds = q.workerRebuilds.load(std::memory_order_relaxed);
+    s.workerRebuildsCancelled = q.workerRebuildsCancelled.load(std::memory_order_relaxed);
+    s.workerMotionEsts = q.workerMotionEsts.load(std::memory_order_relaxed);
+    s.workerRebuildNs = q.workerRebuildNs.load(std::memory_order_relaxed);
+    s.workerMotionEstNs = q.workerMotionEstNs.load(std::memory_order_relaxed);
+    s.workerBakeStepNs = q.workerBakeStepNs.load(std::memory_order_relaxed);
+    s.workerSettleTriggers = q.workerSettleTriggers.load(std::memory_order_relaxed);
+    s.workerLegacyTriggers = q.workerLegacyTriggers.load(std::memory_order_relaxed);
+    s.workerJumpTriggers = q.workerJumpTriggers.load(std::memory_order_relaxed);
+    return s;
+}
+
+void Engine::resetP7ProfileStats() {
+    auto& q = p_->p7;
+    q.processCalls = q.processTotalNs = 0;
+    q.startPeriodCalls = q.startPeriodTotalNs = 0;
+    q.spSetupNs = q.spPoseNs = q.spBuildImagesNs = 0;
+    q.spSolveDirectNs = q.spSolveValidateNs = q.spSolveTapsNs = q.spDiffJobsNs = 0;
+    q.spSourceSkips = q.spSourceSolves = 0;
+    q.validateCalls = q.validateSupportEvals = q.validateSoftLegEvals = 0;
+    q.validateAmpMemoHit = q.validateAmpMemoEval = q.validateAmpMemoDeferred = 0;
+    q.bandSplitNs = q.lateFeedNs = q.renderTapsNs = q.diffuseNs = 0;
+    q.creativeWetNs = q.endPeriodNs = q.tailBlockNs = 0;
+    q.tapsSkipped = q.tapsStat = q.tapsMoving = 0;
+    q.workerStepCalls.store(0, std::memory_order_relaxed);
+    q.workerRebuilds.store(0, std::memory_order_relaxed);
+    q.workerRebuildsCancelled.store(0, std::memory_order_relaxed);
+    q.workerMotionEsts.store(0, std::memory_order_relaxed);
+    q.workerRebuildNs.store(0, std::memory_order_relaxed);
+    q.workerMotionEstNs.store(0, std::memory_order_relaxed);
+    q.workerBakeStepNs.store(0, std::memory_order_relaxed);
+    q.workerSettleTriggers.store(0, std::memory_order_relaxed);
+    q.workerLegacyTriggers.store(0, std::memory_order_relaxed);
+    q.workerJumpTriggers.store(0, std::memory_order_relaxed);
 }
 }

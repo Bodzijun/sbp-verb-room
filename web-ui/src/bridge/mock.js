@@ -40,7 +40,7 @@ export async function createMockBridge(options = {}) {
     tailTimer = id; timers.add(id);
   }
   function stopJobs() { timers.forEach(clearTimeout); timers.clear(); tailTimer = null; job = null; meterToken++; }
-  function historyEvent() { event({event:'history.changed',canUndo:history.length>0,undoDepth:history.length,canRedo:false,undoLabel:history.length ? 'Scene edit' : '',redoLabel:''}); }
+  function historyEvent() { event({event:'history.changed',canUndo:history.length>0,undoDepth:history.length,canRedo:false,undoLabel:history.length ? (history.at(-1).undoLabel || 'Scene edit') : '',redoLabel:''}); }
   let clutterSignature = null;
   function clutterEvent(force = false) { const signature = mockClutterSignature(state); if (force || signature !== clutterSignature) { clutterSignature = signature; event(mockClutterEvent(state)); } }
   function snapshot() { const result = emit('snapshot', state); historyEvent(); clutterEvent(); return result; }
@@ -49,6 +49,9 @@ export async function createMockBridge(options = {}) {
     clutterSignature = null;
     const fixture = data.get(name === 'error-resync' ? name : `snapshot.${name === 'energy-result' ? 'default-physical' : name}`);
     state = clone(fixture.messages.find(m => m.kind === 'snapshot').payload); state.parameters.descriptors = clone(descriptors);for(const d of descriptors.parameters)state.parameters.values[d.id] ??= d.default;
+    state.capabilities = state.capabilities || {};
+    state.capabilities.features = state.capabilities.features || {};
+    state.capabilities.features['colours.source'] = { available: true, status: 'available' };
     if (keepPreferences && old) state.preferences = clone(old.preferences || {});
     if (name === 'error-resync') state.revision = '43';
     validateModel(state, validator);
@@ -247,6 +250,7 @@ export async function createMockBridge(options = {}) {
           else {
             if(!tx&&op.startsWith('path.'))history.push({pathObject:p.object,pathBefore:clone(state.document.paths?.[p.object]||{points:[],enabled:true,closed:false,smooth:false,orient:false,laps:1})});
             if (!tx && op === 'output.autoMakeup') history.push({makeupBefore:state.parameters.values.makeup});
+            if (!tx && op === 'source.setConfig' && 'color' in p) history.push({ transactionDocument: clone(state.document), undoLabel: 'Source colour' });
             if (!tx && (op === 'room.scale' || op === 'source.setDirectivity' || op === 'source.setInstrument')) history.push({ transactionDocument: clone(state.document), transactionParams: clone(state.parameters.values) });
             else if (!tx && (op.startsWith('surface.') || ['room.setHeight', 'room.setOpening', 'room.clear'].includes(op))) history.push(clone(state.document.scene));
             history.splice(0, Math.max(0, history.length - 60)); if (tx) tx.changed = true;
@@ -257,7 +261,7 @@ export async function createMockBridge(options = {}) {
             result = ack();
           }
         }
-        if ((/^(history|surface|room|transaction|path)\./.test(op)&&!['path.bake','path.bakeCancel','path.bakeClear'].includes(op)) || op === 'output.autoMakeup' || op === 'source.setDirectivity' || op === 'source.setInstrument') historyEvent();
+        if ((/^(history|surface|room|transaction|path)\./.test(op)&&!['path.bake','path.bakeCancel','path.bakeClear'].includes(op)) || op === 'output.autoMakeup' || op === 'source.setDirectivity' || op === 'source.setInstrument' || (op === 'source.setConfig' && 'color' in p)) historyEvent();
         seen.set(message.requestId, result); if (seen.size > 512) seen.delete(seen.keys().next().value); return result;
       } catch (error) {
         const result = emit('error', { requestId: message.requestId, code: error.code || 'invalid', message: error.message, currentRevision: state.revision, ...(error.code === 'staleRevision' ? { resync: true } : {}) }, message.requestId);
@@ -294,6 +298,9 @@ export async function createMockBridge(options = {}) {
     },
     setCpuStatus(cpu) {
       event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: false, pathBake:bakeStatus,...(cpu ? { cpu } : {}) });
+    },
+    setRebuilding(rebuilding) {
+      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: !!rebuilding, pathBake: bakeStatus });
     },
     setBakeStatus(value){bakeToken++;bakeStatus={...emptyBake(),...value};bakeEvent();},
     dispose() { closed = true; stopJobs(); gestures.clear(); listeners.clear(); parameterListeners.clear(); },

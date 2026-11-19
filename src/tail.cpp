@@ -150,7 +150,7 @@ struct TailUniform { double operator()(TailCounter& rng)const{return (rng()>>11)
 
 struct TailTracePrepared {
     Geo g;int R;double c,rd=0,Vs=0;std::array<double,NB> airDb;std::vector<SphereClip> clip;
-    TailTracePrepared(const Scene& sc,const std::vector<Transducer>&rcv):g(sc),R((int)rcv.size()),c(speedOfSound(sc.tempC)){
+    TailTracePrepared(const Scene& sc,const std::vector<Transducer>&rcv,double minRd=0.):g(sc),R((int)rcv.size()),c(speedOfSound(sc.tempC)){
         for(int b=0;b<NB;++b)airDb[b]=airAbsDbPerM(kBandHz[b],sc.tempC,sc.humidity);
     rd = sc.detectRadius;
     {
@@ -161,6 +161,8 @@ struct TailTracePrepared {
             rd = std::min(3.0, std::max(rd, 0.05 * std::cbrt(vol)));
         }
     }
+    // P3: bake-only floor on the detection radius (0 = unchanged production arithmetic).
+    if (minRd > 0.) rd = std::min(3.0, std::max(rd, minRd));
     Vs = 4.0 / 3.0 * kPi * rd * rd * rd;
     clip.resize((size_t)R);
     for (int r = 0; r < R; ++r) clip[(size_t)r] = makeSphereClip(g, rcv[(size_t)r].pos, rd);
@@ -171,9 +173,9 @@ struct EnergySegment { Vec3 p,d;double L,path;std::array<double,NB> e;double x0,
 struct EnergyCapture {std::vector<EnergySegment> segments;double rz0=0,rz1=0,rd=0;std::atomic<size_t>* count=nullptr;};
 struct EnergyCaptureFull:std::runtime_error {EnergyCaptureFull():std::runtime_error("Analysis segment budget"){} };
 static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize,
-    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr, int firstRay=0,int lastRay=-1,const TailTracePrepared* prepared=nullptr,TailHist* recycle=nullptr,EnergyCapture* capture=nullptr) {
+    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr, int firstRay=0,int lastRay=-1,const TailTracePrepared* prepared=nullptr,TailHist* recycle=nullptr,EnergyCapture* capture=nullptr,double minDetectRadius=0.) {
     std::unique_ptr<TailTracePrepared> owned;
-    if(!prepared){owned=std::make_unique<TailTracePrepared>(sc,rcv);prepared=owned.get();}
+    if(!prepared){owned=std::make_unique<TailTracePrepared>(sc,rcv,minDetectRadius);prepared=owned.get();}
     const auto& g=prepared->g;const int R=prepared->R;const double c=prepared->c;
     const auto& airDb=prepared->airDb;
     TailHist out=recycle?std::move(*recycle):TailHist{};
@@ -374,9 +376,9 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
     return out;
 }
 
-TailHist traceTail(const Scene& sc,const Transducer& src,const std::vector<Transducer>& rcv,int order,int rays,int seed,bool finalize,const std::function<bool()>& cancelled,const TailExecution& execution){
+TailHist traceTail(const Scene& sc,const Transducer& src,const std::vector<Transducer>& rcv,int order,int rays,int seed,bool finalize,const std::function<bool()>& cancelled,const TailExecution& execution,double minDetectRadius){
     using Clock=std::chrono::steady_clock;auto prepare=Clock::now();
-    constexpr int chunk=1024;const TailTracePrepared prepared(sc,rcv);
+    constexpr int chunk=1024;const TailTracePrepared prepared(sc,rcv,minDetectRadius);
     TailHist out;bool initialized=false;
     const size_t bytes=(size_t)(std::ceil(sc.length/.001)+2)*std::max<size_t>(1,rcv.size())*NB*16;
     const unsigned width=execution.pool?std::max(1u,std::min<unsigned>(execution.workers,(unsigned)std::max<size_t>(1,128u*1024u*1024u/std::max<size_t>(1,bytes)))):1;
@@ -406,8 +408,8 @@ TailHist traceTail(const Scene& sc,const Transducer& src,const std::vector<Trans
 }
 
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
-    int order, int rays, int seed, const std::function<bool()>& cancelled, const std::function<void(double)>& progress) {
-    const auto hist = traceTailImpl(sc, src, rcv, order, rays, seed, false, true, cancelled, progress);
+    int order, int rays, int seed, const std::function<bool()>& cancelled, const std::function<void(double)>& progress, double minDetectRadius) {
+    const auto hist = traceTailImpl(sc, src, rcv, order, rays, seed, false, true, cancelled, progress, nullptr, 0, -1, nullptr, nullptr, nullptr, minDetectRadius);
     std::vector<std::array<double, NB>> result(rcv.size());
     for (size_t r = 0; r < rcv.size(); ++r) for (int b = 0; b < NB; ++b) result[r][b] = hist.h[r][b][0];
     if (progress) progress(1.0);
@@ -917,11 +919,11 @@ bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized) {
 }
 
 TailHist traceTailAdaptive(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rc,
-                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore, const std::function<bool()>& cancelled, const TailExecution& execution,TailHist* retainedRaw) {
+                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore, const std::function<bool()>& cancelled, const TailExecution& execution,TailHist* retainedRaw,double minDetectRadius) {
     raysUsed = std::max(0, baseRays);
     maxRays = std::max(raysUsed, maxRays);
     for (;;) {
-        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false, cancelled, execution);
+        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false, cancelled, execution, minDetectRadius);
         auto h = raw;
         finalizeTail(h);
         const bool sparse = tailNeedsMoreRays(raw, h);

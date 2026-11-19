@@ -32,3 +32,69 @@ export function rayColour(order, roles, pointIndex=0) {
   const [h, s, l] = hexToHsl(roles.reflection), step = order - 1;
   return `hsl(${Math.round((h + step * 28) % 360)} ${Math.round(Math.min(90, s + 8))}% ${Math.round(Math.max(38, Math.min(70, l + 6 - step * 3)))}%)`;
 }
+
+// C1: optional per-source editor colour tag (#rrggbb lowercase, empty = Auto).
+export const AUTO_STRIP_COLOURS = ['#d9a05b', '#d6756a', '#d8c06c', '#c98d70', '#8fb3a2', '#8ea6c6'];
+export const SOURCE_COLOUR_PALETTE = [
+  { hex: '#d65f5f', name: 'Strings · Red' },
+  { hex: '#4fb074', name: 'Woodwinds · Green' },
+  { hex: '#e0b84c', name: 'Brass · Yellow' },
+  { hex: '#4f92d6', name: 'Percussion · Blue' },
+  { hex: '#94a0a8', name: 'Choir · Grey' },
+  { hex: '#3cbec4', name: 'Cyan' },
+  { hex: '#e08448', name: 'Orange' },
+  { hex: '#9e75d6', name: 'Purple' },
+  { hex: '#d96ba8', name: 'Pink' },
+  { hex: '#15d5a5', name: 'Emerald' },
+  { hex: '#c8cf4a', name: 'Lime' },
+  { hex: '#737dd6', name: 'Indigo' }
+];
+export function isValidSourceColorHex(value) {
+  return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
+}
+export function normalizeSourceColor(value) {
+  if (value === null || value === undefined || value === '') return '';
+  return isValidSourceColorHex(value) ? value.toLowerCase() : null;
+}
+function hexRgb(hex) {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function relativeLuminance(rgb) {
+  const lin = c => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+  return 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+}
+export function contrastTextColour(hex) {
+  const rgb = hexRgb(hex);
+  if (!rgb) return '#f2f6f8';
+  return relativeLuminance(rgb) > 0.36 ? '#111518' : '#f2f6f8';
+}
+export function sourceResolvedHex(source, index = 0) {
+  if (isValidSourceColorHex(source?.color)) return source.color.toLowerCase();
+  const i = ((index % AUTO_STRIP_COLOURS.length) + AUTO_STRIP_COLOURS.length) % AUTO_STRIP_COLOURS.length;
+  return AUTO_STRIP_COLOURS[i];
+}
+export function sourceStripColour(source, index = 0) {
+  if (isValidSourceColorHex(source?.color)) return source.color.toLowerCase();
+  const i = ((index % 6) + 6) % 6;
+  return `var(--strip-${i}, ${AUTO_STRIP_COLOURS[i]})`;
+}
+export function sourceMarkerColour(source, roles = viewportPalette({})) {
+  return isValidSourceColorHex(source?.color) ? source.color.toLowerCase() : roles.source;
+}
+export function sourceLabelColour(source, roles = viewportPalette({})) {
+  if (!isValidSourceColorHex(source?.color)) return roles.labels;
+  const col = source.color.toLowerCase();
+  const fg = hexRgb(col), bg = hexRgb(roles.background || '#100e0b');
+  if (!fg || !bg) return col;
+  const l1 = relativeLuminance(fg), l2 = relativeLuminance(bg);
+  const ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  return ratio >= 2.2 ? col : roles.labels;
+}
+export function sourceTintRgba(hex, alpha = 0.28) {
+  const rgb = hexRgb(hex);
+  return rgb ? `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})` : '';
+}
+

@@ -89,6 +89,7 @@ export function scrollArea(children, attrs = {}) {
   const view = element('div', { className: `sa-view scroll ${className}`.trim(), ...rest }, children), thumb = element('div', { className: 'sa-thumb' });
   const track = element('div', { className: 'sa-track', 'aria-hidden': 'true' }, thumb), root = element('div', { className: `sa ${rootClass}`.trim() }, [view, track]);
   const update = () => {
+    if (view.scrollLeft) view.scrollLeft = 0;
     const { scrollTop, scrollHeight, clientHeight } = view, extra = scrollHeight - clientHeight > 1;
     track.hidden = !extra; if (!extra) return;
     const room = track.clientHeight, size = Math.max(22, room * clientHeight / scrollHeight);

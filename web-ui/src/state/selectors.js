@@ -21,6 +21,10 @@ export function surfaceRefs(scene) {
   return [{ kind: 'floor', index: 0 }, { kind: 'ceiling', index: 0 }, ...scene.walls.map((_, index) => ({ kind: 'wall', index })),
     ...scene.floorZones.map((_, index) => ({ kind: 'floorZone', index })), ...scene.ceilingZones.map((_, index) => ({ kind: 'ceilingZone', index }))];
 }
+export function expandedRefs(scene, refs, includeGroups = true) {
+  const groups = includeGroups ? refs.map(r => surface(scene, r)?.editor?.group).filter(Boolean) : [];
+  return surfaceRefs(scene).filter(r => refs.some(s => s.kind === r.kind && s.index === r.index) || groups.includes(surface(scene, r)?.editor?.group));
+}
 export function layerKey(scene, ref) {
   const object = surface(scene, ref);
   if (ref.kind === 'wall') return 'walls';

@@ -127,6 +127,7 @@ public:
                               std::optional<double> aimElDeg = std::nullopt,
                               std::optional<double> aimRollDeg = std::nullopt);  // live: per-band directivity profile + amount + aim
     void setSourceSpread(int index, double radius);  // live: moves the channels of a multichannel source, no rebuild
+    void setSourceColor(int index, const std::string& color);  // live: editor colour tag only, no rebuild
     // Turns a source (or the listener, obj == kListener) so that its azimuth/yaw points at the world position (x, y).
     void orientObject(int obj, double x, double y);
     // Scales one wall segment about its midpoint.
@@ -325,6 +326,8 @@ private:
     verbp::OutputCfg outCfg;
     verbp::TailSettings tailSettings;
     verb::Engine::RecordedPassData savedRecordedPass;
+    std::vector<verb::BakedTable> savedBakeTables; // P4: BakeCache tables parsed from the state being loaded (dispLock)
+    std::atomic<bool> bakeTooLargeToStore{false}; // P4: the last state save exceeded the bake persistence size cap
     std::atomic<int> state{0};
     std::atomic<bool> inputMetersOn{true};
     std::atomic<bool> keepRouting{false};

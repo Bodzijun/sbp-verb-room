@@ -33,6 +33,7 @@ juce::var sourceJson(const verbp::SourceCfg& s) {
         if (s.aimElDeg != 0.0) r.getDynamicObject()->setProperty("aimElDeg", s.aimElDeg);
         if (s.aimRollDeg != 0.0) r.getDynamicObject()->setProperty("aimRollDeg", s.aimRollDeg);
     }
+    if (!s.color.empty()) r.getDynamicObject()->setProperty("color", juce::String(s.color));
     if (s.directivity != nullptr) r.getDynamicObject()->setProperty("polarSlices", polarSlicesJson(*s.directivity, s.instrumentAmount, s.aimAzDeg, s.aimElDeg, s.aimRollDeg));
     return r;
 }

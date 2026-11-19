@@ -20,15 +20,35 @@ export function pointOnTargetPlane(screen, camera, width, height) {
   const b = basis(camera), units = camera.distance * 2 * Math.tan(camera.fov / 2) / height;
   return add(camera.target, add(mul(b.right, (screen[0] - width / 2) * units), mul(b.up, -(screen[1] - height / 2) * units)));
 }
-// In perspective, pose drags keep Z fixed: intersect the actual cursor ray with
-// that horizontal plane. Target-plane XY deltas drift away from the pointer.
-export function pointOnHeightPlane(screen, camera, width, height, z) {
+export function screenRay(screen, camera, width, height) {
   const b = basis(camera), scale = 2 * Math.tan(camera.fov / 2) / height;
   const origin = add(camera.target, mul(b.back, camera.distance));
   const direction = add(mul(b.back, -1), add(mul(b.right, (screen[0] - width / 2) * scale), mul(b.up, -(screen[1] - height / 2) * scale)));
+  return { origin, direction };
+}
+// In perspective, pose and horizontal surface drags keep hit Z fixed: intersect the
+// actual cursor ray with that horizontal plane. Target-plane XY deltas drift with parallax.
+export function pointOnHeightPlane(screen, camera, width, height, z) {
+  const { origin, direction } = screenRay(screen, camera, width, height);
   if (Math.abs(direction[2]) < 1e-5) return null;
   const distance = (z - origin[2]) / direction[2];
   return distance > 0 ? add(origin, mul(direction, distance)) : null;
+}
+export function hitHeightForSurface(screen, camera, width, height, obj, kind, sceneHeightM) {
+  if (!obj || camera.view !== '3d') return null;
+  if (kind === 'floorZone' || kind === 'ceilingZone') return obj.heightM ?? (kind === 'floorZone' ? 0 : sceneHeightM);
+  if (kind === 'wall') {
+    const topZ = (obj.zTopM ?? sceneHeightM) < 1e5 ? (obj.zTopM ?? sceneHeightM) : sceneHeightM;
+    const { origin, direction } = screenRay(screen, camera, width, height);
+    const nx = -(obj.b[1] - obj.a[1]), ny = obj.b[0] - obj.a[0];
+    const denom = direction[0] * nx + direction[1] * ny;
+    if (Math.abs(denom) > 1e-6) {
+      const t = ((obj.a[0] - origin[0]) * nx + (obj.a[1] - origin[1]) * ny) / denom;
+      if (t > 0) return clamp(origin[2] + direction[2] * t, obj.zBottomM, topZ);
+    }
+    return (obj.zBottomM + topZ) * 0.5;
+  }
+  return null;
 }
 export function pan(camera, from, to, width, height) {
   const a = pointOnTargetPlane(from, camera, width, height), b = pointOnTargetPlane(to, camera, width, height);

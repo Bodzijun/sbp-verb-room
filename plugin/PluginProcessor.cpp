@@ -515,13 +515,18 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 const HermSeg& sg = hs[o][k];
                 return h00 * sg.p0 + h10 * sg.m0 + h01 * sg.p1 + h11 * sg.m1;
             };
-            // E19: Look at is evaluated on the positions actually played in this segment (the same Hermite values the engine gets),
-            // so the pose handed to the engine is an exact function of its own positions and lies on a baked table's stations.
-            double mpx[verbp::kMaxSources + 1] = {}, mpy[verbp::kMaxSources + 1] = {};
-            for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) { mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); }
+            double mpx[verbp::kMaxSources + 1] = {}, mpy[verbp::kMaxSources + 1] = {}, mpz[verbp::kMaxSources + 1] = {}, mpt[verbp::kMaxSources + 1] = {};
+            for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) {
+                mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); mpz[o] = mix(o, 2);
+                if (pathActive[o] && !cp[o]->points.empty()) cp[o]->projectOnPath(mpx[o], mpy[o], mpz[o], &mpt[o]);
+            }
             auto azOf = [&](int o) -> double {
                 const verbp::CompiledPath& cpa = *cp[o];
-                if (!cpa.lookAt) return mix(o, 3);
+                if (!cpa.lookAt) {
+                    if (cpa.orient && pathActive[o])
+                        return verbp::orientedAzimuth(verbp::OrientMode::AlongPath, manualAz[o], mpt[o], false, 0.0, cpa.orientOffset);
+                    return mix(o, 3);
+                }
                 double tx = 0, ty = 0, look = 0; bool ok = false;
                 if (cpa.lookPoint) { tx = cpa.lookPos[0]; ty = cpa.lookPos[1]; ok = true; }
                 else { const int tt = cpa.lookTarget; if (tt >= 0 && tt != o && tt <= verbp::kListener && (tt < NS || tt == verbp::kListener)) { tx = mpx[tt]; ty = mpy[tt]; ok = true; } }
@@ -529,7 +534,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 return verbp::orientedAzimuth(verbp::OrientMode::LookAt, manualAz[o], 0.0, ok, look, cpa.orientOffset);
             };
             for (int s = 0; s < NS; ++s) {
-                const double az = azOf(s), x = mix(s, 0), y = mix(s, 1), z = mix(s, 2);
+                const double az = azOf(s), x = mpx[s], y = mpy[s], z = mpz[s];
                 const double ca = std::cos(az * verb::kPi / 180.0), sa = std::sin(az * verb::kPi / 180.0);
                 for (int p = b.pointStart[(size_t)s]; p < b.pointStart[(size_t)s] + b.pointCount[(size_t)s]; ++p) {
                     // live offset in the source's frame (x forward along the azimuth, y left, z up)
@@ -538,7 +543,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                     e.setSourceAzimuth(p, az);
                 }
             }
-            e.setListener(mix(verbp::kListener, 0)*sizeScale, mix(verbp::kListener, 1)*sizeScale, mix(verbp::kListener, 2)*sizeScale, azOf(verbp::kListener));
+            e.setListener(mpx[verbp::kListener]*sizeScale, mpy[verbp::kListener]*sizeScale, mpz[verbp::kListener]*sizeScale, azOf(verbp::kListener));
             for (int p = 0; p < P; ++p) ip[p] = b.in[(size_t)p].data() + off;
             for (int r = 0; r < R; ++r) op[r] = b.out[(size_t)r].data() + off;
             e.acknowledgePoseScale(appliedSize/b.constructionSize);
@@ -623,6 +628,10 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
         for (const auto& c : srcCfg) {
             juce::ValueTree v("Src");
             v.setProperty("name", juce::String(c.name), nullptr);
+            if (!c.color.empty()) {
+                const auto normColor = verbp::normalizeSourceColor(c.color);
+                if (!normColor.empty()) v.setProperty("color", juce::String(normColor), nullptr);
+            }
             v.setProperty("format", c.format, nullptr);
             v.setProperty("channels", c.channels, nullptr);
             v.setProperty("firstIn", c.firstIn, nullptr);
@@ -720,6 +729,37 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
             st.appendChild(rpTree, nullptr);
         }
     }
+    // P4: persist the baked tables with the project/preset (optional child; old states simply lack it).
+    // The tables carry a content signature; on load they are only installed when it still matches the scene.
+    st.removeChild(st.getChildWithName("BakeCache"), nullptr);
+    {
+        std::shared_ptr<verb::Engine> eng;
+        { juce::SpinLock::ScopedLockType el(engineLock); if (bundle) eng = bundle->engine; }
+        std::vector<verb::BakedTable> tables;
+        bool pending = false;
+        { juce::ScopedLock l(dispLock); pending = roomLoadPendingLocked(); if (pending) tables = savedBakeTables; }
+        bool baked = false;
+        if (!pending && eng) {
+            const auto bs = eng->bakeStats();
+            baked = bs.state == verb::Engine::BakeState::Baked || bs.state == verb::Engine::BakeState::Approximate;
+            if (baked) for (const auto& t : eng->bakedTablesSnapshot()) if (t) tables.push_back(*t);
+        }
+        if (!tables.empty()) {
+            const auto bin = verb::bakeSerializeTables(tables);
+            if (bin.size() <= verb::kBakePersistMaxBytes) {
+                bakeTooLargeToStore = false;
+                juce::MemoryBlock raw(bin.data(), bin.size());
+                juce::ValueTree bc("BakeCache");
+                bc.setProperty("v", (int)verb::kBakePersistVersion, nullptr);
+                bc.setProperty("data", raw.toBase64Encoding(), nullptr);
+                st.appendChild(bc, nullptr);
+            } else {
+                bakeTooLargeToStore = true;  // keep today's behaviour; the status text says so
+            }
+        } else if (baked || pending) {
+            bakeTooLargeToStore = false;
+        }
+    }
     if (auto xml = st.createXml()) copyXmlToBinary(*xml, dest);
 }
 
@@ -749,17 +789,31 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
             }
         }
     }
+    // P4: optional baked-table child. Absent (old projects), truncated, corrupt or for another format version
+    // => ignored, the scene loads exactly as before and reports notBaked. Never throws, never blocks the load.
+    std::vector<verb::BakedTable> loadedTables;
+    if (auto bc = st.getChildWithName("BakeCache"); bc.isValid()) {
+        const juce::String b64 = bc.getProperty("data", "").toString();
+        if ((int)bc.getProperty("v", 0) == (int)verb::kBakePersistVersion && b64.isNotEmpty()
+            && b64.length() <= (int)(verb::kBakePersistMaxBytes * 2)) {
+            juce::MemoryBlock raw;
+            if (raw.fromBase64Encoding(b64) && raw.getSize() <= verb::kBakePersistMaxBytes)
+                verb::bakeDeserializeTables((const uint8_t*)raw.getData(), raw.getSize(), loadedTables);
+        }
+    }
     // Cancel pending constructor/default loads before restoring source data.
     { juce::ScopedLock l(reqLock); hasReq=false; defaultsOwed=false; reqSerial.fetch_add(1); }
     {
         juce::ScopedLock l(dispLock);
         savedRecordedPass = std::move(loadedPass);
+        savedBakeTables = std::move(loadedTables);
         srcCfg.clear();
         auto srcs = st.getChildWithName("Sources");
         for (int i = 0; i < srcs.getNumChildren() && i < verbp::kMaxSources; ++i) {
             auto v = srcs.getChild(i);
             verbp::SourceCfg c;
             c.name = v.getProperty("name", "Source").toString().toStdString();
+            c.color = verbp::normalizeSourceColor(v.getProperty("color", "").toString().toStdString());
             c.format = std::min(std::max((int)v.getProperty("format", 0), 0), (int)verbp::sourceFormats().size() - 1);
             c.channels = std::min(std::max((int)v.getProperty("channels", 1), 1), 16);
             c.firstIn = std::min(std::max((int)v.getProperty("firstIn", 0), 0), verbp::kMaxInputChannels - 1);
@@ -1063,6 +1117,7 @@ void VerbProcessor::setSources(const std::vector<verbp::SourceCfg>& cfg) {
         juce::ScopedLock l(dispLock);
         srcCfg = cfg;
         for (auto& c : srcCfg) {
+            c.color = verbp::normalizeSourceColor(c.color);
             c.format = std::min(std::max(c.format, 0), (int)verbp::sourceFormats().size() - 1);
             c.channels = std::min(std::max(c.channels, 1), 16);
             c.firstIn = std::min(std::max(c.firstIn, 0), verbp::kMaxInputChannels - 1);
@@ -1199,6 +1254,21 @@ void VerbProcessor::setSourceSpread(int index, double radius) {
             ptOff[p][0] = (float)(radius * std::cos(a));
             ptOff[p][1] = (float)(radius * std::sin(a));
         }
+}
+
+void VerbProcessor::setSourceColor(int index, const std::string& color) {
+    const std::string norm = verbp::normalizeSourceColor(color);
+    bool changed = false;
+    {
+        juce::ScopedLock l(dispLock);
+        if (index < 0 || index >= (int)srcCfg.size()) return;
+        if (srcCfg[(size_t)index].color != norm) {
+            srcCfg[(size_t)index].color = norm;
+            ++structRevision;
+            changed = true;
+        }
+    }
+    if (changed) updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
 }
 
 void VerbProcessor::orientObject(int obj, double x, double y) {
@@ -1666,6 +1736,13 @@ void VerbProcessor::publishWebDiagnostics() {
     bool anyTouched=recordedActive&&webRecordedTouched;
     for(int o:activeObjects)anyTouched|=webBakeTouched[(size_t)o];
     const char* bakeStateText="notBaked";juce::String reason;
+    // P4: ASCII restore hints, shown only while a restored table is actually valid (same text for web and classic).
+    juce::String bakeHint;
+    if(bake.state==verb::Engine::BakeState::Baked||bake.state==verb::Engine::BakeState::Approximate){
+        if(bake.restored==1)bakeHint="restored from the saved project";
+        else if(bake.restored==2)bakeHint="restored after undo";
+        if(bakeTooLargeToStore.load())bakeHint+=juce::String(bakeHint.isEmpty()?"":"; ")+"bake not stored: too large";
+    }
     // ASCII-only object name for web diagnostics: a name with non-ASCII or control characters falls back to "Source N".
     auto objName=[&](int o)->juce::String{
         if(o==verbp::kListener)return "Listener";
@@ -1678,8 +1755,8 @@ void VerbProcessor::publishWebDiagnostics() {
     };
     switch(bake.state){
         case verb::Engine::BakeState::Baking:bakeStateText="baking";reason=bake.waitReason==14?"Waiting for poses to settle":bake.waitReason?"Waiting for settled rebuild":(bake.percent<45?"Tracing stations":"Refining path")+juce::String(" - ")+juce::String(bake.done)+"/"+juce::String(bake.total)+" stations";break;
-        case verb::Engine::BakeState::Baked:bakeStateText="baked";break;
-        case verb::Engine::BakeState::Approximate:bakeStateText="approximate";reason=juce::String(bake.discontinuities)+" intervals above tolerance";break;
+        case verb::Engine::BakeState::Baked:bakeStateText="baked";reason=bakeHint;break;
+        case verb::Engine::BakeState::Approximate:bakeStateText="approximate";reason=juce::String(bake.discontinuities)+" intervals above tolerance";if(bakeHint.isNotEmpty())reason+="; "+bakeHint;break;
         case verb::Engine::BakeState::Outdated:bakeStateText=anyTouched?"outdated":"notBaked";reason=anyTouched?(recordedActive?"Room, quality or recorded pass changed - bake again":"Room, quality or path changed - bake again"):"";break;
         case verb::Engine::BakeState::Cancelled:bakeStateText="cancelled";reason="Cancelled";break;
         case verb::Engine::BakeState::Blocked:bakeStateText="blocked";
@@ -1720,8 +1797,8 @@ void VerbProcessor::publishWebDiagnostics() {
             pPercent=grpStat->percent;pDone=grpStat->done;pTotal=grpStat->total;pReason="";
             switch(grpStat->state){
                 case verb::Engine::BakeState::Baking:pState="baking";pReason=bake.waitReason==14?"Waiting for poses to settle":bake.waitReason?"Waiting for settled rebuild":(pPercent<45?"Tracing stations":"Refining path")+juce::String(" - ")+juce::String(pDone)+"/"+juce::String(pTotal)+" stations";break;
-                case verb::Engine::BakeState::Baked:pState="baked";break;
-                case verb::Engine::BakeState::Approximate:pState="approximate";pReason=juce::String(grpStat->discontinuities)+" intervals above tolerance";break;
+                case verb::Engine::BakeState::Baked:pState="baked";pReason=bakeHint;break;
+                case verb::Engine::BakeState::Approximate:pState="approximate";pReason=juce::String(grpStat->discontinuities)+" intervals above tolerance";if(bakeHint.isNotEmpty())pReason+="; "+bakeHint;break;
                 case verb::Engine::BakeState::Outdated:pState=webBakeTouched[(size_t)o]?"outdated":"notBaked";pReason=webBakeTouched[(size_t)o]?"Room, quality or path changed - bake again":"";break;
                 case verb::Engine::BakeState::NotBaked:default:pState="notBaked";break;
             }
@@ -2014,6 +2091,17 @@ void VerbProcessor::run() {
                 ++loadSerial;
             }
             publishWebDiagnostics();
+            // P4: install the tables saved with this state AFTER the scene/paths are applied. The engine
+            // verifies every content signature against the freshly rebuilt world; a mismatch leaves notBaked.
+            {
+                std::vector<verb::BakedTable> tables;
+                { juce::ScopedLock l(dispLock); if (r.gen == roomGen) tables = std::move(savedBakeTables); savedBakeTables.clear(); }
+                if (!tables.empty()) {
+                    std::shared_ptr<verb::Engine> eng;
+                    { juce::SpinLock::ScopedLockType el(engineLock); if (bundle) eng = bundle->engine; }
+                    if (eng && eng->installBakedTables(tables)) publishWebDiagnostics();  // status reflects the restore before ready
+                }
+            }
             nb.reset();  // old engine destroyed here, off the audio thread
             builtSr = r.sr;
             numPts = (int)points.size();

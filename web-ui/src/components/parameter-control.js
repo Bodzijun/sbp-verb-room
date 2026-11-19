@@ -62,7 +62,7 @@ export function parameterControl(store, bridge, id, { knob = false, label } = {}
   });
   for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) control.addEventListener(event, end);
   control.addEventListener('dblclick', () => single(d.default));
-  control.addEventListener('wheel', e => { if (disabled()) return; e.preventDefault(); single(fromNormalised(d, toNormalised(d, current()) - Math.sign(e.deltaY) * (e.shiftKey ? 0.001 : 0.01))); }, { passive: false });
+  control.addEventListener('wheel', e => { if (disabled() || !(document.documentElement.dataset.wheelValues === 'on' || e.altKey)) return; e.preventDefault(); single(fromNormalised(d, toNormalised(d, current()) - Math.sign(e.deltaY) * (e.shiftKey ? 0.001 : 0.01))); }, { passive: false });
   control.addEventListener('keydown', e => {
     if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
       e.preventDefault(); const dir = ['ArrowRight', 'ArrowUp'].includes(e.key) ? 1 : -1;

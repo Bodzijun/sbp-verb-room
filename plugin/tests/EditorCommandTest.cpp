@@ -370,6 +370,7 @@ static void testEveryCommandApplyUndoRedo(Rig& r) {
         {"room.setDiffraction", R"({"op":"room.setDiffraction","enabled":false})"},
         {"source.add", R"({"op":"source.add"})"},
         {"source.setConfig (stereo)", R"({"op":"source.setConfig","index":0,"format":1,"name":"Stereo pair"})"},
+        {"source.setConfig (color)", R"({"op":"source.setConfig","index":0,"color":"#e04040"})"},
         {"source.setPattern", R"({"op":"source.setPattern","index":1,"pattern":0.5})"},
         {"source.setSpread", R"({"op":"source.setSpread","index":0,"spreadM":1.25})"},
         {"source.setConfig (free points)", R"({"op":"source.setConfig","index":0,"freePoints":true})"},
@@ -841,6 +842,55 @@ static void testSchemasAndFixtures(Rig& r) {
     (void)r;
 }
 
+
+static void testC1SourceColors(Rig& r) {
+    std::printf("C1: source.setConfig color validation, normalization, undo/redo, source.remove\n");
+    check(r.load(boxText(4, 3, 3)), "C1 command test room loads");
+    auto& s = r.session();
+    const uint64_t load0 = r.p.getLoadSerial();
+
+    auto ok1 = r.send(R"({"op":"source.setConfig","index":0,"color":"#AA22CC"})");
+    check(ok1.ok && r.p.getSources()[0].color == "#aa22cc" && s.undoLabel() == "Source colour",
+          "C1 uppercase hex normalized to lowercase with Source colour undo label");
+    check(r.p.getLoadSerial() == load0, "C1 color command does not trigger engine rebuild");
+
+    // Rapid second color edit without advancing clock must NOT coalesce (one undo step per change)
+    auto ok2 = r.send(R"({"op":"source.setConfig","index":0,"color":"#3aa76d"})", nullptr, nullptr, nullptr, false);
+    check(ok2.ok && r.p.getSources()[0].color == "#3aa76d" && s.undoDepth() == 2,
+          "C1 consecutive color picks create separate undo steps");
+    check(s.undo().ok && r.p.getSources()[0].color == "#aa22cc", "C1 undo #1 restores previous color");
+    check(s.undo().ok && r.p.getSources()[0].color.empty(), "C1 undo #2 restores auto (empty)");
+    check(s.redo().ok && r.p.getSources()[0].color == "#aa22cc", "C1 redo restores color");
+
+    auto clrNull = r.send(R"({"op":"source.setConfig","index":0,"color":null})");
+    check(clrNull.ok && r.p.getSources()[0].color.empty(), "C1 color:null resets to auto");
+    auto ok3 = r.send(R"({"op":"source.setConfig","index":0,"color":"#1188ff"})");
+    auto clrEmpty = r.send(R"({"op":"source.setConfig","index":0,"color":""})");
+    check(ok3.ok && clrEmpty.ok && r.p.getSources()[0].color.empty(), "C1 color:\"\" resets to auto");
+
+    r.validateCommands = false;
+    const uint64_t revBeforeBad = r.p.getRevision();
+    for (const char* badJson : {
+             R"({"op":"source.setConfig","index":0,"color":"red"})",
+             R"({"op":"source.setConfig","index":0,"color":"#123"})",
+             R"({"op":"source.setConfig","index":0,"color":"#12345g"})",
+             R"({"op":"source.setConfig","index":0,"color":123})"
+         }) {
+        auto bad = r.send(badJson);
+        check(!bad.ok && bad.code == "invalid", std::string("C1 invalid color rejected: ") + badJson);
+    }
+    check(r.p.getRevision() == revBeforeBad, "C1 invalid color does not bump revision");
+    r.validateCommands = true;
+
+    check(r.send(R"({"op":"source.setConfig","index":0,"color":"#e04040"})").ok, "C1 color source 0");
+    check(r.send(R"({"op":"source.setConfig","index":1,"color":"#3a75c4"})").ok, "C1 color source 1");
+    check(r.send(R"({"op":"source.remove","index":0})").ok, "C1 remove source 0");
+    check(r.p.getSources().size() == 1 && r.p.getSources()[0].color == "#3a75c4", "C1 source.remove keeps color on remaining source");
+    check(s.undo().ok && r.p.getSources().size() == 2 && r.p.getSources()[0].color == "#e04040" && r.p.getSources()[1].color == "#3a75c4",
+          "C1 undo of source.remove restores both sources and their colours");
+    r.reset("C1");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     juce::ScopedJuceInitialiser_GUI init;
@@ -866,6 +916,7 @@ int main() {
         timed("B7", testHistoryBounds);
         timed("B8", testEditorLifetimeAndLoads);
         timed("B9", testSchemasAndFixtures);
+        timed("C1", testC1SourceColors);
     } catch (const std::exception& e) { std::printf("  [FAIL] unexpected exception: %s\n", e.what()); ++fails; }
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("\neditor_commands: %d PASS, %d FAIL, %.1f s\n", passes, fails, sec);

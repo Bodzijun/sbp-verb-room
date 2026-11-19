@@ -101,4 +101,6 @@ current web features (macOS 11 needs the latest Safari/WebKit security update, 1
   *Compatibility settings > Ignore plug-in reported tail size*.
 - Geometry is 2.5D (vertical walls, horizontal floors, ceilings, plates); there are no low-frequency room modes;
   the tail is a statistical estimate. Large scenes are heavy on the CPU.
+- Very large halls with Ambisonics 3rd order (16 channels) can overload the CPU in Creative mode even with neutral
+  macros; use Physical mode for such sessions (Physical played the orchestra preset without dropouts).
 - Linux: classic interface only.

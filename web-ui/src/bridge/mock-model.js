@@ -1,6 +1,7 @@
 import { clone } from './contract.js';
 import { budget, channels, surface, surfaceRefs, layerKey } from '../state/selectors.js';
 import { layoutOffset } from '../viewport/transducers.js';
+import { normalizeSourceColor } from '../viewport/colour.js';
 export function reject(code, message) { throw Object.assign(new Error(message), { code }); }
 export const tag = () => ({ name: '', group: '', hidden: false, locked: false });
 const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -164,6 +165,12 @@ export function applyMutation(state, command, original = state, presetMaterials 
     if (op === 'source.setConfig') {
       const freeze = command.freePoints === true && !source.freePoints;
       ['name', 'format', 'channels', 'firstIn', 'sum', 'freePoints'].forEach(k => { if (k in command) source[k] = command[k]; }); source.channels = channels(source);
+      if ('color' in command) {
+        const norm = normalizeSourceColor(command.color);
+        if (norm === null) reject('invalid', 'color must be empty, null, or #rrggbb');
+        if (norm === '') delete source.color;
+        else source.color = norm;
+      }
       if (freeze) source.offsetsM = Array.from({ length: channels(source) }, (_, channel) => layoutOffset(source, channel));
     }
     else if (op === 'source.setPattern') source.pattern = command.pattern;

@@ -300,6 +300,31 @@ struct CompiledPath {
         const double mapped=hasTiming?evaluateTimeMap(u):std::clamp(u,0.0,1.0);
         return evaluateArcFraction(mapped,yaw);
     }
+    bool projectOnPath(double& x,double& y,double& z,double* yawOut=nullptr) const noexcept {
+        if(points.size()<2||lengths.size()!=points.size()||lengths.back()<=1e-12)return false;
+        double best=1e30,fBest=0;size_t jBest=0;
+        const double p[3]={x,y,z};
+        for(size_t j=1;j<points.size();++j){
+            double dot=0,span=0;
+            for(int k=0;k<3;++k){const double d=points[j][(size_t)k]-points[j-1][(size_t)k];dot+=(p[k]-points[j-1][(size_t)k])*d;span+=d*d;}
+            const double f=span>0?std::clamp(dot/span,0.,1.):0;
+            double e=0;
+            for(int k=0;k<3;++k){const double d=p[k]-points[j-1][(size_t)k]-f*(points[j][(size_t)k]-points[j-1][(size_t)k]);e+=d*d;}
+            if(e<best){best=e;jBest=j;fBest=f;}
+        }
+        if(!jBest)return false;
+        const auto q=pathMix(points[jBest-1],points[jBest],fBest);
+        x=q[0];y=q[1];z=q[2];
+        if(yawOut){
+            size_t ti=jBest;
+            if(lengths[ti]-lengths[ti-1]<=1e-12){
+                while(ti>1&&lengths[ti]-lengths[ti-1]<=1e-12)--ti;
+                if(lengths[ti]-lengths[ti-1]<=1e-12){ti=jBest;while(ti+1<points.size()&&lengths[ti]-lengths[ti-1]<=1e-12)++ti;}
+            }
+            if(lengths[ti]-lengths[ti-1]>1e-12)*yawOut=std::atan2(points[ti][1]-points[ti-1][1],points[ti][0]-points[ti-1][0])*180.0/3.14159265358979323846;
+        }
+        return true;
+    }
 };
 // ---- E19 orientation: pure functions of current positions (no history, so a bake stays valid) ----
 template <class P> inline OrientMode orientModeOf(const P& p) noexcept {

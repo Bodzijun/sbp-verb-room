@@ -4,7 +4,11 @@ import { compilePath, evaluateTimeMap, pathGroupMembers, pathId, pointTimeBounds
 export { MIN_WINDOW_GAP, PATH_EASINGS };
 export const SNAP_STEP = 0.5, FINE_STEP = 0.05, MIN_VIEW = 5;
 export const objectLabel = (state, o) => o === 32 ? 'Listener' : (state.document.sources[o]?.name || `Source ${o + 1}`);
-export const objectColour = o => o === 32 ? 'var(--timeline-listener, #8ea6c6)' : `var(--strip-${o % 6}, #d9a05b)`;
+export const objectColour = (o, state) => {
+  if (o === 32) return 'var(--timeline-listener, #8ea6c6)';
+  const c = state?.document?.sources?.[o]?.color;
+  return /^#[0-9a-f]{6}$/i.test(c || '') ? c.toLowerCase() : `var(--strip-${o % 6}, #d9a05b)`;
+};
 export const objectRef = o => o === 32 ? { kind: 'listener', index: 0 } : { kind: 'source', index: o };
 export const isMovingPath = p => (p?.points?.length ?? 0) >= 2;
 const num = (v, d) => Number.isFinite(v) ? v : d;
@@ -50,7 +54,7 @@ export function pathRow(state, o) {
   }
   const driver = pathGroupMembers(state.document.paths, p.group ?? -1).length >= 2 ? driverOf(state.document.paths, o) : o;
   return {
-    object: o, label: objectLabel(state, o), colour: objectColour(o), enabled: !!p.enabled, closed: !!p.closed, laps: p.closed ? Math.max(1, Math.round(p.laps ?? 1)) : 1,
+    object: o, label: objectLabel(state, o), colour: objectColour(o, state), enabled: !!p.enabled, closed: !!p.closed, laps: p.closed ? Math.max(1, Math.round(p.laps ?? 1)) : 1,
     start, end, group: Number.isInteger(p.group) ? p.group : -1, driver, position: clamp(num(state.parameters?.values?.[pathId(driver)], 0), 0, 1) * 100,
     keys, autos, holds, lapMarks: lapBoundaries(p), points: n
   };

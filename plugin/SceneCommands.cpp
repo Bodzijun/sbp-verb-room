@@ -26,7 +26,7 @@ bool eqSurf(const SurfaceSnap& a, const SurfaceSnap& b, bool ignoreTag) {
     return true;
 }
 bool eqSource(const SourceCfg& a, const SourceCfg& b) {
-    return a.name == b.name && a.format == b.format && a.channels == b.channels && a.firstIn == b.firstIn && a.sum == b.sum && a.spread == b.spread
+    return a.name == b.name && a.color == b.color && a.format == b.format && a.channels == b.channels && a.firstIn == b.firstIn && a.sum == b.sum && a.spread == b.spread
            && a.pattern == b.pattern && a.instrument == b.instrument && a.instrumentAmount == b.instrumentAmount
            && a.aimAzDeg == b.aimAzDeg && a.aimElDeg == b.aimElDeg && a.aimRollDeg == b.aimRollDeg
            && a.customDirectivityData == b.customDirectivityData && a.customDirectivityName == b.customDirectivityName
@@ -44,7 +44,7 @@ size_t surfBytes(const SurfaceSnap& s) {
            + s.wall.editor.group.capacity() + s.zone.poly.capacity() * sizeof(std::pair<double, double>) + s.zone.editor.name.capacity() + s.zone.editor.group.capacity();
 }
 size_t sourceBytes(const SourceCfg& c) {
-    return sizeof(SourceCfg) + c.name.capacity() + c.instrument.capacity() + c.customDirectivityData.capacity()
+    return sizeof(SourceCfg) + c.name.capacity() + c.color.capacity() + c.instrument.capacity() + c.customDirectivityData.capacity()
            + c.customDirectivityName.capacity() + c.customDirectivityPath.capacity() + c.directivityWarning.capacity()
            + (c.ox.capacity() + c.oy.capacity() + c.oz.capacity()) * sizeof(float);
 }
@@ -182,6 +182,7 @@ void applySources(VerbProcessor& proc, const std::vector<SourceCfg>& cur, const 
                && cur[i].oz.size() == tgt[i].oz.size();
     if (!live) { proc.setSources(tgt); return; }  // a structural change: the engine is rebuilt in the background
     for (size_t i = 0; i < cur.size(); ++i) {
+        if (cur[i].color != tgt[i].color) proc.setSourceColor((int)i, tgt[i].color);
         if (cur[i].pattern != tgt[i].pattern) proc.setSourcePattern((int)i, tgt[i].pattern);
         if (cur[i].instrument != tgt[i].instrument || cur[i].instrumentAmount != tgt[i].instrumentAmount
             || cur[i].aimAzDeg != tgt[i].aimAzDeg || cur[i].aimElDeg != tgt[i].aimElDeg || cur[i].aimRollDeg != tgt[i].aimRollDeg
@@ -1132,12 +1133,24 @@ Fail opSourceSetConfig(const juce::var& p, Model& m, const Ctx&) {
     auto channels = a.optInt("channels", 1, 16);
     auto firstIn = a.optInt("firstIn", 0, 63);
     auto sum = a.optBool("sum"), freePoints = a.optBool("freePoints");
-    if (!a.bad() && !name && !format && !channels && !firstIn && !sum && !freePoints) a.err("invalid", "give at least one source field", "index");
+    std::optional<std::string> color;
+    if (a.has("color")) {
+        if (a.isNull("color")) {
+            color = std::string();
+        } else if (auto cs = a.optStr("color", 32)) {
+            if (cs->empty()) color = std::string();
+            else if (isValidSourceColorHex(*cs)) color = normalizeSourceColor(*cs);
+            else a.err("invalid", "color must be empty, null, or #rrggbb", "color");
+        }
+    }
+    if (!a.bad() && !name && !format && !channels && !firstIn && !sum && !freePoints && !color)
+        a.err("invalid", "give at least one source field", "index");
     if (a.bad()) return a.f;
     if (index >= (int)m.sources.size()) return {"invalid", "that source does not exist", "index"};
     SourceCfg c = m.sources[(size_t)index];
     const bool wasFree = c.freePoints;
     if (name) c.name = cleanText(*name);
+    if (color) c.color = *color;
     if (format) c.format = *format;
     const int fixedCh = sourceFormats()[(size_t)c.format].channels;  // 0 = the ring: free channel count
     if (fixedCh > 0) {
@@ -1454,6 +1467,13 @@ std::string labelCreate(const juce::var& p) {
 std::string labelScale(const juce::var& p) { return "Scale room x" + juce::String((double)p.getProperty("factor", 1.0), 2).toStdString(); }
 std::string labelOpening(const juce::var& p) { return (bool)p.getProperty("open", false) ? "Open ceiling" : "Close ceiling"; }
 std::string labelRemoveSource(const juce::var& p) { return "Remove source " + std::to_string((int)p.getProperty("index", 0) + 1); }
+std::string labelSourceConfig(const juce::var& p) {
+    if (p.hasProperty("color") && !p.hasProperty("name") && !p.hasProperty("format") && !p.hasProperty("channels")
+        && !p.hasProperty("firstIn") && !p.hasProperty("sum") && !p.hasProperty("freePoints"))
+        return "Source colour";
+    return "Edit source";
+}
+std::string keySourceConfig(const juce::var& p) { return p.hasProperty("color") ? std::string() : keyIndex(p); }
 std::string labelMove(const juce::var& p) { return refsCount(p, "Move surface", "Move surfaces"); }
 std::string labelDelete(const juce::var& p) { return refsCount(p, "Delete surface", "Delete surfaces"); }
 std::string labelLink(const juce::var& p) { return refsCount(p, "Link surfaces", "Link surfaces"); }
@@ -1498,7 +1518,7 @@ static const Descriptor kDescriptors[] = {
     {"room.clear", true, [](const juce::var&) { return lbl("Clear room"); }, noKey, opClear},
     {"source.add", true, [](const juce::var&) { return lbl("Add source"); }, noKey, opSourceAdd},
     {"source.remove", true, labelRemoveSource, noKey, opSourceRemove},
-    {"source.setConfig", true, [](const juce::var&) { return lbl("Edit source"); }, keyIndex, opSourceSetConfig},
+    {"source.setConfig", true, labelSourceConfig, keySourceConfig, opSourceSetConfig},
     {"source.setPattern", true, [](const juce::var&) { return lbl("Source directivity"); }, keyIndex, opSourcePattern},
     {"source.setDirectivity", true, [](const juce::var&) { return lbl("Source directivity profile"); }, keyIndex, opSourceDirectivity},
     {"source.setInstrument", true, [](const juce::var&) { return lbl("Source directivity profile"); }, keyIndex, opSourceDirectivity},

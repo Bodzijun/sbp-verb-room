@@ -25,11 +25,15 @@ export function valueField(input, { get, min, max, step=0.001, display=String, e
   input.addEventListener('pointerup',()=>finish(false));
   input.addEventListener('pointercancel',()=>finish(true));
   input.addEventListener('lostpointercapture',()=>finish(true));
-  input.addEventListener('dblclick',()=>{ if(input.disabled) return; input.readOnly=false; input.value=edit(get()); input.focus(); input.select(); });
-  input.addEventListener('blur',()=>{ input.readOnly=true; paint(); });
-  input.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key==='Escape') { input.readOnly=true; requestAnimationFrame(paint); } });
+  const resetAncestors=()=>{for(let p=input.parentElement;p&&p!==document.documentElement;p=p.parentElement){if(p.scrollLeft)p.scrollLeft=0;}};
+  input.addEventListener('dblclick',()=>{ if(input.disabled) return; input.readOnly=false; input.value=edit(get()); input.focus({preventScroll:true}); input.select(); resetAncestors(); });
+  input.addEventListener('focus',resetAncestors);
+  input.addEventListener('input',resetAncestors);
+  input.addEventListener('change',resetAncestors);
+  input.addEventListener('blur',()=>{ input.readOnly=true; paint(); resetAncestors(); });
+  input.addEventListener('keydown',e=>{ resetAncestors(); if(e.key==='Enter'||e.key==='Escape') { input.readOnly=true; requestAnimationFrame(()=>{paint();resetAncestors();}); } });
   input.addEventListener('wheel',e=>{
-    if(input.disabled||!input.readOnly) return;
+    if(input.disabled||!input.readOnly||!(document.documentElement.dataset.wheelValues==='on'||e.altKey)) return;
     e.preventDefault(); start(); const v=snap(get()-Math.sign(e.deltaY)*step*(e.shiftKey?1:10)); preview(v); commit(v); end(); paint();
   },{passive:false});
   const cancel=()=>finish(true),visibility=()=>{if(document.hidden) cancel();};

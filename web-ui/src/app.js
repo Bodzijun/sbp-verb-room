@@ -21,6 +21,10 @@ import { historyButtons } from './components/history.js';
 import { roomOptions, roomCommand } from './state/catalogs.js';
 import { decorateIcon } from './components/icons.js';
 const app = document.getElementById('app'), notification = document.getElementById('notification');
+app.addEventListener('scroll', e => {
+  const el = e.target;
+  if (el instanceof HTMLElement && !/^(INPUT|TEXTAREA)$/.test(el.tagName) && el.scrollLeft) el.scrollLeft = 0;
+}, { capture: true, passive: true });
 const params = new URLSearchParams(location.search), requestedBridge = params.get('bridge') || 'mock';
 let bridge, store, viewport, rendered = null, pendingRender = false, closed = false, lastSelection = '';
 function errorMessage(error) {
@@ -45,6 +49,7 @@ function themePanel() {
     element('div',{className:'theme-presets'},['Amber', 'Ember red', 'Ice blue', 'Violet', 'Monochrome', 'Classic emerald', 'Custom'].map(name=>button(THEME_LABELS[name]||name,()=>set({viewportTheme:name,roles:{}}),{className:(preferences.viewportTheme||'Amber')===name?'active':'','aria-label':THEME_LABELS[name]||name,'aria-pressed':String((preferences.viewportTheme||'Amber')===name)}))),
     row('Energy palette', select('Energy palette', ['Classic', 'Inferno', 'Viridis', 'Ice', 'Grayscale'].map(v => [v, v]), preferences.energyPalette || 'Inferno', energyPalette => set({ energyPalette })))]);
   for (const [role, colour] of Object.entries(viewportPalette(preferences))) content.append(row(({background:'Canvas background',grid:'Grid',wall:'Walls',floor:'Floors / floor zones',ceiling:'Ceilings / ceiling zones',plate:'Plates (raised zones)',opening:'Openings (open sky)',selection:'Selection',reflection:'Reflection rays (hue steps per order)',direct:'Direct path',source:'Sources',listener:'Listener',clutter:'Clutter objects',labels:'Text labels',pathLine:'Path line',pathNode:'Path nodes',pathArrow:'Path arrows',pathMarker:'Path current marker',pathDimmed:'Path (unselected)'})[role], element('input', { type: 'color', value: colour, 'aria-label': `${role} colour`, onchange: e => set({ viewportTheme:'Custom', roles: { ...preferences.roles, [role]: e.target.value } }) })));
+  content.append(check('Mouse wheel changes values (Alt+wheel always does)', preferences.wheelChangesValues === true, wheelChangesValues => set({ wheelChangesValues })));
   content.append(check('Material-class colours instead of theme roles', !!preferences.classColours, classColours => set({ classColours })), button('Reset theme', () => set({ viewportTheme: 'Amber', accent: '#15d5a5', chromeTint: '', chromeTintAmount: 0, energyPalette: 'Inferno', roles: {}, materialColours: {}, classColours: false })), note(bridge.mode === 'mock' ? 'Preferences are owned by the bridge. Mock keeps them in memory only.' : 'Preferences are saved for this user.'), ...(bridge.mode === 'juce' ? [button('Diagnostics', async () => { try { const line=await bridge.readDiagnostics(); content.querySelector('[data-ui-diagnostics]')?.remove();const box=element('pre',{'data-ui-diagnostics':'true',className:'note',text:String(line)});box.style.whiteSpace='pre-wrap';content.append(box); } catch(e){errorMessage(e);} },{'data-action':'diagnostics'}), button('Classic UI', () => bridge.useNativeUi().catch(errorMessage), { 'data-action': 'classic-ui' })] : []));
   const heading = content.firstElementChild, rest = [...content.children].slice(1); content.replaceChildren(heading, scrollArea(rest, { className: 'theme-scroll' }));
   panel.append(content); panel.addEventListener('toggle', () => { store.view.themeOpen = panel.open; }); return panel;
@@ -163,6 +168,7 @@ function render() {
   {const tint=state.preferences?.chromeTint,amount=Math.max(0,Math.min(35,Number(state.preferences?.chromeTintAmount)||0));
     document.documentElement.style.setProperty('--chrome-tint', /^#[0-9a-f]{6}$/i.test(tint||'')&&amount?tint:'transparent');document.documentElement.style.setProperty('--chrome-tint-a', String(amount/100));}
   document.documentElement.dataset.theme = state.preferences?.viewportTheme || 'Amber';
+  document.documentElement.dataset.wheelValues = state.preferences?.wheelChangesValues === true ? 'on' : 'off';
   if (!viewport) { viewport = createViewport(store, bridge); viewport.addEventListener('snapstep', refreshSnapFace); viewport.addEventListener('interactionend', () => { if (pendingRender) { pendingRender = false; render(); } }); }
   const centre = element('div', { className: 'viewport-section' }, [toolbar(), store.view.page === 'edit' ? layerBar(ctx) : null, viewport]);
   viewport.querySelector(':scope > .analysis')?.remove();
@@ -207,6 +213,7 @@ function updateStatus() {
   const rebuilding=!!store.telemetry['status.load']?.rebuilding;
   document.body.classList.toggle('rebuilding',rebuilding);
   document.querySelector('.decay-graph')?.setAttribute('aria-busy',String(rebuilding));
+  syncRebuildingBanner(rebuilding);
   const cpu = store.telemetry['status.load']?.cpu;
   const cpuNode = app.querySelector('.cpu-warning');
   if (cpuNode) {
@@ -241,6 +248,43 @@ function updateStatus() {
     if (text && !statusInProgress(text)) footerStatus.timer = setTimeout(() => { footerStatus.expired = true; updateStatus(); }, FOOTER_STATUS_MS);
   }
   node.textContent = footerStatus.expired ? '' : text; node.title = text;
+}
+const REBUILD_APPEAR_MS = 150, REBUILD_MIN_VISIBLE_MS = 400;
+const rebuildBanner = { want: false, visible: false, shownAt: 0, appearTimer: null, hideTimer: null };
+function syncRebuildingBanner(want) {
+  rebuildBanner.want = !!want;
+  if (rebuildBanner.want) {
+    if (rebuildBanner.hideTimer) { clearTimeout(rebuildBanner.hideTimer); rebuildBanner.hideTimer = null; }
+    if (!rebuildBanner.visible && !rebuildBanner.appearTimer) {
+      rebuildBanner.appearTimer = setTimeout(() => {
+        rebuildBanner.appearTimer = null;
+        if (!closed && rebuildBanner.want) {
+          rebuildBanner.visible = true;
+          rebuildBanner.shownAt = Date.now();
+          viewport?.setRebuilding?.(true);
+        }
+      }, REBUILD_APPEAR_MS);
+    }
+  } else {
+    if (rebuildBanner.appearTimer) { clearTimeout(rebuildBanner.appearTimer); rebuildBanner.appearTimer = null; }
+    if (rebuildBanner.visible) {
+      const remaining = REBUILD_MIN_VISIBLE_MS - (Date.now() - rebuildBanner.shownAt);
+      if (remaining <= 0) {
+        if (rebuildBanner.hideTimer) { clearTimeout(rebuildBanner.hideTimer); rebuildBanner.hideTimer = null; }
+        rebuildBanner.visible = false;
+        viewport?.setRebuilding?.(false);
+      } else if (!rebuildBanner.hideTimer) {
+        rebuildBanner.hideTimer = setTimeout(() => {
+          rebuildBanner.hideTimer = null;
+          if (!closed && !rebuildBanner.want) {
+            rebuildBanner.visible = false;
+            viewport?.setRebuilding?.(false);
+          }
+        }, remaining);
+      }
+    }
+  }
+  viewport?.setRebuilding?.(rebuildBanner.visible);
 }
 const FOOTER_STATUS_MS = 6000, footerStatus = { text: null, timer: null, expired: false };
 export function statusInProgress(text) { return /(\.\.\.|…)\s*$/.test(text) || /\d+\s*\/\s*\d+/.test(text) || /^Error|failed/i.test(text); }
@@ -309,6 +353,7 @@ document.addEventListener('keydown', e => {
   }
   if(ctrl&&['z','y','a','x','c','v','d'].includes(key)){
     e.preventDefault();
+    if(key==='z'&&!e.shiftKey&&viewport?.undoDraft?.())return;
     if(key==='z'||key==='y')store.command({op:key==='y'||e.shiftKey?'history.redo':'history.undo'});
     if(key==='a'&&store.view.page==='edit'){const s=store.state.document.scene;store.setView({selection:surfaceRefs(s).filter(r=>!['floor','ceiling'].includes(r.kind)&&!surface(s,r).editor.hidden&&!surface(s,r).editor.locked&&!(store.state.document.editorFlags.layerModes?.[layerKey(s,r)]||0))});}
     return;
@@ -335,5 +380,5 @@ window.addEventListener('verb-bridge-error',e=>recoverUi(e.detail));
 window.addEventListener('error',e=>{errorMessage(e.error||e.message);recoverUi(e.error||e.message);});
 window.addEventListener('unhandledrejection',e=>{errorMessage(e.reason);recoverUi(e.reason);});
 window.addEventListener('verb-control-end', () => { if (pendingRender) { pendingRender = false; render(); } });
-window.addEventListener('pagehide', () => { closed = true; disposeControls(); viewport?.dispose(); store?.dispose(); bridge?.dispose(); });
+window.addEventListener('pagehide', () => { closed = true; clearTimeout(rebuildBanner.appearTimer); clearTimeout(rebuildBanner.hideTimer); clearTimeout(footerStatus.timer); disposeControls(); viewport?.dispose(); store?.dispose(); bridge?.dispose(); });
 init().catch(error => { app.replaceChildren(element('p', { className: 'loading', text: `Cannot open Verb Room: ${error.message}` })); errorMessage(error); });

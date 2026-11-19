@@ -823,6 +823,49 @@ int main() {
         check(ready(p), "E21 B: engine ready after the host input count returns to 2");
         check(publishedHost(2, 2), "E21 B: UI snapshot carries host.inputChannels=2 again");
     }
+    {   // U1: drawing a wall chain: one click = one undo step; the derived ceiling follows; redo restores the same scene
+        const auto wallsOf=[&]{return p.getDisplayScene().walls;};
+        const auto sig=[&]{const auto sc=p.getDisplayScene();std::string t;for(const auto& w:sc.walls)t+=std::to_string(w.ax)+","+std::to_string(w.ay)+","+std::to_string(w.bx)+","+std::to_string(w.by)+";";
+            for(const auto& z:verb::CeilingPlan(sc).polygons){t+="C";for(auto v:z.poly)t+=std::to_string(v.first)+","+std::to_string(v.second)+";";}return t;};
+        command(R"({"op":"room.clear"})");
+        const size_t w0=wallsOf().size();std::vector<std::string> states{sig()};
+        const double P[4][2]={{1,1},{7,1},{7,5},{1,5}};
+        for(int i=0;i<4;++i){const int j=(i+1)%4;
+            command("{\"op\":\"surface.create\",\"kind\":\"wall\",\"a\":["+std::to_string(P[i][0])+","+std::to_string(P[i][1])+"],\"b\":["+std::to_string(P[j][0])+","+std::to_string(P[j][1])+"],\"material\":0}");
+            states.push_back(sig());check(wallsOf().size()==w0+(size_t)i+1,"U1 wall click "+std::to_string(i+1)+" adds exactly one wall");}
+        const auto full=sig();
+        for(int i=3;i>=0;--i){command(R"({"op":"history.undo"})");check(sig()==states[(size_t)i]&&wallsOf().size()==w0+(size_t)i,"U1 undo "+std::to_string(4-i)+" returns to the state before that click (walls and derived ceiling)");}
+        for(int i=1;i<=4;++i){command(R"({"op":"history.redo"})");check(sig()==states[(size_t)i],"U1 redo "+std::to_string(i)+" restores the state after that click");}
+        check(sig()==full,"U1 after 4 undo + 4 redo the scene equals the drawn one");
+    }
+    {   // C1: source colours capability, snapshot omission when empty, normalization, live update, invalid rejection, undo/redo
+        const auto caps = prop(prop(bridge.snapshot(), "payload"), "capabilities");
+        const auto cs = prop(prop(caps, "features"), "colours.source");
+        check((bool)prop(cs, "available") && prop(cs, "status").toString() == "available", "C1 colours.source capability is available");
+        const auto doc0 = prop(prop(bridge.snapshot(), "payload"), "document");
+        const auto srcs0 = prop(doc0, "sources");
+        check(srcs0.isArray() && srcs0.size() >= 1 && !srcs0[0].getDynamicObject()->hasProperty("color"),
+              "C1 default snapshot omits color field when automatic");
+        const uint64_t load0 = p.getLoadSerial();
+        const auto setCol = command(R"({"op":"source.setConfig","index":0,"color":"#D94A38"})");
+        check(prop((*setCol.getArray())[0], "kind").toString() == "ack", "C1 bridge accepts source.setConfig color");
+        check(p.getLoadSerial() == load0, "C1 bridge color change keeps loadSerial unchanged (no rebuild)");
+        const auto srcs1 = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "sources");
+        check(srcs1[0].getProperty("color", {}).toString() == "#d94a38", "C1 snapshot carries normalized lowercase #rrggbb");
+        const auto badMsg = obj({{"schemaVersion", 1}, {"sessionId", "test-live"}, {"kind", "command"}, {"requestId", "test-bad-color"},
+                                 {"baseRevision", decimal(p.getRevision())}, {"payload", obj({{"op", "source.setConfig"}, {"index", 0}, {"color", "red"}})}});
+        const auto bad = bridge.handle(badMsg);
+        check(bad.isArray() && !bad.getArray()->isEmpty() && prop((*bad.getArray())[0], "kind").toString() == "error", "C1 bridge rejects invalid color");
+        command(R"({"op":"history.undo"})");
+        const auto srcsUndo = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "sources");
+        check(!srcsUndo[0].getDynamicObject()->hasProperty("color"), "C1 bridge undo removes color and omits key again");
+        command(R"({"op":"history.redo"})");
+        const auto srcsRedo = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "sources");
+        check(srcsRedo[0].getProperty("color", {}).toString() == "#d94a38", "C1 bridge redo restores #d94a38");
+        command(R"({"op":"source.setConfig","index":0,"color":null})");
+        const auto srcsCleared = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "sources");
+        check(!srcsCleared[0].getDynamicObject()->hasProperty("color"), "C1 bridge color:null restores automatic");
+    }
     std::printf("FINAL web_bridge: %d pass, %d fail\n", passes, fails);
     return fails ? 1 : 0;
 }

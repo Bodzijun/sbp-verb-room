@@ -3,12 +3,14 @@ import { element, button, select, check, row, note, unavailable, scrollArea } fr
 import { tabs } from '../components/tabs.js';
 import { parameterToggle, outputParts, makeupControls, sourceParts, listenerParts, sceneFacts, parameterSwitch, heading } from '../components/inspector.js';
 import { decayPanel } from '../components/decay.js';
-import { outputMeters, sourceMeters } from '../components/meters.js';
+import { outputMeters, sourceMeters, METER_MODES, getMeterMode, setMeterMode } from '../components/meters.js';
 import { slider, numericField } from '../components/slider.js';
 import { FORMATS, LAYOUTS, MICS, channels, budget } from '../state/selectors.js';
 import { targetKnob } from '../components/command-knob.js';
 import { viewportState } from '../viewport/effective-scene.js';
 import { computeRoomMetrics } from '../viewport/room-metrics.js';
+import { isValidSourceColorHex, sourceStripColour } from '../viewport/colour.js';
+import { openSourceColorPopover } from '../components/source-color-picker.js';
 // The main page only edits sources and the listener; surfaces belong to Edit room.
 export const mainSelectable = ref => ref && ['source', 'listener'].includes(ref.kind);
 export function macroRow(ctx) {
@@ -36,8 +38,12 @@ function statusCard(ctx) {
 }
 function selectedCard(ctx) {
   const { store } = ctx, state = store.state, ref = store.view.selection.find(mainSelectable);
-  const title = !ref ? 'Scene' : ref.kind === 'source' ? `Source ${String(ref.index + 1).padStart(2, '0')} · ${state.document.sources[ref.index]?.name || ''}` : 'Listener';
-  const head = element('div', { className: 'card-title' }, [element('span', { text: title })]);
+  const srcObj = ref?.kind === 'source' ? state.document.sources[ref.index] : null;
+  const title = !ref ? 'Scene' : ref.kind === 'source' ? `Source ${String(ref.index + 1).padStart(2, '0')} · ${srcObj?.name || ''}` : 'Listener';
+  const titleChildren = srcObj
+    ? [element('i', { className: 'source-color-dot', style: `background:${sourceStripColour(srcObj, ref.index)}`, 'aria-hidden': 'true' }), title]
+    : title;
+  const head = element('div', { className: 'card-title' }, [element('span', {}, titleChildren)]);
   if (ref) head.append(button('×', () => store.setView({ selection: [] }), { className: 'card-close', 'aria-label': 'Clear selection', title: 'Clear selection' }));
   const body = element('div', { className: 'card-grid' });
   let disposeScene = null;
@@ -102,15 +108,36 @@ export function sourcesPanel(ctx) {
     }),
     check('Keep I/O', flags.keepRouting, keepRouting => store.flags({ keepRouting }), { title: 'Full presets preserve local Sources / Output; room, poses and mix import by index.' }),
     element('span', { className: `${usage.overlap || usage.inputs > state.host.inputChannels ? 'warning' : 'note'} source-budget`, text: `${state.document.sources.length}/${state.limits.maxSources} src · ${usage.inputs}/${state.host.inputChannels} inputs · ${usage.points}/${state.limits.maxPoints} pts${usage.overlap ? ' · overlapping routes' : ''}` })]));
-  const head = element('div', { className: 'mix-row mix-head', role: 'row' }, ['', 'Source', 'Format', 'In', 'Ch', 'Gain dB', 'Level', 'M', 'S'].map((t, i) => element('span', { text: t, className: `c${i}` })));
+  const head = element('div', { className: 'mix-row mix-head', role: 'row' }, ['', 'Source', 'Format', 'In', 'Ch', 'Gain dB', 'Level', 'M', 'S'].map((t, i) => i === 6
+    ? element('button', { type: 'button', className: 'c6 meter-mode', text: METER_MODES[getMeterMode()].label, title: 'Source meter ballistics: Peak (instant attack, fast fall) / Smooth (slow). Click to switch.', 'aria-label': 'Source meter mode', onclick: e => { const next = getMeterMode() === 'peak' ? 'smooth' : 'peak'; setMeterMode(next); e.currentTarget.textContent = METER_MODES[next].label; } })
+    : element('span', { text: t, className: `c${i}` })));
   const list = element('div', { className: 'mix-list', role: 'rowgroup' });
   const meterSet = sourceMeters(store, state.document.sources.map(s => [s.firstIn, channels(s)]));
   state.document.sources.forEach((source, index) => {
     const config = patch => store.command({ op: 'source.setConfig', index, ...patch });
     const selected = store.view.selection.some(r => r.kind === 'source' && r.index === index);
-    const colourIndex = index % 6;
-    list.append(element('div', { className: `mix-row${selected ? ' selected' : ''}`, role: 'row', style: `--strip:var(--strip-${colourIndex})` }, [
-      button(String(index + 1).padStart(2, '0'), () => store.setView({ selection: [{ kind: 'source', index }] }), { className: 'strip-id c0', 'aria-label': `Select source ${index + 1}`, 'aria-pressed': String(selected) }),
+    const hasCustomColor = isValidSourceColorHex(source.color);
+    const stripColour = sourceStripColour(source, index);
+    const swatchBtn = button('', e => {
+      e.stopPropagation();
+      openSourceColorPopover({
+        anchor: e.currentTarget,
+        source,
+        index,
+        onSelect: hex => config({ color: hex })
+      });
+    }, {
+      className: 'strip-swatch',
+      'aria-label': `Source ${index + 1} colour`,
+      title: hasCustomColor ? `Source colour ${source.color} · click to change` : 'Source colour: Auto · click to pick',
+      'data-color': hasCustomColor ? source.color.toLowerCase() : ''
+    });
+    const idCell = element('div', { className: 'c0 strip-id-cell' }, [
+      swatchBtn,
+      button(String(index + 1).padStart(2, '0'), () => store.setView({ selection: [{ kind: 'source', index }] }), { className: 'strip-id', 'aria-label': `Select source ${index + 1}`, 'aria-pressed': String(selected) })
+    ]);
+    list.append(element('div', { className: `mix-row${selected ? ' selected' : ''}${hasCustomColor ? ' has-custom-color' : ''}`, role: 'row', style: `--strip:${stripColour}` }, [
+      idCell,
       element('input', { type: 'text', className: 'c1 strip-name', value: source.name, 'aria-label': `Source ${index + 1} name`, maxLength: 128, 'data-focus-key': `source-table-${index}`, onchange: e => config({ name: e.target.value }) }),
       select(`Source ${index + 1} format`, FORMATS, source.format, n => config({ format: Number(n) }), { className: 'dd c2' }),
       numericField(`Source ${index + 1} first input`, source.firstIn + 1, 1, 64, 1, n => config({ firstIn: n - 1 })),

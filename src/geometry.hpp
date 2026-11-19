@@ -106,9 +106,21 @@ struct Geo {
         }
         return false;
     }
+    struct WallCache { double ex, ey, len, invLen, nx, ny, lo, hi; bool blocks; };
+    std::vector<WallCache> wallCache;
     explicit Geo(const Scene& sc) : s(sc), ceilingPlan(sc), W((int)sc.walls.size()), hasCeil(sc.ceilMat >= 0), H(sc.height) {
         for (const auto& m : sc.mats)  // E3b: every transmission factor sqrt(tau) is in [0, 1] => path amplitudes never grow
             for (int b = 0; b < NB; ++b) ampNonIncreasing = ampNonIncreasing && m.tau[b] >= 0.0 && m.tau[b] <= 1.0;
+        wallCache.resize((size_t)W);
+        for (int i = 0; i < W; ++i) {
+            const Wall& w = sc.walls[(size_t)i];
+            const double ex = w.bx - w.ax, ey = w.by - w.ay, len = std::hypot(ex, ey);
+            const double invLen = (len >= 1e-9) ? (1.0 / len) : 0.0;
+            const Material& m = sc.mats[(size_t)w.mat];
+            bool blocks = false;
+            for (int b = 0; b < NB; ++b) if (m.tau[(size_t)b] < 0.999) { blocks = true; break; }
+            wallCache[(size_t)i] = {ex, ey, len, invLen, -ey * invLen, ex * invLen, std::max(0.0, w.z0), std::min(w.z1, H), blocks};
+        }
         buildJunctions();
         buildShells();
         for (const auto& z : sc.ceilZones) {
@@ -546,15 +558,17 @@ inline bool blocked(const Geo& g, Vec3 a, Vec3 b, int ign1, int ign2) { return !
 inline bool touchCross(const Geo& g, Vec3 prev, Vec3 P, Vec3 next, float* amp) {
     constexpr double tol = 1e-6;
     for (int i = 0; i < g.W; ++i) {
+        const auto& wc = g.wallCache[(size_t)i];
+        if (wc.invLen == 0.0) continue;
         const Wall& w = g.s.walls[(size_t)i];
-        const double ex = w.bx - w.ax, ey = w.by - w.ay, len = std::hypot(ex, ey);
-        if (len < 1e-9) continue;
-        const double off = cross2(ex, ey, P.x - w.ax, P.y - w.ay) / len;
+        if (P.z < w.z0 - tol || P.z > wc.hi + tol) continue;                  // under / over the wall
+        const double px = P.x - w.ax, py = P.y - w.ay;
+        const double off = cross2(wc.ex, wc.ey, px, py) * wc.invLen;
         if (std::fabs(off) > tol) continue;                                    // P is not on this wall's plane
-        const double along = ((P.x - w.ax) * ex + (P.y - w.ay) * ey) / len;
-        if (along < -tol || along > len + tol) continue;                       // beyond the wall's ends
-        if (P.z < w.z0 - tol || P.z > std::min(w.z1, g.H) + tol) continue;   // under / over the wall
-        const double sp = cross2(ex, ey, prev.x - P.x, prev.y - P.y) / len, sn = cross2(ex, ey, next.x - P.x, next.y - P.y) / len;
+        const double along = (px * wc.ex + py * wc.ey) * wc.invLen;
+        if (along < -tol || along > wc.len + tol) continue;                    // beyond the wall's ends
+        const double sp = cross2(wc.ex, wc.ey, prev.x - P.x, prev.y - P.y) * wc.invLen;
+        const double sn = cross2(wc.ex, wc.ey, next.x - P.x, next.y - P.y) * wc.invLen;
         if (!(sp * sn < 0) || std::fabs(sp) < 1e-9 || std::fabs(sn) < 1e-9) continue;  // same side (or in the plane): touched only
         const Material& m = g.s.mats[(size_t)w.mat];
         double mx = 0;
@@ -1968,16 +1982,15 @@ inline Vec3 resolveWallLinePose(const Geo& g, Vec3 pos, SurfaceSideHist& hist, u
     const int NW = std::min(g.W, SurfaceSideHist::kMaxHistWalls);
     for (int pass = 0; pass < 2; ++pass) {
         for (int i = 0; i < g.W; ++i) {
-            const Wall& w = g.s.walls[(size_t)i];
-            if (!wallBlocks(g, w)) continue;
-            const double lo = std::max(0.0, w.z0), hi = std::min(w.z1, g.H);
+            const auto& wc = g.wallCache[(size_t)i];
+            if (!wc.blocks || wc.invLen == 0.0) continue;
+            const double lo = wc.lo, hi = wc.hi;
             if (hi - lo <= 1e-6) continue;
             if (pos.z < lo - kWallLineTol || pos.z > hi + kWallLineTol) continue;
-            const double ex = w.bx - w.ax, ey = w.by - w.ay;
-            const double len = std::hypot(ex, ey);
-            if (len < 1e-9) continue;
-            const double ux = ex / len, uy = ey / len;
-            const double nx = -uy, ny = ux;
+            const Wall& w = g.s.walls[(size_t)i];
+            const double len = wc.len;
+            const double ux = wc.ex * wc.invLen, uy = wc.ey * wc.invLen;
+            const double nx = wc.nx, ny = wc.ny;
             const double dx = pos.x - w.ax, dy = pos.y - w.ay;
             const double along = dx * ux + dy * uy;
             const double sd = dx * nx + dy * ny;
@@ -2076,16 +2089,15 @@ inline void containCapsulesInRoom(const Geo& g, Vec3 centerPos, Transducer* rcv,
             const double rx = cap.x - centerPos.x, ry = cap.y - centerPos.y;
             const double zMin = std::min(centerPos.z, cap.z), zMax = std::max(centerPos.z, cap.z);
             for (int i = 0; i < g.W; ++i) {
-                const Wall& w = g.s.walls[(size_t)i];
-                if (!wallBlocks(g, w)) continue;
-                const double lo = std::max(0.0, w.z0), hi = std::min(w.z1, g.H);
+                const auto& wc = g.wallCache[(size_t)i];
+                if (!wc.blocks || wc.invLen == 0.0) continue;
+                const double lo = wc.lo, hi = wc.hi;
                 if (hi - lo <= 1e-6) continue;
                 if (zMax < lo - kCapsuleMargin || zMin > hi + kCapsuleMargin) continue;
-                const double ex = w.bx - w.ax, ey = w.by - w.ay;
-                const double len = std::hypot(ex, ey);
-                if (len < 1e-9) continue;
-                const double ux = ex / len, uy = ey / len;
-                const double nx = -uy, ny = ux;
+                const Wall& w = g.s.walls[(size_t)i];
+                const double ex = wc.ex, ey = wc.ey, len = wc.len;
+                const double ux = ex * wc.invLen, uy = ey * wc.invLen;
+                const double nx = wc.nx, ny = wc.ny;
 
                 const double sdC = (centerPos.x - w.ax) * nx + (centerPos.y - w.ay) * ny;
                 const double sdP = (cap.x - w.ax) * nx + (cap.y - w.ay) * ny;

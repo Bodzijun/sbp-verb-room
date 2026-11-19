@@ -53,6 +53,18 @@ public:
         });}catch(...){ {std::lock_guard<std::mutex>lock(mutex);stopping=true;}ready.notify_all();for(auto&t:threads)t.join();throw;}
     }
     ~BakePool(){ {std::lock_guard<std::mutex>lock(mutex);stopping=true;}ready.notify_all();for(auto&t:threads)t.join(); }
+    static unsigned effectiveCpuCount() noexcept {
+        const unsigned hw = std::thread::hardware_concurrency();
+       #if defined(_WIN32)
+        DWORD_PTR procMask = 0, sysMask = 0;
+        if (GetProcessAffinityMask(GetCurrentProcess(), &procMask, &sysMask) && procMask != 0) {
+            unsigned cnt = 0;
+            for (DWORD_PTR m = procMask; m; m >>= 1) cnt += (unsigned)(m & 1);
+            if (cnt > 0) return hw > 0 ? std::min(hw, cnt) : cnt;
+        }
+       #endif
+        return hw > 0 ? hw : 1u;
+    }
     unsigned size() const noexcept {return (unsigned)threads.size();}
     template<class F> auto submit(F f, bool urgent=false, bool analysis=false)->std::future<decltype(f())>{
         auto task=std::make_shared<std::packaged_task<decltype(f())()>>(std::move(f));auto result=task->get_future();

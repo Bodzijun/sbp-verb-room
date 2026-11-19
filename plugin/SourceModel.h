@@ -6,6 +6,7 @@
 // coherently and cause position-dependent phase holes).
 #pragma once
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <memory>
@@ -19,6 +20,24 @@ namespace verbp {
 constexpr int kMaxSources = 32;
 constexpr int kMaxPoints = 64;
 constexpr int kMaxInputChannels = 64;
+
+inline bool isValidSourceColorHex(const std::string& s) {
+    if (s.size() != 7 || s[0] != '#') return false;
+    for (size_t i = 1; i < 7; ++i) {
+        const unsigned char ch = (unsigned char)s[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')))
+            return false;
+    }
+    return true;
+}
+
+inline std::string normalizeSourceColor(const std::string& s) {
+    if (!isValidSourceColorHex(s)) return {};
+    std::string out = s;
+    for (size_t i = 1; i < 7; ++i)
+        out[i] = (char)std::tolower((unsigned char)out[i]);
+    return out;
+}
 
 struct FormatDef {
     const char* name;
@@ -43,6 +62,7 @@ inline const std::vector<FormatDef>& sourceFormats() {
 
 struct SourceCfg {
     std::string name = "Source";
+    std::string color;    // optional #rrggbb lowercase editor tag; empty = automatic index colour
     int format = 0;       // index into sourceFormats()
     int channels = 1;     // number of input channels (fixed by the format, free for the ring)
     int firstIn = 0;      // first input channel (0-based)

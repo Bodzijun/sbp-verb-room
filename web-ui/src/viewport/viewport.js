@@ -5,13 +5,13 @@ import { viewportState, positionId } from './effective-scene.js';
 import { element, button } from '../components/dom.js';
 import { cleanSelection, toggleSelection, touchesBox, boxSelection, sameRef } from '../state/selection.js';
 import { canonical } from '../bridge/parameters.js';
-import { surface, surfaceRefs, layerKey } from '../state/selectors.js';
-import { createCamera, scenePoints, boundsOf, frame, project, pointOnTargetPlane, pointOnHeightPlane, pan, zoomAt, add, screenExtent } from './camera.js';
+import { surface, surfaceRefs, expandedRefs, layerKey } from '../state/selectors.js';
+import { createCamera, scenePoints, boundsOf, frame, project, pointOnTargetPlane, pointOnHeightPlane, hitHeightForSurface, pan, zoomAt, add, screenExtent } from './camera.js';
 import { createEnergyLoader, projectEnergy, energyColour } from './energy-layer.js';
 import { sourcePoints, receivers, rotateOffset } from './transducers.js';
 import { markerRadius, orientationTick, directivityTicks } from './marker.js';
 import { viewportPalette } from './palette.js';
-import { materialColour, rayColour, surfaceRole } from './colour.js';
+import { materialColour, rayColour, surfaceRole, sourceMarkerColour, sourceLabelColour, isValidSourceColorHex } from './colour.js';
 import { skyEscapeGuides } from './rays.js';
 import { mockRays, enginePaths, rayStyle, describeRay } from './ray-model.js';
 import { finiteGrid, gridStep, projectedSegment, clipPolygonNear } from './grid.js';
@@ -47,7 +47,9 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   const scaleBarLine = element('div', { className: 'viewport-scale-bar' });
   const scaleBarText = element('span', { className: 'viewport-scale-text' });
   const scaleIndicator = element('div', { className: 'viewport-scale', 'aria-label': 'Viewport grid scale' }, [scaleBarText, scaleBarLine]);
-  root.append(canvas, hover, badge, hint, rayLegend, drawingReadout, marquee, scale, scaleIndicator);
+  const rebuildingBanner = preview ? null : element('div', { className: 'viewport-rebuilding', role: 'status', 'aria-live': 'polite', hidden: true }, [element('i', { className: 'viewport-rebuilding-dot', 'aria-hidden': 'true' }), element('span', { text: 'Rebuilding…' })]);
+  root.append(canvas, hover, badge, hint, rayLegend, drawingReadout, marquee, scale, scaleIndicator, ...(rebuildingBanner ? [rebuildingBanner] : []));
+  root.setRebuilding = on => { if (rebuildingBanner) rebuildingBanner.hidden = !on; };
   root.currentSnapStep = () => snapStep();
   let width = 600, height = 300, camera = store.view.camera || createCamera(store.view.projection), hitCache = [], raf = null, disposed = false;
   let poseTimer=null,persistTimer=null,cursorLevel=null;
@@ -85,31 +87,69 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     camera = selection ? frame(full, boundsOf(points), width, height) : full;
     camera.sceneDistance = full.distance; autoFrame = !selection; store.view.camera = camera; schedule();
   }
-  function pointsFor(r) {
-    const state = store.state, s = state.document.scene, v = state.parameters.values, d = activeDrag();
+  function basePointsFor(r, s = store.state.document.scene) {
+    const state = store.state, v = state.parameters.values;
     if (r.kind === 'source') return r.channel !== undefined ? [sourcePoints(state, r.index).find(p => p.channel === r.channel)?.position || [0, 0, 0]] : [['x', 'y', 'z'].map(k => v[`s${r.index + 1}${k}`])];
     if (r.kind === 'listener') return [['lx', 'ly', 'lz'].map(k => v[k])];
     const obj = surface(s, r);
     if (!obj) return [];
     const topZ = (obj.zTopM ?? s.heightM) < 1e5 ? (obj.zTopM ?? s.heightM) : s.heightM;
-    const translate = p => d?.type === 'surface' && d.liveDelta && d.refs?.some(x => same(x, r)) ? p.map((c, i) => c + (d.liveDelta[i] || 0)) : p;
-    if (r.kind === 'wall') {
-      let a = obj.a.slice(), b = obj.b.slice();
-      if (d?.type === 'vertex' && d.ref?.kind === 'wall' && d.liveVertexPos) {
-        const moved = d.liveVertexPos, oldPt = d.initialWallPoint;
-        if (r.index === d.ref.index) { if (d.ref.vertex === 0) a = moved.slice(); else b = moved.slice(); }
-        else if (store.view.autoLink !== false && oldPt) {
-          if (Math.hypot(a[0] - oldPt[0], a[1] - oldPt[1]) < 1e-4) a = moved.slice();
-          if (Math.hypot(b[0] - oldPt[0], b[1] - oldPt[1]) < 1e-4) b = moved.slice();
-        }
-      }
-      return [[...a, obj.zBottomM], [...a, topZ], [...b, topZ], [...b, obj.zBottomM]].map(translate);
-    }
-    if (obj.vertices) return obj.vertices.map((p, vi) => {
-      const xy = d?.type === 'vertex' && d.ref?.kind === r.kind && d.ref?.index === r.index && d.ref?.vertex === vi && d.liveVertexPos ? d.liveVertexPos : p;
-      return translate([...xy, obj.heightM ?? (r.kind === 'floorZone' ? 0 : s.heightM)]);
-    });
+    if (r.kind === 'wall') return [[...obj.a, obj.zBottomM], [...obj.a, topZ], [...obj.b, topZ], [...obj.b, obj.zBottomM]];
+    if (obj.vertices) return obj.vertices.map(p => [...p, obj.heightM ?? (r.kind === 'floorZone' ? 0 : s.heightM)]);
     return [];
+  }
+  function movingSurfaceRefs(s, d) {
+    if (!d) return [];
+    const modes = store.state.document.editorFlags.layerModes || {};
+    const unlocked = refs => !refs.some(r => {
+      const obj = surface(s, r);
+      return !obj || obj.editor.locked || (modes[layerKey(s, r)] || 0) !== 0;
+    });
+    if (d.type === 'surface' && d.liveDelta) {
+      const hasMove = Math.abs(d.liveDelta[0] || 0) > 1e-6 || Math.abs(d.liveDelta[1] || 0) > 1e-6 || Math.abs(d.liveDelta[2] || 0) > 1e-6;
+      if (!hasMove) return [];
+      const expanded = (d.includeGroups !== false ? expandedRefs(s, d.refs) : d.refs).filter(r => !['floor', 'ceiling'].includes(r.kind));
+      return unlocked(expanded) ? expanded : [];
+    }
+    if (d.type === 'vertex' && d.liveVertexPos && d.ref) {
+      let moved = [d.ref];
+      if (d.ref.kind === 'wall' && store.view.autoLink !== false && d.initialWallPoint) {
+        const oldPt = d.initialWallPoint;
+        moved = s.walls.map((w, index) => ({ kind: 'wall', index, w })).filter(({ index, w }) => index === d.ref.index || Math.hypot(w.a[0] - oldPt[0], w.a[1] - oldPt[1]) < 1e-4 || Math.hypot(w.b[0] - oldPt[0], w.b[1] - oldPt[1]) < 1e-4).map(({ index }) => ({ kind: 'wall', index }));
+      }
+      return unlocked(moved) ? moved : [];
+    }
+    return [];
+  }
+  function ghostPointsFor(r, s, d) {
+    if (d?.type === 'surface' && d.liveDelta) return basePointsFor(r, s).map(p => p.map((c, i) => c + (d.liveDelta[i] || 0)));
+    if (d?.type === 'vertex' && d.liveVertexPos) {
+      const obj = surface(s, r);
+      if (!obj) return [];
+      const topZ = (obj.zTopM ?? s.heightM) < 1e5 ? (obj.zTopM ?? s.heightM) : s.heightM;
+      if (r.kind === 'wall') {
+        let a = obj.a.slice(), b = obj.b.slice();
+        const moved = d.liveVertexPos, oldPt = d.initialWallPoint;
+        if (d.ref?.kind === 'wall') {
+          if (r.index === d.ref.index) { if (d.ref.vertex === 0) a = moved.slice(); else b = moved.slice(); }
+          else if (store.view.autoLink !== false && oldPt) {
+            if (Math.hypot(a[0] - oldPt[0], a[1] - oldPt[1]) < 1e-4) a = moved.slice();
+            if (Math.hypot(b[0] - oldPt[0], b[1] - oldPt[1]) < 1e-4) b = moved.slice();
+          }
+        }
+        return [[...a, obj.zBottomM], [...a, topZ], [...b, topZ], [...b, obj.zBottomM]];
+      }
+      if (obj.vertices) return obj.vertices.map((p, vi) => {
+        const xy = d.ref?.kind === r.kind && d.ref?.index === r.index && d.ref?.vertex === vi ? d.liveVertexPos : p;
+        return [...xy, obj.heightM ?? (r.kind === 'floorZone' ? 0 : s.heightM)];
+      });
+    }
+    return basePointsFor(r, s);
+  }
+  function pointsFor(r) {
+    const s = store.state.document.scene, d = activeDrag();
+    if (movingSurfaceRefs(s, d).some(m => same(m, r))) return ghostPointsFor(r, s, d);
+    return basePointsFor(r, s);
   }
   const energyLoader = createEnergyLoader(url => bridge.readResource(url), value => {
     if (disposed) return; binary = value; energy = null; schedule();
@@ -161,7 +201,9 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       }
       ctx.globalAlpha = 1; ctx.lineWidth = 1; root.dataset.clutterDrawn = String(clutter?.objects?.length || 0);
     } else root.dataset.clutterDrawn = '0';
-    const faces = surfaceRefs(s).filter(r => !['floor', 'ceiling'].includes(r.kind)).map(ref => ({ ref, points: pointsFor(ref) }));
+    const d = activeDrag();
+    const moving = movingSurfaceRefs(s, d);
+    const faces = surfaceRefs(s).filter(r => !['floor', 'ceiling'].includes(r.kind)).map(ref => ({ ref, points: basePointsFor(ref, s) }));
     faces.sort((a, b) => b.points.reduce((n, p) => n + project(p, camera, width, height)[2], 0) / b.points.length - a.points.reduce((n, p) => n + project(p, camera, width, height)[2], 0) / a.points.length);
     faces.forEach(({ ref, points }) => {
       const obj = surface(s, ref), layer = state.document.editorFlags.layerModes?.[layerKey(s, ref)] || 0;
@@ -169,17 +211,50 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       // Near-plane clipping: a face partly behind the camera is drawn (and hit-tested) by its visible part only.
       const visible = clipPolygonNear(points, camera); if (!visible) return;
       const clipped = visible !== points;
-      const selected = wouldSelect.some(r => same(r, ref)), screen = visible.map(p => project(p, camera, width, height));
+      const isMoving = moving.some(m => same(m, ref));
+      const selected = !isMoving && wouldSelect.some(r => same(r, ref)), screen = visible.map(p => project(p, camera, width, height));
       const material = s.materials[obj.material], role = surfaceRole(ref, obj), colour = materialColour(preferences, material, roles, role);
       ctx.fillStyle = colour; ctx.setLineDash(obj.editor.locked || layer === 1 ? [5, 4] : []);
       ctx.beginPath(); screen.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
-      ctx.globalAlpha = role === 'wall' ? 0.05 : 0.11; ctx.fill();
+      ctx.globalAlpha = isMoving ? (role === 'wall' ? 0.02 : 0.04) : (role === 'wall' ? 0.05 : 0.11); ctx.fill();
       // Selection is a halo around the material colour, never a replacement for it.
       if (selected) { ctx.strokeStyle = roles.selection; ctx.lineWidth = 5.5; ctx.globalAlpha = 0.38; ctx.stroke(); }
-      ctx.strokeStyle = colour; ctx.lineWidth = selected ? 2.2 : 1.4; ctx.globalAlpha = 0.95; ctx.stroke(); ctx.globalAlpha = 1; ctx.setLineDash([]);
+      ctx.strokeStyle = colour; ctx.lineWidth = isMoving ? 1.1 : (selected ? 2.2 : 1.4); ctx.globalAlpha = isMoving ? 0.28 : 0.95; ctx.stroke(); ctx.globalAlpha = 1; ctx.setLineDash([]);
       if (store.view.page === 'edit') hitCache.push({ ref, screen, polygon: ref.kind !== 'wall' || camera.view === '3d' || camera.view !== 'plan' });
       if (selected && !clipped) screen.forEach((p, vertex) => { ctx.fillStyle = roles.selection; ctx.beginPath(); ctx.arc(p[0], p[1], 3, 0, 7); ctx.fill(); if (camera.view === 'plan' && (ref.kind !== 'wall' || vertex === 0 || vertex === 3)) hitCache.push({ ref: { ...ref, vertex: ref.kind === 'wall' ? vertex === 0 ? 0 : 1 : vertex }, screen: [p], radius: 6 }); });
     });
+    let ghostCount = 0;
+    if (moving.length) {
+      const ghostFaces = moving.map(ref => ({ ref, points: ghostPointsFor(ref, s, d) }));
+      ghostFaces.sort((a, b) => b.points.reduce((n, p) => n + project(p, camera, width, height)[2], 0) / b.points.length - a.points.reduce((n, p) => n + project(p, camera, width, height)[2], 0) / a.points.length);
+      ghostFaces.forEach(({ ref, points }) => {
+        const obj = surface(s, ref), layer = state.document.editorFlags.layerModes?.[layerKey(s, ref)] || 0;
+        if (!obj || obj.editor.hidden || layer === 2) return;
+        const visible = clipPolygonNear(points, camera); if (!visible) return;
+        const clipped = visible !== points, screen = visible.map(p => project(p, camera, width, height));
+        const material = s.materials[obj.material], role = surfaceRole(ref, obj), colour = materialColour(preferences, material, roles, role);
+        const traceGhost = () => {
+          ctx.beginPath();
+          if (ref.kind === 'wall' && camera.view === 'plan' && !clipped && screen.length === 4) {
+            ctx.moveTo(screen[0][0], screen[0][1]); ctx.lineTo(screen[3][0], screen[3][1]);
+          } else {
+            screen.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+          }
+        };
+        ctx.fillStyle = colour; ctx.setLineDash([]);
+        ctx.beginPath(); screen.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
+        ctx.globalAlpha = role === 'wall' ? 0.14 : 0.24; ctx.fill();
+        traceGhost();
+        ctx.strokeStyle = roles.selection; ctx.lineWidth = 5.5; ctx.globalAlpha = 0.35; ctx.stroke();
+        ctx.setLineDash([7, 4]); ctx.strokeStyle = roles.selection; ctx.lineWidth = 2.2; ctx.globalAlpha = 1; ctx.stroke();
+        ctx.setLineDash([]); ctx.globalAlpha = 1;
+        if (wouldSelect.some(r => same(r, ref)) && !clipped) {
+          screen.forEach(p => { ctx.fillStyle = roles.selection; ctx.beginPath(); ctx.arc(p[0], p[1], 3, 0, 7); ctx.fill(); });
+        }
+        ghostCount++;
+      });
+    }
+    root.dataset.dragGhostCount = String(ghostCount);
     if(s.ceilingMaterial!==null && s.ceilingExtent!=='infinite' && (state.document.editorFlags.layerModes?.ceilings||0)!==2) {
       ctx.strokeStyle=roles.ceiling;ctx.fillStyle=roles.ceiling;ctx.setLineDash([5,4]);
       for(const poly of s.ceilingFootprint||[]) { const visible=clipPolygonNear(poly.map(p=>[...p,s.heightM]),camera);if(!visible)continue;
@@ -215,13 +290,19 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       lastPaths = paths;
     }
     const labelBoxes=[],nextLabels=new Map();
-    const pose = (ref, colour, text) => {
+    const pose = (ref, colour, text, labelColour = roles.labels, custom = false) => {
       const world = pointsFor(ref)[0], p = project(world, camera, width, height), yaw = state.parameters.values[ref.kind === 'listener' ? 'laz' : `s${ref.index + 1}az`] * Math.PI / 180;
+      const isSelected = store.view.selection.some(r => same(r, ref));
       // A marker always stays at the projected physical point. Threshold-based
       // collision displacement made dense preset markers jump by 16 px in orbit.
       const marker = p;
       if(camera.view!=='plan') {ctx.strokeStyle=colour;ctx.globalAlpha=.55;ctx.lineWidth=1;ctx.setLineDash([4,4]);worldLine(world,[world[0],world[1],0]);ctx.setLineDash([]);ctx.globalAlpha=1;}
-      ctx.strokeStyle = colour; ctx.fillStyle = colour; ctx.lineWidth = store.view.selection.some(r => same(r, ref)) ? 2.5 : 1;
+      if (isSelected && custom) {
+        ctx.save(); ctx.strokeStyle = roles.selection; ctx.lineWidth = 5; ctx.globalAlpha = 0.35;
+        ctx.beginPath(); ctx.arc(marker[0], marker[1], markerRadius(ref.kind, state.document.sources.length), 0, 7); ctx.stroke();
+        ctx.restore();
+      }
+      ctx.strokeStyle = colour; ctx.fillStyle = colour; ctx.lineWidth = isSelected ? 2.5 : 1;
       ctx.beginPath(); ctx.arc(marker[0], marker[1], markerRadius(ref.kind, state.document.sources.length), 0, 7); ctx.stroke();
       ctx.beginPath(); ctx.arc(marker[0], marker[1], 3.5, 0, 7); ctx.fill();
       {// A source with an instrument profile always shows its full-length heading: the profile is aimed by it whatever the fitted analytic pattern is.
@@ -238,27 +319,28 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
           ctx.beginPath();ctx.moveTo(6,-2);ctx.lineTo(11,0);ctx.lineTo(6,2);ctx.stroke();
           for(const side of [-1,1]){ctx.beginPath();ctx.ellipse(0,side*8,3,2,0,0,Math.PI*2);ctx.stroke();}ctx.restore();
         }}
-      ctx.font = '11px Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif'; ctx.fillStyle = roles.labels;
+      ctx.font = '11px Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif'; ctx.fillStyle = labelColour;
       const label=[marker[0]+11,marker[1]-12];
       const box={x:label[0],y:label[1]-11,w:ctx.measureText(text).width+6,h:15};
       // Freeze collision visibility for an orbit gesture; labels may overlap
       // temporarily but never blink at a threshold while the camera is moving.
       const overlaps=labelBoxes.some(b=>box.x<b.x+b.w&&box.x+box.w>b.x&&box.y<b.y+b.h&&box.y+box.h>b.y);
       const labelKey=`${ref.kind}:${ref.index}`;
-      const visible=store.view.selection.some(r=>same(r,ref))||(['orbit','pan'].includes(drag?.type)?(drag.labels.get(labelKey)??!overlaps):!overlaps);
+      const visible=isSelected||(['orbit','pan'].includes(drag?.type)?(drag.labels.get(labelKey)??!overlaps):!overlaps);
       nextLabels.set(labelKey,visible);
       if(visible) { ctx.fillText(text,...label); labelBoxes.push(box); }
       hitCache.push({ ref, screen: [marker], radius: 11 });
     };
     pose({ kind: 'listener', index: 0 }, roles.listener, 'Listener');
-    state.document.sources.map((source,index)=>({source,index})).sort((a,b)=>Number(store.view.selection.some(r=>r.kind==='source'&&r.index===b.index))-Number(store.view.selection.some(r=>r.kind==='source'&&r.index===a.index))).forEach(({source,index})=>pose({kind:'source',index},roles.source,source.name));
+    state.document.sources.map((source,index)=>({source,index})).sort((a,b)=>Number(store.view.selection.some(r=>r.kind==='source'&&r.index===b.index))-Number(store.view.selection.some(r=>r.kind==='source'&&r.index===a.index))).forEach(({source,index})=>pose({kind:'source',index},sourceMarkerColour(source,roles),source.name,sourceLabelColour(source,roles),isValidSourceColorHex(source.color)));
     labelVisibility=nextLabels;
     state.document.sources.forEach((source, index) => {
       if (source.sum || source.channels === 1) return;
       const origin = project(pointsFor({ kind: 'source', index })[0], camera, width, height);
+      const pointColour = sourceMarkerColour(source, roles);
       sourcePoints(state, index).forEach(point => {
         const p = project(point.position, camera, width, height);
-        ctx.strokeStyle = roles.source; ctx.globalAlpha = 0.4; line(origin, p); ctx.globalAlpha = 1; ctx.fillStyle = roles.source; ctx.beginPath(); ctx.arc(p[0], p[1], 3, 0, 7); ctx.fill();
+        ctx.strokeStyle = pointColour; ctx.globalAlpha = 0.4; line(origin, p); ctx.globalAlpha = 1; ctx.fillStyle = pointColour; ctx.beginPath(); ctx.arc(p[0], p[1], 3, 0, 7); ctx.fill();
         if (source.freePoints) hitCache.push({ ref: { kind: 'source', index, channel: point.channel }, screen: [p], radius: 6 });
       });
     });
@@ -342,7 +424,14 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     if (store.view.page === 'edit' && !preview) {
       const selectedWalls = wouldSelect.filter(r => r.kind === 'wall');
       const liveWalls = new Map();
-      for (const r of selectedWalls) { const w = surface(s, r); if (w && !w.editor.hidden) liveWalls.set(r.index, { a: w.a.slice(), b: w.b.slice(), zBottomM: w.zBottomM, zTopM: w.zTopM }); }
+      for (const r of selectedWalls) {
+        const w = surface(s, r);
+        if (!w || w.editor.hidden) continue;
+        const dd = drag?.type === 'surface' && moving.some(m => same(m, r)) && drag.liveDelta ? drag.liveDelta : null;
+        liveWalls.set(r.index, dd
+          ? { a: [w.a[0] + dd[0], w.a[1] + dd[1]], b: [w.b[0] + dd[0], w.b[1] + dd[1]], zBottomM: Math.max(0, w.zBottomM + (dd[2] || 0)), zTopM: w.zTopM != null && w.zTopM < 1e5 ? w.zTopM + (dd[2] || 0) : w.zTopM }
+          : { a: w.a.slice(), b: w.b.slice(), zBottomM: w.zBottomM, zTopM: w.zTopM });
+      }
       if (drag?.type === 'vertex' && drag.ref?.kind === 'wall' && drag.liveVertexPos) {
         const moved = drag.liveVertexPos;
         const oldPt = drag.initialWallPoint;
@@ -471,10 +560,17 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     return {world,snap,screen:p};
   }
   function endDraft(){chainGroup=null;draft=[];draftCursor=null;drawingReadout.hidden=true;schedule();}
+  // Undo while a chain is being drawn takes back the LAST CLICK only: the wall that click created (history) and its draft point, so the
+  // next click continues from the previous point; a lone first point is just dropped. Returns true when it consumed the shortcut.
+  function undoDraft(){
+    if(!isDrawing()||store.view.tool==='room'||!draft.length)return false;
+    if(store.view.tool==='wall'&&draft.length>=2)store.command({op:'history.undo'});
+    draft.pop();draftCursor=null;if(!draft.length)endDraft();else schedule();return true;
+  }
   function closeShape(){
     if(store.view.tool==='wall'){
       if(draft.length>=3)store.command(wallCommand(draft.at(-1),draft[0]));
-    }else if(draft.length>=3)store.command({op:'surface.create',kind:store.view.tool==='plate'?'floorZone':store.view.tool,vertices:draft,material:0,heightM:store.view.tool==='plate'?1:null});
+    }else if(draft.length>=3)store.command({op:'surface.create',kind:store.view.tool==='plate'?'floorZone':store.view.tool,vertices:draft,heightM:store.view.tool==='plate'?1:null});
     endDraft();
   }
   function drawGroup(){
@@ -482,7 +578,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     if(!chainGroup){const groups=new Set(surfaceRefs(store.state.document.scene).map(r=>surface(store.state.document.scene,r).editor.group));let name='Construction',i=2;while(groups.has(name))name=`Construction ${i++}`;chainGroup=name;}
     return chainGroup;
   }
-  function wallCommand(a,b){const groupName=drawGroup();return {op:'surface.create',kind:'wall',a,b,material:0,...(groupName?{groupName}:{})};}
+  function wallCommand(a,b){const groupName=drawGroup();return {op:'surface.create',kind:'wall',a,b,...(groupName?{groupName}:{})};}
   function marqueeSelection(){
     const hits=hitCache.filter(h=>h.ref.vertex===undefined&&h.ref.channel===undefined&&canSelect(h.ref)&&touchesBox(h.screen,drag.start,drag.last,h.polygon));
     return boxSelection(drag.base,hits.map(h=>h.ref),drag.modifiers);
@@ -589,19 +685,22 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     const drawPath=(raw,o,isDraft=false)=>{
       const p=isDraft?raw:effectivePathForDraw(raw,o);
       if(!p?.points?.length || (!isDraft && p.points.length<2))return;
-      const isActive=isDraft || o===activeObj || o===store.view.pathEditing;
+      const isOldRedraw=!isDraft && store.view.pathDrawing===o;
+      const isActive=isDraft || (!isOldRedraw && (o===activeObj || o===store.view.pathEditing));
       const table=compilePath(p),f=sizeFactor();
       const lineCol=isActive?(roles.pathLine||(o===32?roles.listener:roles.source)):(roles.pathDimmed||roles.grid);
       const nodeCol=roles.pathNode||lineCol;
       const arrowCol=isActive?(roles.pathArrow||lineCol):(roles.pathDimmed||lineCol);
-      const markerCol=roles.pathMarker||roles.selection;
+      const markerCol=isOldRedraw?(roles.pathDimmed||lineCol):(roles.pathMarker||roles.selection);
       const screenPts=table.points.map(q=>project(q.map(x=>x*f),camera,width,height));
       ctx.save();
       ctx.strokeStyle=ctx.fillStyle=lineCol;
-      ctx.globalAlpha=isActive?0.95:0.45;
-      ctx.lineWidth=isActive?2.2:1.15;
+      ctx.globalAlpha=isActive?0.95:(isOldRedraw?0.5:0.45);
+      ctx.lineWidth=isActive?2.2:(isOldRedraw?1.1:1.15);
+      if(isOldRedraw)ctx.setLineDash([5,4]);
       ctx.beginPath();screenPts.forEach((v,i)=>{i?ctx.lineTo(v[0],v[1]):ctx.moveTo(v[0],v[1]);});ctx.stroke();
-      if(!isDraft && !preview)pathSegHits.push({object:o,worldPts:table.points,screenPts,steps:table.steps,pointCount:p.points.length});
+      if(isOldRedraw)ctx.setLineDash([]);
+      if(!isDraft && !isOldRedraw && !preview)pathSegHits.push({object:o,worldPts:table.points,screenPts,steps:table.steps,pointCount:p.points.length});
       if(screenPts.length>=2){
         ctx.fillStyle=arrowCol;
         if(!p.closed){
@@ -815,8 +914,9 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       if(mouseLocked()){store.setView({selection:[{kind:ref.kind,index:ref.index}]});return;}
       queueMicrotask(() => store.setView({ selection: [{ kind: ref.kind, index: ref.index }] }, false));
       if (ref.kind === 'source' && ref.channel !== undefined && e.button === 0) {
-        const tx = `point-${Date.now()}`, local = sourcePoints(store.state, ref.index).find(point => point.channel === ref.channel).local;
-        drag = { type: 'point', ref, tx, start: p, camera, local, lastSent: 0 }; store.command({ op: 'transaction.begin', label: 'Move channel point' }, tx);
+        const tx = `point-${Date.now()}`, pt = sourcePoints(store.state, ref.index).find(point => point.channel === ref.channel), local = pt.local;
+        const hitZ = camera.view === '3d' ? pt.position[2] : null;
+        drag = { type: 'point', ref, tx, start: p, camera, local, hitZ, lastSent: 0, inFlight: false }; store.command({ op: 'transaction.begin', label: 'Move channel point' }, tx);
       } else {
       const prefix = ref.kind === 'listener' ? 'l' : `s${ref.index + 1}`, yaw = ref.kind === 'listener' ? 'laz' : `${prefix}az`;
       const ids = e.button === 2 ? [yaw] : camera.view === 'front' ? [`${prefix}x`, `${prefix}z`] : camera.view === 'side' ? [`${prefix}y`, `${prefix}z`] : [`${prefix}x`, `${prefix}y`];
@@ -829,9 +929,11 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       if(modified){schedule();return;}
       if (e.button === 0) {
         const tx = `geometry-${Date.now()}`;
-        const wallObj = ref.kind === 'wall' ? surface(store.state.document.scene, ref) : null;
+        const scene = store.state.document.scene, pickedObj = surface(scene, ref);
+        const wallObj = ref.kind === 'wall' ? pickedObj : null;
         const initialWallPoint = wallObj && ref.vertex !== undefined ? (ref.vertex === 0 ? wallObj.a.slice() : wallObj.b.slice()) : null;
-        drag = { type: ref.vertex !== undefined && selection.length===1 ? 'vertex' : 'surface', ref, refs: selection.filter(r=>!['source','listener'].includes(r.kind)), tx, start: p, camera, lastSent: 0, initialWallPoint };
+        const hitZ = hitHeightForSurface(p, camera, width, height, pickedObj, ref.kind, scene.heightM);
+        drag = { type: ref.vertex !== undefined && selection.length===1 ? 'vertex' : 'surface', ref, refs: selection.filter(r=>!['source','listener'].includes(r.kind)), tx, start: p, camera, lastSent: 0, initialWallPoint, hitZ, includeGroups: !e.altKey };
         store.command({ op: 'transaction.begin', label: 'Move surface' }, tx);
       }
     } else if (store.view.pathEditing != null && e.button === 0 && !mouseLocked()) {
@@ -905,13 +1007,27 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       if (performance.now() - lastPoseTime >= 1000 / 60) flushPose();
       else if(poseTimer===null)poseTimer=setTimeout(flushPose,Math.max(0,1000/60-(performance.now()-lastPoseTime)));
     } else if (drag.tx) {
-      const a = pointOnTargetPlane(drag.start, drag.camera, width, height), b = pointOnTargetPlane(p, drag.camera, width, height), delta = b.map((v, i) => v - a[i]);
+      let a, b;
+      if (drag.camera.view === '3d' && drag.hitZ != null) {
+        const ha = pointOnHeightPlane(drag.start, drag.camera, width, height, drag.hitZ);
+        const hb = pointOnHeightPlane(p, drag.camera, width, height, drag.hitZ);
+        if (ha && hb) { a = ha; b = hb; }
+      }
+      if (!a || !b) { a = pointOnTargetPlane(drag.start, drag.camera, width, height); b = pointOnTargetPlane(p, drag.camera, width, height); }
+      const delta = b.map((v, i) => v - a[i]);
       if (drag.type === 'vertex') drag.liveVertexPos = b.slice(0, 2);
-      if (drag.type === 'surface') drag.liveDelta = camera.view === 'plan' ? [delta[0], delta[1], 0] : delta;
+      if (drag.type === 'surface') {
+        drag.includeGroups = !e.altKey;
+        drag.liveDelta = drag.camera.view === 'plan' || drag.camera.view === '3d' ? [delta[0], delta[1], 0] : delta;
+      }
       const localDelta = drag.type === 'point' ? rotateOffset(delta, -store.state.parameters.values[`s${drag.ref.index + 1}az`]) : null;
-      const command = drag.type === 'point' ? { op: 'source.setPointOffset', index: drag.ref.index, channel: drag.ref.channel, offsetM: drag.local.map((n, i) => Math.max(-100, Math.min(100, n + localDelta[i]))) } : drag.type === 'vertex' ? { op: 'surface.moveVertex', ref: { kind: drag.ref.kind, index: drag.ref.index }, vertex: drag.ref.vertex, positionM: b.slice(0, 2), autoLink: store.view.autoLink } : { op: 'surface.translate', refs: drag.refs.map(({ kind, index }) => ({ kind, index })), deltaM: camera.view === 'plan' ? delta.slice(0, 2) : delta, includeGroups: !e.altKey };
+      const command = drag.type === 'point' ? { op: 'source.setPointOffset', index: drag.ref.index, channel: drag.ref.channel, offsetM: drag.local.map((n, i) => Math.max(-100, Math.min(100, n + localDelta[i]))) } : drag.type === 'vertex' ? { op: 'surface.moveVertex', ref: { kind: drag.ref.kind, index: drag.ref.index }, vertex: drag.ref.vertex, positionM: b.slice(0, 2), autoLink: store.view.autoLink } : { op: 'surface.translate', refs: drag.refs.map(({ kind, index }) => ({ kind, index })), deltaM: drag.camera.view === 'plan' || drag.camera.view === '3d' ? delta.slice(0, 2) : delta, includeGroups: !e.altKey };
       drag.final = command;
-      if (performance.now() - drag.lastSent >= 50) { store.command(command, drag.tx); drag.lastSent = performance.now(); }
+      if (drag.type === 'point' && !drag.inFlight && performance.now() - drag.lastSent >= 50) {
+        drag.inFlight = true; drag.lastSent = performance.now();
+        const curDrag = drag;
+        Promise.resolve(store.command(command, drag.tx)).finally(() => { curDrag.inFlight = false; });
+      }
     }
     store.view.camera = camera; schedule();
   });
@@ -992,8 +1108,10 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     if (e.key === 'Escape') { e.preventDefault();finish(true); endDraft(); store.setView({ selection: [], pathEditing: null, pathPoint: null }); }
     if (e.key === 'Enter' && draft.length)closeShape();
     if (modKey(e) && ['z','y'].includes(e.key.toLowerCase())) {
-      e.preventDefault();endDraft();
+      e.preventDefault();
       const redo=e.key.toLowerCase()==='y'||e.shiftKey;
+      if(!redo&&undoDraft())return;
+      endDraft();
       store.command({ op: redo?'history.redo':'history.undo' });
     }
 
@@ -1057,7 +1175,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     else if (reason === 'analysis.result') loadEnergy();
   });
   updateHint();
-  root.cancelGesture=()=>{resetPointer(false);endDraft();};
+  root.cancelGesture=()=>{resetPointer(false);endDraft();};root.undoDraft=undoDraft;
   root.redraw=()=>{if(preview){const yaw=camera.yaw,pitch=camera.pitch;fit();camera={...camera,yaw,pitch};}schedule();};
   root.frameStats = () => ({ ...screenExtent(allPoints(), camera, width, height), width, height, autoFrame, view: camera.view });
   root.frameAll = () => { fit(); persistCamera(); }; root.frameSelection = () => { fit(true); persistCamera(); };

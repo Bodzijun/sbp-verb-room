@@ -421,6 +421,10 @@
           "type": "string",
           "maxLength": 128
         },
+        "color": {
+          "type": "string",
+          "pattern": "^#[0-9a-f]{6}$"
+        },
         "format": {
           "type": "integer",
           "minimum": 0,

@@ -12,6 +12,7 @@
 #include "scene.hpp"
 #include "tail.hpp"
 #include "baked_path.hpp"
+#include "baked_persist.hpp"
 
 namespace verb {
 
@@ -181,7 +182,17 @@ public:
     void requestPathBake(unsigned workers=0);
     void cancelPathBake();
     // Drops every baked table (and any running bake); declared paths stay, state returns to NotBaked. Control thread only.
+    // P4: also clears the undo cache, so an explicit clear is never silently undone by a cache restore.
     void clearPathBake();
+    // P4: install tables restored from a saved project/preset. Control thread only. Every table must carry a
+    // content signature equal to the freshly computed one of its group (and the current estimator); matching
+    // tables are re-stamped with the live session counters and published exactly like a finished bake
+    // (lock-free for the audio thread). Returns false and changes nothing when any table does not match.
+    bool installBakedTables(const std::vector<BakedTable>& tables);
+    // P4: current content signature of every bake group (control thread; same order as bakeStats().groups).
+    std::vector<uint64_t> bakeContentSignatures() const;
+    // P4: number of tables held in the bounded undo cache (<= kBakeCacheCap).
+    int bakedCacheEntries() const;
     struct PathGroupStats {
         int group=-1;
         bool movesListener=false;
@@ -192,10 +203,16 @@ public:
     struct BakeStats {
         BakeState state=BakeState::NotBaked;
         int percent=0, discontinuities=0,waitReason=0,workers=0,done=0,total=0;
+        int restored=0; // P4: 0 = traced this session, 1 = restored from saved state, 2 = restored from the undo cache
         uint64_t hash=0,lookups=0,stations=0,resets=0,cancelled=0;
         double milliseconds=0;
         std::vector<PathGroupStats> groups;
     };
+    // P1 diagnostics: worker-side timing of bake stations (steady_clock on the bake worker only; never the audio thread).
+    struct BakeTraceStation { int group=0; double u=0; int kind=0; /*0 initial,1 validation*/ int rays=0; double queuedMs=0,doneMs=0; int activeAtQueue=0; bool retry=false; };
+    struct BakeTraceDecision { int group=0; double a=0,b=0,error=0; int decision=0; /*0 accept,1 split,2 approximate*/ size_t nodes=0; double ms=0; };
+    struct BakeTrace { std::vector<BakeTraceStation> stations; std::vector<BakeTraceDecision> decisions; double maxStepGapMs=0; uint64_t stepCalls=0,waitSteps=0; int activeLimit=0,workers=0; };
+    BakeTrace bakeTrace() const;
     BakeStats bakeStats() const;
     std::shared_ptr<const BakedTable> bakedTableSnapshot() const;
     std::vector<std::shared_ptr<const BakedTable>> bakedTablesSnapshot() const;
@@ -222,6 +239,25 @@ public:
     // Hash of the late-field state that decides the sound from now on: the IR spectra each shared convolver uses and
     // the gains applied. Equal hashes = the same late field for the same input. Control thread, process() not running.
     uint64_t lateStateHash() const;
+
+    // P7 Step 2 profiler (zero cost when VERB_P7_PROFILE != 1).
+    struct P7ProfileStats {
+        uint64_t processCalls = 0, processTotalNs = 0;
+        uint64_t startPeriodCalls = 0, startPeriodTotalNs = 0;
+        uint64_t spSetupNs = 0, spPoseNs = 0, spBuildImagesNs = 0;
+        uint64_t spSolveDirectNs = 0, spSolveValidateNs = 0, spSolveTapsNs = 0, spDiffJobsNs = 0;
+        uint64_t spSourceSkips = 0, spSourceSolves = 0;
+        uint64_t validateCalls = 0, validateSupportEvals = 0, validateSoftLegEvals = 0;
+        uint64_t validateAmpMemoHit = 0, validateAmpMemoEval = 0, validateAmpMemoDeferred = 0;
+        uint64_t bandSplitNs = 0, lateFeedNs = 0, renderTapsNs = 0, diffuseNs = 0;
+        uint64_t creativeWetNs = 0, endPeriodNs = 0, tailBlockNs = 0;
+        uint64_t tapsSkipped = 0, tapsStat = 0, tapsMoving = 0;
+        uint64_t workerStepCalls = 0, workerRebuilds = 0, workerRebuildsCancelled = 0;
+        uint64_t workerMotionEsts = 0, workerRebuildNs = 0, workerMotionEstNs = 0, workerBakeStepNs = 0;
+        uint64_t workerSettleTriggers = 0, workerLegacyTriggers = 0, workerJumpTriggers = 0;
+    };
+    P7ProfileStats p7ProfileStats() const;
+    void resetP7ProfileStats();
 
 private:
     struct Impl;

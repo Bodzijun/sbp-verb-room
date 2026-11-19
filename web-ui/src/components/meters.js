@@ -16,21 +16,57 @@ export function meters(store) {
   const off = store.subscribe(update); root.dispose = off; return root;
 }
 // Horizontal DAW-style level meter per source row: bar follows the loudest host
-// input the source reads (post-meter telemetry is input-peak only; no DSP claim).
+// input scaled by source gain and muted/solo gate (matches PluginProcessor.cpp).
 const dbFill = v => `${Math.max(0, Math.min(1, (20 * Math.log10(Math.max(1e-9, v)) + 60) / 60)) * 100}%`;
+export function sourcePostGain(values, count, index) {
+  const v = values || {};
+  let anySolo = false;
+  for (let i = 0; i < count; i++) {
+    const solo = v[`s${i + 1}solo`];
+    if (solo === true || Number(solo) >= 0.5) { anySolo = true; break; }
+  }
+  const mute = v[`s${index + 1}mute`], solo = v[`s${index + 1}solo`];
+  const muted = mute === true || Number(mute) >= 0.5;
+  const soloed = solo === true || Number(solo) >= 0.5;
+  if (muted || (anySolo && !soloed)) return 0;
+  const db = Number(v[`s${index + 1}g`] ?? 0);
+  return db > -60 ? Math.pow(10, db / 20) : 0;
+}
+// Source meter modes: 'peak' = instant attack, fast fall (~26 dB/s), hold marker 1.2 s then fast fall;
+// 'smooth' = the previous slow ballistics (~11 dB/s fall, slow hold).
+export const METER_MODES = { peak: { label: 'Peak', fall: 0.74, holdMs: 1200, holdFall: 0.6 }, smooth: { label: 'Smooth', fall: 0.88, holdMs: 0, holdFall: 0.985 } };
+const MODE_KEY = 'verbroom.meterMode';
+let meterMode = 'peak';
+try { const saved = globalThis.localStorage?.getItem(MODE_KEY); if (saved && METER_MODES[saved]) meterMode = saved; } catch { /* storage unavailable */ }
+export function getMeterMode() { return meterMode; }
+export function setMeterMode(mode) { if (!METER_MODES[mode]) return; meterMode = mode; try { globalThis.localStorage?.setItem(MODE_KEY, mode); } catch { /* ignore */ } }
+export function stepSourceMeter(n, peak, dt, now, mode = meterMode) {
+  const m = METER_MODES[mode] || METER_MODES.peak, k = dt / 100;
+  n.level = Math.max(peak, n.level * Math.pow(m.fall, k));
+  if (peak >= n.hold) { n.hold = peak; n.holdAt = now; }
+  else if (!m.holdMs || now - (n.holdAt || 0) >= m.holdMs) n.hold = Math.max(peak, n.hold * Math.pow(m.holdFall, k));
+}
 export function sourceMeters(store, ranges) {
-  const nodes = ranges.map(([first, count]) => ({ first, count, level: 0, hold: 0, root: element('div', { className: 'hmeter', title: `Input ${first + 1}${count > 1 ? `–${first + count}` : ''} · peak, −60…0 dB${store.mode === 'mock' ? ' (synthetic)' : ''}` }, [element('i'), element('b')]) }));
+  const nodes = ranges.map(([first, count]) => ({ first, count, level: 0, hold: 0, holdAt: 0, gain: 1, root: element('div', { className: 'hmeter', title: `Input ${first + 1}${count > 1 ? `–${first + count}` : ''} · post-gain peak, −60…0 dB${store.mode === 'mock' ? ' (synthetic)' : ''}` }, [element('i'), element('b')]) }));
   let last = performance.now();
   const off = store.subscribe(({ reason }) => {
-    if (reason !== 'meters.input') return;
+    if (reason !== 'meters.input' && reason !== 'parameters' && reason !== 'patch' && reason !== 'snapshot') return;
     const event = store.telemetry['meters.input']; if (!event) return;
-    const now = performance.now(), dt = now - last; last = now;
-    for (const n of nodes) {
+    const now = performance.now(), dt = Math.max(0, now - last); last = now;
+    const values = store.state?.parameters?.values;
+    nodes.forEach((n, index) => {
+      const gain = sourcePostGain(values, nodes.length, index);
+      if (gain < n.gain) {
+        const ratio = n.gain > 0 ? gain / n.gain : 0;
+        n.level *= ratio; n.hold *= ratio;
+      }
+      n.gain = gain;
       let peak = 0; for (let c = 0; c < n.count; c++) peak = Math.max(peak, event.peaks[n.first + c] || 0);
-      n.level = Math.max(peak, n.level * Math.pow(0.88, dt / 100)); n.hold = Math.max(peak, n.hold * Math.pow(0.985, dt / 100));
+      peak *= gain;
+      stepSourceMeter(n, peak, dt, now);
       n.root.firstChild.style.left = dbFill(n.level); n.root.lastChild.style.left = dbFill(n.hold);
       n.root.lastChild.hidden = n.hold < .001;
-    }
+    });
   });
   return { nodes: nodes.map(n => n.root), dispose: off };
 }

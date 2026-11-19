@@ -125,16 +125,16 @@ jobs:
             ctest --test-dir build --output-on-failure --timeout 600 -R '^(tail_regression|cathedral_tail|vsl_hall_tail|quality_test|energy_map|portable_presets|spatial_editor|energy_editor|vsl_hall_presets|tail_transition|stage2_engine|stage2_processor)$' -E '^(stage2_fixes|stage2_processor)$'
           fi
 
-      # Suites added in 0.2.0 (E16..E23: paths, bake, Ambisonics, keep-alive). They have not been verified on the CI
-      # platforms yet, so a failure is reported but does not fail the job. E9/E19/E28 (long path bakes, fixture scenes)
-      # run locally: VERB_ONLY_E19=1 VerbPluginTest.
+      # Suites added in 0.2.0/0.2.1 (C1, P4, E16..E23: source colours, bake persistence, paths, bake, Ambisonics, keep-alive).
+      # They have not been verified on the CI platforms yet, so a failure is reported but does not fail the job.
+      # E9/E19/E28/P5/P6/P7 (long path bakes or local fixture scenes) are skipped when fixtures are absent and run locally.
       - name: New suites (informational)
         continue-on-error: true
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            xvfb-run -a ctest --test-dir build --output-on-failure --timeout 600 -R '^(E16|E17|E18|E21|E23)_suite$'
+            xvfb-run -a ctest --test-dir build --output-on-failure --timeout 600 -R '^(C1|P4|E16|E17|E18|E21|E23)_suite$'
           else
-            ctest --test-dir build --output-on-failure --timeout 600 -R '^(E16|E17|E18|E21|E23)_suite$'
+            ctest --test-dir build --output-on-failure --timeout 600 -R '^(C1|P4|E16|E17|E18|E21|E23)_suite$'
           fi
 
       - name: Upload test report

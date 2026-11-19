@@ -4,17 +4,87 @@
 #include <cmath>
 #include <cstdint>
 #include <vector>
+#include "scene.hpp"
 namespace verb {
+// P3 phase 1 (owner proposal 2026-11-17/18; a listening A/B will follow). All bake-estimator knobs in one place.
+// Split thresholds per octave band (125,250,500,1000,2000,4000,8000 Hz): 1 dB in 250-2000 Hz, 2 dB in 125/4k/8k.
+inline constexpr double kBakeSplitThresholdDb[NB] = {2., 1., 1., 1., 1., 2., 2.};
+// D1: raising the baked late-tail detection sphere 0.5 -> 1.0 m cuts the far-room 500-2000 Hz level error
+// 11.8 -> 2.4 dB at no extra ray cost (n_eff 3 -> 14-33). Bake ONLY: the live non-baked tail keeps its radius.
+inline constexpr double kBakeDetectRadiusMin = 1.0;
+// P3: ray-budget probe target for the RAW integrated station energy: relative Monte-Carlo std
+// sqrt(sum h2)/sum h <= target (0.30 ~ 1.3 dB absolute; common random numbers make station-to-station
+// differences much quieter). The live tail's tailNeedsMoreRays guards late-window EXTRAPOLATION, which the
+// bake no longer stores, so the bake probes the noise of the integral instead. Measured on Flate (48k, r=1.0):
+// worst nEff 7.6 at u=0 in 4-8 kHz -> a 96k path budget; mid bands are quieter. Guess until the listening A/B.
+inline constexpr double kBakeRayNoiseTarget = 0.30;
+// P6: 4-window partitioned late-tail equalizer (boundaries aligned with 48 kHz / 512-sample FDL partitions
+// at 74.67 ms, 149.33 ms, 405.33 ms; prevents room-to-room decay-slope overshoot in the late tail).
+inline constexpr int kBakeWinCount = 4;
+inline constexpr double kBakeWinEndSec[kBakeWinCount] = {
+    7.0 * 512.0 / 48000.0,
+    14.0 * 512.0 / 48000.0,
+    38.0 * 512.0 / 48000.0,
+    1e9
+};
+// Estimator version stamped into every baked table. Tables made by another estimator are never played back as
+// valid (bakeContextTable rejects them). P4: tables ARE persisted now (owner decision 2026-11-18 overrides the
+// E9 session-only design); this guard also covers kept tables across partial re-bakes and saved states.
+inline constexpr int kBakeEstimatorVersion = 3;
+inline constexpr size_t kBakeNodeCap = 64;
 // Initial nodes are only part of the job: independent midpoint validation follows.
 inline int bakedProgressPercent(size_t initialDone,size_t initialTotal,size_t validated,size_t validations) {
     if(initialDone<initialTotal||validations==0)return initialTotal?std::min(45,(int)(45*initialDone/initialTotal)):0;
     return 45+std::min(54,(int)(54*validated/validations));
 }
+// P2: honest bake progress. The old two-phase mapping above divides by the validation list that grows with every split, so it
+// plateaus near the top while stations are still completing. Here the total number of stations is estimated instead: the initial
+// stations, every validation known so far, and the validations the still-pending ones are expected to spawn (split rate observed so far,
+// bounded by the remaining node budget of the 64-node cap). The caller keeps the value monotonic and reports 100 only when finished.
+inline double bakedStationEstimate(size_t initialTotal,size_t segmentsKnown,size_t segmentsDecided,size_t nodes) {
+    const double budgetNodes=(double)kBakeNodeCap,n0=(double)initialTotal;
+    const double known=segmentsKnown>0?(double)segmentsKnown:(initialTotal>1?n0-1.:0.);
+    const double decided=segmentsKnown>0?(double)std::min(segmentsDecided,segmentsKnown):0.;
+    const double pending=std::max(0.,known-decided);
+    const double splits=nodes>initialTotal?(double)(nodes-initialTotal):0.;
+    const double q=std::min(.45,(splits+1.2)/(decided+24.));  // P3: observed split rate, prior 0.05 worth 24 decisions (the phase-1 estimator splits far less than the old one)
+    const double budget=std::max(0.,budgetNodes-std::max((double)nodes,n0));
+    const double futureSplits=std::min(budget,pending*q/(1.-2.*q));
+    return n0+known+2.*futureSplits;
+}
+// Displayed value after a station completed: never below the previous value or the raw estimate, never 100 before the table is
+// published, and at least 2 % of the remaining distance per completed station so the bar keeps moving while the estimate grows.
+inline double bakedAdvanceProgress(double shown,int raw) {
+    return std::min(99.,std::max(std::max(shown,(double)raw),shown+(99.-shown)*.02));
+}
+inline int bakedHonestProgressPercent(size_t stationsDone,double stationsEstimate) {
+    if(!(stationsEstimate>0.))return 0;
+    return std::clamp((int)(99.*std::min(1.,(double)stationsDone/stationsEstimate)),0,99);
+}
+// P3: partial credit for in-flight stations so the bar keeps moving while a long station runs. credit is the sum
+// over active stations of an asymptotic elapsed/expected estimate (see the bake worker); display only, never 100.
+inline double bakedHonestProgressActive(double stationsDone,double credit,double stationsEstimate) {
+    if(!(stationsEstimate>0.))return 0.;
+    return std::clamp(99.*std::min(1.,(stationsDone+std::max(0.,credit))/stationsEstimate),0.,99.);
+}
+// P3: double-precision variant of bakedAdvanceProgress (same monotone + 2%-of-remaining-per-completion rule).
+inline double bakedAdvanceProgressD(double shown,double raw) {
+    return std::min(99.,std::max(std::max(shown,raw),shown+(99.-shown)*.02));
+}
 enum class BakedRefinement { Accept, Split, Approximate };
 inline BakedRefinement bakedRefinement(double error,size_t nodes,double a,double b) {
     if(error<=1)return BakedRefinement::Accept;
     const double mid=(a+b)*.5;
-    return nodes<64&&mid>a&&mid<b?BakedRefinement::Split:BakedRefinement::Approximate;
+    return nodes<kBakeNodeCap&&mid>a&&mid<b?BakedRefinement::Split:BakedRefinement::Approximate;
+}
+// P3: the production split rule. bandError holds the worst Monte-Carlo-noise-corrected interpolation error per
+// band; a segment splits when ANY band exceeds its own threshold (kBakeSplitThresholdDb).
+inline BakedRefinement bakedRefinementBands(const std::array<double,NB>& bandError,size_t nodes,double a,double b) {
+    bool over=false;
+    for(int band=0;band<NB;++band)over|=bandError[band]>kBakeSplitThresholdDb[band];
+    if(!over)return BakedRefinement::Accept;
+    const double mid=(a+b)*.5;
+    return nodes<kBakeNodeCap&&mid>a&&mid<b?BakedRefinement::Split:BakedRefinement::Approximate;
 }
 struct BakedTimingKey {
     double t = 0.0, f = 0.0;
@@ -82,8 +152,9 @@ struct BakedPath {
         if(hint)*hint=jBest;
         if(!jBest||best>.02*.02||distance.back()<=0)return false;
         u=(distance[jBest-1]+fBest*(distance[jBest]-distance[jBest-1]))/distance.back();
-        double yaw=poses[jBest-1][3]+std::remainder(poses[jBest][3]-poses[jBest-1][3],360.)*fBest;
-        return std::abs(std::remainder(p[3]-yaw,360.))<=1.;
+        const double spanYaw=std::remainder(poses[jBest][3]-poses[jBest-1][3],360.);
+        const double yaw=poses[jBest-1][3]+spanYaw*fBest;
+        return std::abs(std::remainder(p[3]-yaw,360.))<=1.+std::abs(spanYaw);
     }
 };
 struct BakedTable {
@@ -94,7 +165,10 @@ struct BakedTable {
     std::vector<uint64_t> objRevisions;
     bool movesListener = false;
     uint64_t request=0,geometry=0,quality=0,job=0;
+    int estimator=0; // P3: kBakeEstimatorVersion of the worker that traced this table (0 = pre-P3, never valid)
+    uint64_t contentSig=0; // P4: cross-session content signature (baked_persist.hpp); 0 = unknown, never installed
     std::vector<double> staticPose,patterns,u,energy,amplitude;
+    std::vector<double> winEnergy,winAmplitude,winEss; // P6: [u][source][window][receiver][band]
     std::vector<double> noiseDb,sumNoiseDb;
     int sources=0,receivers=0,discontinuities=0,selectedRays=0;
     std::vector<double> jointU, jointPoses, jointDist;
@@ -196,10 +270,11 @@ struct BakedTable {
                     const double diff=pose[off+k]-interp;
                     posSq+=diff*diff;
                 }
-                const double yawInterp=a[m*4+3]+f*std::remainder(b[m*4+3]-a[m*4+3],360.);
+                const double spanYaw=std::remainder(b[m*4+3]-a[m*4+3],360.);
+                const double yawInterp=a[m*4+3]+f*spanYaw;
                 const double yawErr=std::abs(std::remainder(pose[off+3]-yawInterp,360.));
                 e+=posSq+(yawErr*.01)*(yawErr*.01);
-                if(posSq>.02*.02||yawErr>1.)ok=false;
+                if(posSq>.02*.02||yawErr>1.+std::abs(spanYaw))ok=false;
             }
             fOut=f;tolOk=ok;return e;
         };
@@ -251,6 +326,7 @@ struct BakedTable {
         phase=(d[bestJ-1]+bestF*(d[bestJ]-d[bestJ-1]))/d.back();return true;
     }
     size_t stride() const {return (size_t)sources*receivers*7;}
+    size_t winStride() const {return (size_t)kBakeWinCount*stride();}
     bool lookup(double phase,double* out) const noexcept {
         if(u.size()<2)return false;
         if(jointU.empty() && path.closed && phase>=1)phase=0;
@@ -258,7 +334,22 @@ struct BakedTable {
         double f=std::clamp((phase-u[j-1])/(u[j]-u[j-1]),0.,1.);size_t n=stride();
         for(size_t k=0;k<n;++k){double a=amplitude[(j-1)*n+k],b=amplitude[j*n+k],v=a+(b-a)*f;out[k]=v*v;}return true;
     }
-    uint64_t hash() const {uint64_t h=1469598103934665603ull;auto mix=[&](const void* v,size_t n){auto p=(const unsigned char*)v;for(size_t j=0;j<n;++j){h^=p[j];h*=1099511628211ull;}};for(double v:u)mix(&v,sizeof v);for(double v:energy)mix(&v,sizeof v);return h;}
+    bool lookupWindows(double phase,double* outEnergy,double* outEss) const noexcept {
+        if(u.size()<2)return false;
+        const size_t n=winStride();
+        if(winAmplitude.size()!=u.size()*n||winEss.size()!=u.size()*n)return false;
+        if(jointU.empty() && path.closed && phase>=1)phase=0;
+        size_t j=std::clamp<size_t>((size_t)(std::upper_bound(u.begin(),u.end(),phase)-u.begin()),1,u.size()-1);
+        double f=std::clamp((phase-u[j-1])/(u[j]-u[j-1]),0.,1.);
+        for(size_t k=0;k<n;++k){
+            double a=winAmplitude[(j-1)*n+k],b=winAmplitude[j*n+k],v=a+(b-a)*f;
+            outEnergy[k]=v*v;
+            double ea=winEss[(j-1)*n+k],eb=winEss[j*n+k];
+            outEss[k]=ea+(eb-ea)*f;
+        }
+        return true;
+    }
+    uint64_t hash() const {uint64_t h=1469598103934665603ull;auto mix=[&](const void* v,size_t n){auto p=(const unsigned char*)v;for(size_t j=0;j<n;++j){h^=p[j];h*=1099511628211ull;}};for(double v:u)mix(&v,sizeof v);for(double v:energy)mix(&v,sizeof v);for(double v:winEnergy)mix(&v,sizeof v);return h;}
 };
 }
 

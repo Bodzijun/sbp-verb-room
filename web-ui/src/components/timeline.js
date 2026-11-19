@@ -124,16 +124,27 @@ export function timelinePanel(ctx) {
     const r = pathRow(store.state, o), time = newKeyTime(p, index, timeToAxis(r.start, r.end, r.autos.find(a => a.index === index)?.time ?? 0), true);
     store.command({ op: 'path.setPointTiming', object: o, index, time, easing });
   }
+  // Hold plan for a point. An Auto point first gets the explicit time it already has (what a sideways drag would do), then the hold copy: one gesture.
+  function holdPlan(o, index) {
+    const p = store.state.document.paths[o];
+    const explicit = index === 0 || (p.times?.[index] !== null && p.times?.[index] !== undefined);
+    if (explicit) { const cmds = holdCommands(p, index, o); return cmds ? { cmds } : { reason: 'No room for a pause here (last point, or the next key is too close in time)' }; }
+    if (!p.closed && index >= p.points.length - 1) return { reason: 'The last point is the End handle: nothing follows it to pause before' };
+    const r = pathRow(store.state, o), time = newKeyTime(p, index, timeToAxis(r.start, r.end, r.autos.find(a => a.index === index)?.time ?? 0), true);
+    const times = p.times ? p.times.slice() : Array(p.points.length).fill(null); times[index] = time;
+    const cmds = holdCommands({ ...p, times }, index, o);
+    return cmds ? { cmds: [{ op: 'path.setPointTiming', object: o, index, time }, ...cmds] } : { reason: 'No room for a pause here (the next key is too close in time)' };
+  }
   function addHold(o, index) {
-    const cmds = holdCommands(store.state.document.paths[o], index, o); if (!cmds) return;
-    const g = gesture('Hold at point ' + (index + 1)); g.send(cmds); g.end();
+    const plan = holdPlan(o, index); if (!plan.cmds) return;
+    const g = gesture('Hold at point ' + (index + 1)); g.send(plan.cmds); g.end();
   }
   function openMenu(e, o, index, current, canHold) {
     e.preventDefault(); closeMenu();
     const items = PATH_EASINGS.map(name => button(EASE_LABEL[name], () => { closeMenu(); setEasing(o, index, name); },
       { role: 'menuitemradio', 'aria-checked': String(name === current), className: name === current ? 'on' : '' }));
-    if (canHold) items.push(element('hr', { className: 'tl-menu-sep' }), button('Hold here (pause)', () => { closeMenu(); addHold(o, index); },
-      { role: 'menuitem', title: 'Adds a copy of this point a little later in time: the object rests at this place in between' }));
+    if (canHold) { const plan = holdPlan(o, index); items.push(element('hr', { className: 'tl-menu-sep' }), button('Hold here (pause)', () => { closeMenu(); addHold(o, index); },
+      { role: 'menuitem', 'data-hold': plan.cmds ? 'on' : 'disabled', disabled: !plan.cmds, title: plan.cmds ? 'Adds a copy of this point a little later in time: the object rests at this place in between' : plan.reason })); }
     menu = element('div', { className: 'tl-menu', role: 'menu', 'aria-label': 'Key easing' }, items);
     document.body.append(menu);                       // outside the panel: never clipped by it
     const w = menu.offsetWidth, h = menu.offsetHeight;
@@ -247,7 +258,7 @@ export function timelinePanel(ctx) {
           const r = refs.get(o).current; showTip(d, timeToAxis(r.start, r.end, t), `Point ${index + 1} · ${fmt(t)} %`);
         } });
       });
-      d.addEventListener('contextmenu', e => openMenu(e, o, index, auto ? 'linear' : (store.state.document.paths[o].easings?.[index] || 'linear'), !auto));
+      d.addEventListener('contextmenu', e => openMenu(e, o, index, auto ? 'linear' : (store.state.document.paths[o].easings?.[index] || 'linear'), true));
       d.addEventListener('keydown', e => {
         const p = store.state.document.paths[o];
         if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); e.stopPropagation(); if (!auto) clearKeyTime(o, index); return; }
