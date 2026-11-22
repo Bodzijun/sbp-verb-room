@@ -33,7 +33,7 @@ export function createStore(bridge) {
       next.revision = p.toRevision; state = freeze(next); notify('patch');
     } else if (message.kind === 'error') { error = p; if (p.resync) resync(); notify('error'); }
     else if (message.kind === 'event') {
-      if (p.event === 'resync.required') { resync(); view.selection = []; }
+      if (p.event === 'resync.required') { view.selection = []; resync(); }
       else {
         telemetry = { ...telemetry, [p.event]: clone(p) };
         if(p.event==='analysis.cleared') {
@@ -68,6 +68,7 @@ export function createStore(bridge) {
   const store = {
     mode: bridge.mode,
     get state() { return state; }, get ready() { return ready; }, get view() { return view; }, get telemetry() { return telemetry; }, get error() { return error; },
+    get commandSlots() { return 256 - queued; },
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     async start() { await bridge.send({ schemaVersion: 1, sessionId, kind: 'hello', payload: { supportedVersions: [1], client: 'verb-room-t2', ready: true } }); await store.command({ op: 'telemetry.subscribe', topics: ['meters', 'tail', 'status', 'analysis'] }); if (bridge.mode === 'juce') await store.command({op:'catalogs.list'}); },
     command(payload, transactionId) {
@@ -76,6 +77,7 @@ export function createStore(bridge) {
       const begin = payload.op === 'transaction.begin', closing = ['transaction.commit','transaction.cancel'].includes(payload.op);
       if (begin) transactions.set(transactionId, { open:false, failed:false });
       const transaction = transactionId ? transactions.get(transactionId) : null;
+      if (transaction && payload.op === 'transaction.cancel') transaction.cancelQueued = true;
       const commandEpoch = epoch;
       const work = async () => {
         if (!ready || !state || commandEpoch !== epoch) return null;
@@ -84,13 +86,26 @@ export function createStore(bridge) {
         let recoveredRequest = null;
         for (let attempt = 0; attempt < 2; attempt++) {
           const message = { schemaVersion: 1, sessionId, kind: 'command', requestId: `${sessionId}-${++serial}`, baseRevision: state.revision, ...(transactionId ? { transactionId } : {}), payload };
-          bridge.validator.assert(message); const reply = await bridge.send(message);
+          let reply;
+          try {
+            bridge.validator.assert(message);
+            reply = await bridge.send(message);
+          } catch (error) {
+            if (transaction) transaction.failed = true;
+            if (begin) transactions.delete(transactionId);
+            throw error;
+          }
           if (transaction) {
-            if (begin) transaction.open = reply?.kind === 'ack';
-            if (closing) { transaction.open = false; transactions.delete(transactionId); }
-            if (reply?.kind === 'error') {
+            if (begin) {
+              transaction.open = reply?.kind === 'ack';
+              if (!transaction.open) transactions.delete(transactionId);
+            }
+            if (closing && (reply?.kind === 'ack' || payload.op === 'transaction.cancel')) {
+              transaction.open = false; transactions.delete(transactionId);
+            }
+            if (reply?.kind !== 'ack') {
               transaction.failed = true;
-              if (!begin && !closing && !reply.payload.resync) store.command({op:'transaction.cancel'}, transactionId);
+              if (!begin && !closing && !reply?.payload?.resync && !transaction.cancelQueued) store.command({op:'transaction.cancel'}, transactionId);
               notify('transactionfailed');
             }
           }

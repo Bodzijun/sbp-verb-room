@@ -16,7 +16,7 @@ These targets need actual DAW testing on their respective operating systems. Suc
 3. Download `VerbRoom-macos-universal` or `VerbRoom-linux-x86_64` from **Artifacts**. GitHub may require you to sign in.
 4. Extract the artifact, then extract the enclosed platform archive. Keep the whole `Verb Room.vst3` bundle/directory intact.
 
-Each archive contains the plug-in, presets, documentation, license, `INSTALL.txt`, and `BUILDINFO.json` identifying the source commit. A SHA-256 checksum accompanies the archive. The macOS ZIP and Linux tar.gz preserve bundle permissions; do not distribute a bare executable copied out of the bundle.
+Each archive contains the plug-in, presets, documentation, license, `THIRD_PARTY_DIRECTIVITY.md`, `INSTALL.txt`, and `BUILDINFO.json` identifying the source commit. A SHA-256 checksum accompanies the archive. The macOS ZIP and Linux tar.gz preserve bundle permissions; do not distribute a bare executable copied out of the bundle.
 
 The workflow runs for code/build changes pushed to main, version tags, relevant pull requests, and **Run workflow** requests. It uploads build artifacts; it does not publish a GitHub Release automatically. Artifacts expire after 30 days, so download release candidates before they expire.
 

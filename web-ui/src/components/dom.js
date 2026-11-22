@@ -17,10 +17,10 @@ export const button = (label, action, attrs = {}) => element('button', { type: '
 let openDropdown = null;
 export function closeDropdowns() { if (openDropdown) openDropdown(); }
 export function select(label, values, value, change, attrs = {}) {
-  const { reselect = false, ...attributes } = attrs;
+  const { reselect = false, placeholder = '', ...attributes } = attrs;
   const items = values.map((v, i) => { const [key, text] = Array.isArray(v) ? v : [i, v]; return { key: String(key), text: String(text) }; });
   let current = String(value), popup = null, highlighted = -1, search = null, closeFn = null;
-  const labelOf = key => items.find(i => i.key === key)?.text ?? '';
+  const labelOf = key => items.find(i => i.key === key)?.text ?? placeholder;
   const caption = element('span', { className: 'dd-text', text: labelOf(current) }), caret = element('i', { className: 'dd-caret', 'aria-hidden': 'true' });
   const root = element('button', { type: 'button', className: 'dd', role: 'combobox', 'aria-label': label, 'aria-haspopup': 'listbox', 'aria-expanded': 'false', ...attributes }, [caption, caret]);
   Object.defineProperty(root, 'value', { get: () => current, set: v => { current = String(v); caption.textContent = labelOf(current); } });

@@ -1842,6 +1842,20 @@ inline double shReceiverGain(const Transducer& t, Vec3 d) {
 
 // Directivity gain of every octave band (the pattern may change with frequency: `pattern` at 125 Hz, `patternHf` at 8 kHz).
 // The angle is evaluated once.
+inline double analyticDirGainScalar(const Transducer& t, Vec3 d) {
+    if (t.shIndex >= 0) return shReceiverGain(t, d);
+    const double gdb = t.gainDb == 0.0 ? 1.0 : std::pow(10.0, t.gainDb / 20.0);
+    const double a = t.azimuthDeg * kPi / 180.0;
+    double c;
+    if (t.elevationDeg == 0.0) {
+        c = d.x * std::cos(a) + d.y * std::sin(a);
+    } else {
+        const double e = t.elevationDeg * kPi / 180.0, ce = std::cos(e);
+        c = d.x * ce * std::cos(a) + d.y * ce * std::sin(a) + d.z * std::sin(e);
+    }
+    return ((1 - t.pattern) + t.pattern * c) * gdb;
+}
+
 inline void analyticDirGainBands(const Transducer& t, Vec3 d, double* g) {
     if (t.shIndex >= 0) {  // Ambisonic receiver: the same signed gain in every band
         const double v = shReceiverGain(t, d);

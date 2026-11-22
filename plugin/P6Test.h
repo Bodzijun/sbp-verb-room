@@ -265,7 +265,13 @@ inline bool runSceneEvaluation(
 
     auto renderSettledAt = [&](double u) -> WindowBandEnergies {
         setP(proc, pathParamId, u);
-        for (int i = 0; i < 12; ++i) { buf.clear(); stage2Process(proc, buf, midi); }
+        // The processor's 20 ms pose tracker keeps moving after a small path step.
+        // Let it settle before asking for an exact re-trace at this position.
+        const int posePrerollBlocks = (int)std::ceil(0.42 * sr / bs);
+        for (int i = 0; i < posePrerollBlocks; ++i) {
+            buf.clear();
+            stage2Process(proc, buf, midi);
+        }
         const uint64_t refBefore = engine->tailRefreshCount();
         engine->notifyJump();
         const auto t0 = std::chrono::steady_clock::now();
@@ -1293,7 +1299,8 @@ inline int run() {
     }
 
     namespace fs = std::filesystem;
-    const fs::path outDir("E:/Claude/verb/out/P6");
+    const char* outEnv = std::getenv("VERB_P6_OUT");
+    const fs::path outDir(outEnv && *outEnv ? outEnv : "E:/Claude/verb/out/P6");
     fs::create_directories(outDir);
 
     const char* tagEnv = std::getenv("VERB_P6_TAG");

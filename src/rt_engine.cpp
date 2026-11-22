@@ -42,6 +42,7 @@ public:
             for (int b = 0; b < lg; ++b)
                 if (i & (1 << b)) r |= 1 << (lg - 1 - b);
             rev_[i] = r;
+            if (i < r) swapPairs_.push_back({i, r});
         }
         for (int k = 0; k < n / 2; ++k) {
             double a = -2 * kPi * k / n;
@@ -65,9 +66,16 @@ public:
        #if VERB_REQUIRE_AVX2
         const auto imaginarySign = _mm256_set1_ps(inv ? -0.f : 0.f);
        #endif
-        for (int i = 0; i < n_; ++i)
-            if (i < rev_[i]) std::swap(a[i], a[rev_[i]]);
-        for (int len = 2; len <= n_; len <<= 1) {
+        for (const auto& sp : swapPairs_)
+            std::swap(a[sp.first], a[sp.second]);
+        if (n_ >= 2) {
+            for (int i = 0; i < n_; i += 2) {
+                const cf u = a[i], x = a[i + 1];
+                a[i] = {u.re + x.re, u.im + x.im};
+                a[i + 1] = {u.re - x.re, u.im - x.im};
+            }
+        }
+        for (int len = 4; len <= n_; len <<= 1) {
             int half = len / 2, step = n_ / len;
             for (int i = 0; i < n_; i += len) {
                 int k = 0;
@@ -107,6 +115,7 @@ public:
 private:
     int n_;
     std::vector<int> rev_;
+    std::vector<std::pair<int, int>> swapPairs_;
     std::vector<float> twr_, twi_;
    #if VERB_REQUIRE_AVX2
     std::vector<float> stageRe_, stageIm_;
@@ -152,6 +161,7 @@ struct Found {
     uint32_t key;
     double delay;  // samples
     float amp[NB];
+    float rg[16] = {};
 };
 
 constexpr uint32_t kDiffKey = 0x7FFFFFFFu;  // tap key of the edge-diffracted direct path
@@ -161,6 +171,7 @@ struct Tap {
     double d0 = 0, d1 = 0;
     double ref = 0;  // slowly smoothed true delay: the Doppler-free reference
     float g0[8] = {}, g1[8] = {};
+    float rg0[16] = {}, rg1[16] = {};
     float fadeStart[NB] = {}, fadeTarget[NB] = {};
     int fadeLeft = 0, fadeTotal = 0;
     int glideIdx = 0, glideLen = 1;
@@ -222,6 +233,9 @@ struct TailConv {
     std::vector<float> freshRe, freshIm, freshPrev, freshIn;
     // E8: clean unboosted input history for per-source (!shared) jump handover abort.
     std::vector<float> cleanRe, cleanIm, cleanPrev, cleanIn;
+    std::vector<uint8_t> fdlNz, freshNz, cleanNz;
+    std::vector<float> preRe, preIm, preFreshRe, preFreshIm;
+    int preCurSlot = -1, preHoSlot = -1, preDoneQ = 0;
     std::atomic<int> cleanSynced{0};
     uint64_t inputStart=0; int inputFadeBlocks=0;
     std::atomic<int> publishedHandover{-1};
@@ -355,6 +369,7 @@ struct Engine::Impl {
         double lastLst[4] = {1e30, 0, 0, 0};     // listener pose it was built for
         uint64_t lastGeom = 0;                   // geometry serial it was built for
         uint64_t lastQuality = 0;
+        uint64_t lastTraceQuality = 0;
         double solvedPose[4] = {1e30, 0, 0, 0};  // pose the early paths were solved for (audio thread)
         double solvedRawPose[4] = {1e30, 0, 0, 0};  // raw pose before Rule D (audio jump detection)
         std::vector<Vec3> hist;                  // source position at each control period (retarded-time delays)
@@ -365,6 +380,8 @@ struct Engine::Impl {
         int fadeLeftPeriods = 0;                 // remaining periods of jump crossfade
         int stillPeriods = 0;                    // P7: consecutive periods with unchanged resolved source position
         bool pendingSolve = false;               // P7: source needs an early-path solve on its next round-robin turn
+        double solvedEarlyG = 1.0;               // P8: earlyG value the source's taps were last scaled for
+        bool dopplerSettling = false;            // P8: true while any tap has |tru - ref| > 1e-4 under dopK != 1
         Transducer t;
         DirectivityMailbox directivityState;
         std::atomic<uint64_t> directivitySerial{0};
@@ -549,6 +566,10 @@ struct Engine::Impl {
     std::vector<TailHist> srcHist;                 // worker: cached late-field histogram per source
     std::vector<int> histRays;
     std::vector<bool> histSparse;
+    TailHist cachedFinalizedAvg;                   // worker: cached pooled & finalized physical histogram
+    std::vector<double> cachedE;
+    int cachedUsedRays = 0;
+    bool cachedSparse = false;
     mutable std::mutex diagnosticsMx;
     std::shared_ptr<const TailDiagnostics> diagnostics;
     std::shared_ptr<const AutoLevelEnergy> autoEnergy;
@@ -590,14 +611,17 @@ struct Engine::Impl {
     double sLastLst[4] = {1e30, 0, 0, 0};
     uint64_t sLastGeom = 0;
     uint64_t sLastQuality = 0, workerQuality = 0;
+    uint64_t sLastTraceQuality = 0, workerTraceQuality = 0;
     std::atomic<int> requestedRays{20000};
     std::atomic<bool> requestedAdaptive{false};
-    std::atomic<uint64_t> qualitySerial{0};
+    std::atomic<uint64_t> qualitySerial{0}, traceQualitySerial{0};
     std::array<std::atomic<double>, 3> requestedDecay{{1., 1., 1.}};
     std::atomic<double> renderedSeconds{0.};
     int M = 1, RM = 0;
+    bool coincidentOmni = false;
+    std::vector<float> omniU, omniV;
     double lastSpread = -1;
-    double earlyG = 1.0, lastEarlyDb = 1e30;
+    double earlyG = 1.0, lastEarlyG = 1.0, lastEarlyDb = 1e30;
     float tailGa = 1.f, tailGb = 1.f;  // tail gain at the start / end of the control period (eased towards the setting)
     double dopK = 1.0, lastDopK = 1.0, dopA = 0.0;  // Doppler strength and per-period smoothing of the reference delay (tau 10 s)
     static constexpr int kVelvetN = 48;     // pulses per decorrelator
@@ -615,10 +639,13 @@ struct Engine::Impl {
     std::vector<double> rawAnchor;
     bool firstSolve = true;
     bool listenerMoved = true;
+    bool lmovedNow = false;
 
     uint64_t gcount = 0;
     int B = 0;
     std::vector<float> tailRing;  // [receiver][ringSize]
+    // Shared scratch for sequential convolution calls on the audio thread.
+    mutable std::vector<int> activePartitions, activeFdlSlots;
     size_t tailMask = 0;
     std::vector<float> tmpOut, tailTmp, accRe, accIm, accRe2, accIm2;
     // P2/P6: pending baked equalizer for the next inverse() (set by bakeEqualize inside accumulate), and the fresh bank kept apart
@@ -698,6 +725,19 @@ struct Engine::Impl {
         }
         M = (cfg.spatialTaps == 2 || cfg.spatialTaps == 4) ? cfg.spatialTaps : 1;
         RM = R * M;
+        coincidentOmni = (M == 1 && R > 1 && R <= 16);
+        for (int r = 0; coincidentOmni && r < R; ++r) {
+            const auto& firstReceiver = rcvLocal.front();
+            const auto& receiver = rcvLocal[(size_t)r];
+            const Vec3 d = receiver.pos - firstReceiver.pos;
+            const bool sameShFrame = firstReceiver.shIndex < 0
+                || (receiver.shIndex >= 0 && receiver.azimuthDeg == firstReceiver.azimuthDeg);
+            if (std::fabs(d.x) > 1e-6 || std::fabs(d.y) > 1e-6 || std::fabs(d.z) > 1e-6
+                || receiver.patternHf >= 0.0 || receiver.profile() || !sameShFrame)
+                coincidentOmni = false;
+        }
+        omniU.assign((size_t)cfg.ctrlInterval + 16, 0.f);
+        omniV.assign((size_t)cfg.ctrlInterval + 16, 0.f);
         rcvBase = sc.receivers;
         rcvAbs.resize((size_t)RM);
         for (int r = 0; r < R; ++r)
@@ -790,15 +830,22 @@ struct Engine::Impl {
         if (N <= (size_t)B * 2) throw std::runtime_error("scene length too short for the tail block size");
         const int initialP = (int)((N - 1) / B);
         const int P = (int)std::ceil(20. * sr / B); // retain input history for later longer worker IRs
+        activePartitions.resize((size_t)P);
+        activeFdlSlots.resize((size_t)P);
         auto initConv = [&](TailConv& t, int channels) {
-            t.B = B; t.P = P; t.R = channels; t.bins = B + 1;
+            t.B = B; t.P = P; t.R = channels; t.bins = (B + 1 + 15) & ~15;
             t.fdlRe.assign((size_t)P * t.bins, 0.f); t.fdlIm.assign((size_t)P * t.bins, 0.f);
             t.prevIn.assign(B, 0.f); t.inAcc.assign(B, 0.f);
             t.freshRe.assign(t.fdlRe.size(),0.f);t.freshIm.assign(t.fdlIm.size(),0.f);
             t.freshPrev.assign(B,0.f);t.freshIn.assign(B,0.f);
+            t.fdlNz.assign((size_t)P, 0); t.freshNz.assign((size_t)P, 0);
+            t.preRe.assign((size_t)channels * t.bins, 0.f); t.preIm.assign((size_t)channels * t.bins, 0.f);
+            t.preFreshRe.assign((size_t)channels * t.bins, 0.f); t.preFreshIm.assign((size_t)channels * t.bins, 0.f);
+            t.preCurSlot = -1; t.preHoSlot = -1; t.preDoneQ = 0;
             if (!shared) {
                 t.cleanRe.assign(t.fdlRe.size(), 0.f); t.cleanIm.assign(t.fdlIm.size(), 0.f);
                 t.cleanPrev.assign(B, 0.f); t.cleanIn.assign(B, 0.f);
+                t.cleanNz.assign((size_t)P, 0);
                 t.cleanSynced.store(P, std::memory_order_relaxed);
             }
             for (auto& sl : t.slot) { sl.partitions = initialP; sl.re.assign((size_t)channels * initialP * t.bins, 0.f); sl.im.assign((size_t)channels * initialP * t.bins, 0.f); sl.isJump = false; }
@@ -856,9 +903,10 @@ struct Engine::Impl {
         tailRing.assign((size_t)R * tr, 0.f);
         tmpOut.assign((size_t)R * cfg.ctrlInterval, 0.f);
         tailTmp.assign((size_t)R * B, 0.f);
-        accRe.assign(B + 1, 0.f); accIm.assign(B + 1, 0.f); accRe2.assign(B + 1, 0.f); accIm2.assign(B + 1, 0.f);
-        eqWinRe.assign((size_t)kBakeWinCount * (size_t)(B + 1), 0.f);
-        eqWinIm.assign((size_t)kBakeWinCount * (size_t)(B + 1), 0.f);
+        const size_t paddedBins = (size_t)((B + 1 + 15) & ~15);
+        accRe.assign(paddedBins, 0.f); accIm.assign(paddedBins, 0.f); accRe2.assign(paddedBins, 0.f); accIm2.assign(paddedBins, 0.f);
+        eqWinRe.assign((size_t)kBakeWinCount * paddedBins, 0.f);
+        eqWinIm.assign((size_t)kBakeWinCount * paddedBins, 0.f);
         eqWinTmp.assign(B, 0.f);
         for (int w = 0; w + 1 < kBakeWinCount; ++w)
             eqWinEndK[(size_t)w] = std::max(0, (int)std::llround(kBakeWinEndSec[w] * sr / (double)B) - 1);
@@ -914,7 +962,8 @@ struct Engine::Impl {
         placeReceivers(effL0, std::min(std::max(params[S * 4 + 4].load(), 0.0), 3.0));
         presolveDiffraction();
         // E5b exact initial early transfers are prepared off the audio thread.
-        for(int source=0;source<S;++source)for(int receiver=0;receiver<RM;++receiver)for(int surf=0;surf<G().nSurf();++surf){
+        const int initRM = coincidentOmni ? 1 : RM;
+        for(int source=0;source<S;++source)for(int receiver=0;receiver<initRM;++receiver)for(int surf=0;surf<G().nSurf();++surf){
             if(surf==G().ceilId()&&!G().hasCeil)continue;
             Vec3 P;float a[NB];std::fill_n(a,NB,1.f);
             const auto sp=srcs[source]->t.pos,rp=rcvAbs[receiver].pos;
@@ -924,7 +973,7 @@ struct Engine::Impl {
             }
         }
         warmingSoft=true;
-        for(int source=0;source<S;++source){buildImages(srcs[source]->t.pos);for(int receiver=0;receiver<RM;++receiver){if(G().separatedShell(srcs[source]->t.pos,rcvAbs[receiver].pos,false))continue;for(size_t idx=1;idx<nodes.size();++idx)if(nodes[idx].order==1){Found f;validate((int)idx,*srcs[source],rcvAbs[receiver],srcs[source]->t,f,source,receiver);}}}
+        for(int source=0;source<S;++source){buildImages(srcs[source]->t.pos);for(int receiver=0;receiver<initRM;++receiver){if(G().separatedShell(srcs[source]->t.pos,rcvAbs[receiver].pos,false))continue;for(size_t idx=1;idx<nodes.size();++idx)if(nodes[idx].order==1){Found f;validate((int)idx,*srcs[source],rcvAbs[receiver],srcs[source]->t,f,source,receiver);}}}
         warmingSoft=false;
         softSpent=0;softEvals=softHits=0;softProfile={};softCursor=0;softDeferred=false;
         cfg.cancelled = {};
@@ -946,6 +995,7 @@ struct Engine::Impl {
         if (serial == workerQuality) return;
         cfg.tailRays = requestedRays.load(); cfg.adaptiveTail = requestedAdaptive.load();
         for (int g=0;g<3;++g) cfg.decayMultipliers[g] = requestedDecay[g].load();
+        workerTraceQuality = traceQualitySerial.load(std::memory_order_acquire);
         workerQuality = serial;
     }
 
@@ -1028,46 +1078,65 @@ struct Engine::Impl {
         return {width>1?bakePool.get():nullptr,width,cancel};
     }
 
-    void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx, uint64_t sceneRevision, const std::function<bool()>& extraCancel = {}, bool cancelOnPose = true) {
-        bakePreempt.fetch_add(1);if(bakeRequested.load())bakeWaitReason=7;
+    void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx, uint64_t sceneRevision, const std::function<bool()>& extraCancel = {}, bool cancelOnPose = true, bool decayOnly = false) {
+        bakePreempt.fetch_add(1);if(bakeRequested.load())bakeWaitReason=cancelOnPose&&extraCancel?7:5;
         TailConv& t = srcs[s]->tail;
         bool sparse = false;
         const auto rebuildPose=livePose();
-        const auto cancelled = [&]{return !running || geomSerial.load()!=sceneRevision || qualitySerial.load()!=workerQuality || (cfg.cancelled && cfg.cancelled()) || (extraCancel && extraCancel()) || (cancelOnPose && livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
+        const auto cancelled = [&]{return !running || geomSerial.load()!=sceneRevision || traceQualitySerial.load(std::memory_order_acquire)!=workerTraceQuality || (!decayOnly && qualitySerial.load(std::memory_order_acquire)!=workerQuality) || (cfg.cancelled && cfg.cancelled()) || (extraCancel && extraCancel()) || (cancelOnPose && livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
         const auto execution=tailExecution(cancelled);
-        TailHist rawH;
-        TailHist h = traceTailAdaptive(scn, st, rc, cfg.erOrder, cfg.tailRays, rayLimit(cfg.tailRays), scn.seed+131*s, histRays[s], &sparse, cancelled, execution, &rawH);
-        auto& bakeSlot=t.slot[slotIdx];
-        bakeSlot.bakeEnergy.assign((size_t)R*NB,0.);
-        bakeSlot.bakeWinEnergy.assign((size_t)kBakeWinCount*R*NB,0.);
-        bakeSlot.bakeWinEss.assign((size_t)kBakeWinCount*R*NB,0.);
-        bakeSlot.bakeEqGain.assign((size_t)R,{});
-        for(auto& g:bakeSlot.bakeEqGain)for(auto& wg:g)wg={{1,1,1,1,1,1,1}};
-        bakeSlot.bakeEqLp.assign((size_t)R,{});
-        bakeSlot.bakeEqSeen.assign((size_t)R,~0ull);bakeSlot.bakeJumpSeen=0;bakeSlot.bakeInvalidSince=~0ull;
-        for(int r=0;r<R;++r)for(int b=0;b<NB;++b){
-            double totE=0.,sum1[kBakeWinCount]={},sum2[kBakeWinCount]={};
-            const size_t nK=h.h[r][b].size();
-            const bool has2=!rawH.h2.empty()&&rawH.h2[r][b].size()>=nK;
-            for(size_t k=0;k<nK;++k){
-                const double e=h.h[r][b][k];
-                totE+=e;
-                const double tSec=((double)k+0.5)*h.binDur;
-                int w=0;while(w+1<kBakeWinCount&&tSec>=kBakeWinEndSec[w])++w;
-                sum1[w]+=e;
-                if(has2)sum2[w]+=rawH.h2[r][b][k];
+        TailHist h;
+        if (decayOnly && !srcHist[s].h.empty()) {
+            h = srcHist[s];
+            sparse = histSparse[s];
+            const int curIdx = t.curAtomic.load(std::memory_order_acquire);
+            auto& bakeSlot = t.slot[slotIdx];
+            const auto& curSlot = t.slot[curIdx];
+            bakeSlot.bakeEnergy = curSlot.bakeEnergy;
+            bakeSlot.bakeWinEnergy = curSlot.bakeWinEnergy;
+            bakeSlot.bakeWinEss = curSlot.bakeWinEss;
+            bakeSlot.bakeEqGain.assign((size_t)R, {});
+            for (auto& g : bakeSlot.bakeEqGain) for (auto& wg : g) wg = {{1, 1, 1, 1, 1, 1, 1}};
+            bakeSlot.bakeEqLp.assign((size_t)R, {});
+            bakeSlot.bakeEqSeen.assign((size_t)R, ~0ull); bakeSlot.bakeJumpSeen = 0; bakeSlot.bakeInvalidSince = ~0ull;
+            bakeSlot.bakePose = curSlot.bakePose;
+            srcs[s]->lastQuality = workerQuality;
+        } else {
+            TailHist rawH;
+            h = traceTailAdaptive(scn, st, rc, cfg.erOrder, cfg.tailRays, rayLimit(cfg.tailRays), scn.seed+131*s, histRays[s], &sparse, cancelled, execution, &rawH);
+            auto& bakeSlot=t.slot[slotIdx];
+            bakeSlot.bakeEnergy.assign((size_t)R*NB,0.);
+            bakeSlot.bakeWinEnergy.assign((size_t)kBakeWinCount*R*NB,0.);
+            bakeSlot.bakeWinEss.assign((size_t)kBakeWinCount*R*NB,0.);
+            bakeSlot.bakeEqGain.assign((size_t)R,{});
+            for(auto& g:bakeSlot.bakeEqGain)for(auto& wg:g)wg={{1,1,1,1,1,1,1}};
+            bakeSlot.bakeEqLp.assign((size_t)R,{});
+            bakeSlot.bakeEqSeen.assign((size_t)R,~0ull);bakeSlot.bakeJumpSeen=0;bakeSlot.bakeInvalidSince=~0ull;
+            for(int r=0;r<R;++r)for(int b=0;b<NB;++b){
+                double totE=0.,sum1[kBakeWinCount]={},sum2[kBakeWinCount]={};
+                const size_t nK=h.h[r][b].size();
+                const bool has2=!rawH.h2.empty()&&rawH.h2[r][b].size()>=nK;
+                for(size_t k=0;k<nK;++k){
+                    const double e=h.h[r][b][k];
+                    totE+=e;
+                    const double tSec=((double)k+0.5)*h.binDur;
+                    int w=0;while(w+1<kBakeWinCount&&tSec>=kBakeWinEndSec[w])++w;
+                    sum1[w]+=e;
+                    if(has2)sum2[w]+=rawH.h2[r][b][k];
+                }
+                bakeSlot.bakeEnergy[(size_t)r*NB+b]=totE;
+                for(int w=0;w<kBakeWinCount;++w){
+                    const size_t wk=((size_t)w*R+r)*NB+b;
+                    bakeSlot.bakeWinEnergy[wk]=sum1[w];
+                    bakeSlot.bakeWinEss[wk]=(sum2[w]>0.&&sum1[w]>0.)?(sum1[w]*sum1[w]/sum2[w]):0.;
+                }
             }
-            bakeSlot.bakeEnergy[(size_t)r*NB+b]=totE;
-            for(int w=0;w<kBakeWinCount;++w){
-                const size_t wk=((size_t)w*R+r)*NB+b;
-                bakeSlot.bakeWinEnergy[wk]=sum1[w];
-                bakeSlot.bakeWinEss[wk]=(sum2[w]>0.&&sum1[w]>0.)?(sum1[w]*sum1[w]/sum2[w]):0.;
-            }
+            double bl[4];for(int k=0;k<4;++k)bl[k]=params[S*4+k].load();bakeSlot.bakePose={st.pos.x,st.pos.y,st.pos.z,st.azimuthDeg,bl[0],bl[1],bl[2],bl[3]};
+            histSparse[s] = sparse;
+            srcHist[s] = h;
+            srcs[s]->lastQuality = workerQuality;
+            srcs[s]->lastTraceQuality = workerTraceQuality;
         }
-        double bl[4];for(int k=0;k<4;++k)bl[k]=params[S*4+k].load();bakeSlot.bakePose={st.pos.x,st.pos.y,st.pos.z,st.azimuthDeg,bl[0],bl[1],bl[2],bl[3]};
-        histSparse[s] = sparse;
-        srcHist[s] = h;
-        srcs[s]->lastQuality = workerQuality;
         reshapeTailDecay(h, cfg.decayMultipliers);
         shapedHist[s] = h;
         updateAutoPoint(s,scn,st,rc,h);
@@ -1098,7 +1167,8 @@ struct Engine::Impl {
                 for(int i=0;i<B;++i){size_t idx=(size_t)(k+1)*B+i;if(idx<N)tmp[i].re=ir[r][idx];}
                 wf.run(tmp.data(),false);
                 size_t o=((size_t)r*sl.partitions+k)*t.bins;
-                for(int b=0;b<t.bins;++b){sl.re[o+b]=tmp[b].re;sl.im[o+b]=tmp[b].im;}
+                for(int b=0;b<=B;++b){sl.re[o+b]=tmp[b].re;sl.im[o+b]=tmp[b].im;}
+                for(int b=B+1;b<t.bins;++b){sl.re[o+b]=0.f;sl.im[o+b]=0.f;}
             }
         });
         if(cancelled())throw std::runtime_error("Tail rebuild cancelled");
@@ -1216,7 +1286,7 @@ struct Engine::Impl {
     // cancelled re-trace changes nothing, and publishes a Transition (long crossfade, then the normalization handover)
     // instead of the short swap. The IR and gains it ends with are computed exactly as the constructor computes them.
     bool sharedRebuild(bool initial, const std::vector<double>* settle = nullptr, const std::function<bool()>& settleCancel = {}, bool jumpRebuild = false, uint64_t jumpTag = 0) {
-        bakePreempt.fetch_add(1);if(bakeRequested.load())bakeWaitReason=7;
+        bakePreempt.fetch_add(1);if(bakeRequested.load())bakeWaitReason=jumpRebuild?1:settle?7:2;
         std::shared_ptr<World> wsnap;
         {
             std::lock_guard<std::mutex> lk(worldMx);
@@ -1239,10 +1309,25 @@ struct Engine::Impl {
             resolvePose4(wsnap->geo, wsnap->serial, workerSrcHist[(size_t)s], rawS, effS);
             for (int i = 0; i < 4; ++i) poses[(size_t)s][(size_t)i] = effS[i];
         }
+        struct SharedBusyGuard {
+            std::atomic<bool>& flag;
+            bool armed = false;
+            void arm() noexcept {
+                if (!armed) {
+                    flag.store(true, std::memory_order_release);
+                    armed = true;
+                }
+            }
+            ~SharedBusyGuard() noexcept {
+                if (armed) flag.store(false, std::memory_order_release);
+            }
+        } busyGuard{sharedBusy};
         if (settle) {
+            busyGuard.arm();
             scn.length = settledTailLength(*wsnap, lst, rc, [&]{return !running||geomSerial.load()!=wsnap->serial||qualitySerial.load()!=workerQuality||(settleCancel&&settleCancel())||(cfg.cancelled&&cfg.cancelled());}, &poses);
             sharedLengthCheck = false;
         } else if (jumpRebuild) {
+            busyGuard.arm();
             bool cacheHit = false;
             scn.length = jumpTailLength(*wsnap, lst, rc, cacheHit, &poses);
             sharedLengthCheck = !cacheHit;
@@ -1252,12 +1337,8 @@ struct Engine::Impl {
         const double dYawL = std::fabs(std::remainder(lst[3] - sLastLst[3], 360.0));
         const int tsStart = transState.load(std::memory_order_acquire);
         const bool all = settle ? (lst[0] != sLastLst[0] || lst[1] != sLastLst[1] || lst[2] != sLastLst[2] || lst[3] != sLastLst[3])
-                                : (jumpRebuild ? (initial || tsStart != 0 || !pubIsRef || wsnap->serial != sLastGeom || workerQuality != sLastQuality || dl > 0.001 || dYawL > 0.1)
-                                               : (initial || wsnap->serial != sLastGeom || workerQuality != sLastQuality || dl > 0.05 || std::fabs(lst[3] - sLastLst[3]) > 2));
-        const auto rebuildPose=livePose();
-        const bool cancelOnPose = (settle != nullptr) || (!jumpRebuild && cfg.motionMode <= 0);
-        const auto cancelled=[&]{return !running||geomSerial.load()!=wsnap->serial||qualitySerial.load()!=workerQuality||(cfg.cancelled&&cfg.cancelled())||(settleCancel&&settleCancel())||(cancelOnPose&&livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
-        const auto execution=tailExecution(cancelled);
+                                : (jumpRebuild ? (initial || tsStart != 0 || !pubIsRef || wsnap->serial != sLastGeom || workerTraceQuality != sLastTraceQuality || dl > 0.001 || dYawL > 0.1)
+                                               : (initial || wsnap->serial != sLastGeom || workerTraceQuality != sLastTraceQuality || dl > 0.05 || std::fabs(lst[3] - sLastLst[3]) > 2));
         const int rays = std::max(1500, cfg.tailRays / std::max(1, S));
         std::vector<int> dirty;
         for (int s = 0; s < S; ++s) {
@@ -1273,8 +1354,13 @@ struct Engine::Impl {
                             : (all || dp > 0.05 || std::fabs(p[3] - sp.lastPose[3]) > 2 || workerPattern(s) != sp.lastPattern)) dirty.push_back(s);
         }
         if (durationChanged) { dirty.clear(); for (int s = 0; s < S; ++s) dirty.push_back(s); }
-        if (dirty.empty()) return false;
-        sharedBusy.store(true,std::memory_order_release);
+        const bool decayOnly = (!initial && !settle && !jumpRebuild && dirty.empty() && workerQuality != sLastQuality && !cachedFinalizedAvg.h.empty());
+        if (dirty.empty() && !decayOnly) return false;
+        const auto rebuildPose=livePose();
+        const bool cancelOnPose = (settle != nullptr) || (!jumpRebuild && cfg.motionMode <= 0);
+        const auto cancelled=[&]{return !running||geomSerial.load()!=wsnap->serial||traceQualitySerial.load(std::memory_order_acquire)!=workerTraceQuality||(!decayOnly&&qualitySerial.load(std::memory_order_acquire)!=workerQuality)||(cfg.cancelled&&cfg.cancelled())||(settleCancel&&settleCancel())||(cancelOnPose&&livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
+        const auto execution=tailExecution(cancelled);
+        busyGuard.arm();
         // Settle and jump re-traces work on copies and commit only when complete.
         const bool useCopies = (settle != nullptr) || jumpRebuild;
         std::vector<TailHist> work;
@@ -1282,56 +1368,69 @@ struct Engine::Impl {
         if (useCopies) { work = srcHist; workRays = histRays; }
         std::vector<TailHist>& hist = useCopies ? work : srcHist;
         std::vector<int>& hRays = useCopies ? workRays : histRays;
-        // Retain raw moments in the cache; assess confidence only after pooling.
-        auto traceSource = [&](int s, int count) {
-            Transducer st = currentSource(s);
-            st.pos = {poses[(size_t)s][0], poses[(size_t)s][1], poses[(size_t)s][2]};
-            st.azimuthDeg = poses[(size_t)s][3];
-            st.pattern = workerPattern(s);
-            hist[(size_t)s] = traceTail(scn, st, rc, cfg.erOrder, count, scn.seed + 131 * s, false, cancelled, S==1?execution:TailExecution{});
-            hRays[(size_t)s] = count;
-            if (useCopies) return;
-            srcs[(size_t)s]->lastPattern = st.pattern;
-            for (int i = 0; i < 4; ++i) srcs[(size_t)s]->lastPose[i] = poses[(size_t)s][(size_t)i];
-        };
-        if(durationChanged){dirty.clear();for(int s=0;s<S;++s)dirty.push_back(s);}
-        rebuildFor(dirty.size(),[&](size_t i){traceSource(dirty[i],rays);});
-        const size_t nBins = hist[0].nBins;
         TailHist avg;
         std::vector<double> E((size_t)S * R * NB, 0.0), Eavg((size_t)R * NB, 0.0);
         bool sparse = false;
-        int targetRays = rays;
-        for (;;) {
-            avg = TailHist{};
-            avg.nBins = nBins; avg.binDur = hist[0].binDur;
-            avg.h.resize(R); avg.h2.resize(R);
-            for (int r = 0; r < R; ++r)
-                for (int b = 0; b < NB; ++b) {
-                    auto& dst = avg.h[r][b]; auto& dst2 = avg.h2[r][b];
-                    dst.assign(nBins, 0.0); dst2.assign(nBins, 0.0);
-                    for (int s = 0; s < S; ++s) {
-                        const auto& h = hist[s].h[r][b]; const auto& h2 = hist[s].h2[r][b];
-                        double e = 0;
-                        for (size_t k = 0; k < nBins; ++k) {
-                            dst[k] += h[k] / S; dst2[k] += h2[k] / ((double)S * S); e += h[k];
-                        }
-                        E[((size_t)s * R + r) * NB + b] = e;
-                    }
-                }
-            TailHist raw = avg;
-            finalizeTail(avg);
-            sparse = tailNeedsMoreRays(raw, avg);
-            if (!sparse || targetRays >= rayLimit(rays)) break;
-            targetRays = std::min(rayLimit(rays), targetRays * 2);
-            std::vector<int> refine;
-            for (int s = 0; s < S; ++s) if (hRays[s] < targetRays) {
-                if (useCopies && std::find(dirty.begin(), dirty.end(), s) == dirty.end()) dirty.push_back(s);
-                refine.push_back(s);
-            }
-            rebuildFor(refine.size(),[&](size_t i){traceSource(refine[i],targetRays);});
-        }
         int usedRays = 0;
-        for (int count : hRays) usedRays += count;
+        if (decayOnly) {
+            avg = cachedFinalizedAvg;
+            E = cachedE;
+            usedRays = cachedUsedRays;
+            sparse = cachedSparse;
+        } else {
+            // Retain raw moments in the cache; assess confidence only after pooling.
+            auto traceSource = [&](int s, int count) {
+                Transducer st = currentSource(s);
+                st.pos = {poses[(size_t)s][0], poses[(size_t)s][1], poses[(size_t)s][2]};
+                st.azimuthDeg = poses[(size_t)s][3];
+                st.pattern = workerPattern(s);
+                hist[(size_t)s] = traceTail(scn, st, rc, cfg.erOrder, count, scn.seed + 131 * s, false, cancelled, S==1?execution:TailExecution{});
+                hRays[(size_t)s] = count;
+                if (useCopies) return;
+                srcs[(size_t)s]->lastPattern = st.pattern;
+                for (int i = 0; i < 4; ++i) srcs[(size_t)s]->lastPose[i] = poses[(size_t)s][(size_t)i];
+            };
+            if(durationChanged){dirty.clear();for(int s=0;s<S;++s)dirty.push_back(s);}
+            rebuildFor(dirty.size(),[&](size_t i){traceSource(dirty[i],rays);});
+            const size_t nBins = hist[0].nBins;
+            int targetRays = rays;
+            for (;;) {
+                avg = TailHist{};
+                avg.nBins = nBins; avg.binDur = hist[0].binDur;
+                avg.h.resize(R); avg.h2.resize(R);
+                for (int r = 0; r < R; ++r)
+                    for (int b = 0; b < NB; ++b) {
+                        auto& dst = avg.h[r][b]; auto& dst2 = avg.h2[r][b];
+                        dst.assign(nBins, 0.0); dst2.assign(nBins, 0.0);
+                        for (int s = 0; s < S; ++s) {
+                            const auto& h = hist[s].h[r][b]; const auto& h2 = hist[s].h2[r][b];
+                            double e = 0;
+                            for (size_t k = 0; k < nBins; ++k) {
+                                dst[k] += h[k] / S; dst2[k] += h2[k] / ((double)S * S); e += h[k];
+                            }
+                            E[((size_t)s * R + r) * NB + b] = e;
+                        }
+                    }
+                TailHist raw = avg;
+                finalizeTail(avg);
+                sparse = tailNeedsMoreRays(raw, avg);
+                if (!sparse || targetRays >= rayLimit(rays)) break;
+                targetRays = std::min(rayLimit(rays), targetRays * 2);
+                std::vector<int> refine;
+                for (int s = 0; s < S; ++s) if (hRays[s] < targetRays) {
+                    if (useCopies && std::find(dirty.begin(), dirty.end(), s) == dirty.end()) dirty.push_back(s);
+                    refine.push_back(s);
+                }
+                rebuildFor(refine.size(),[&](size_t i){traceSource(refine[i],targetRays);});
+            }
+            for (int count : hRays) usedRays += count;
+            if (!useCopies) {
+                cachedFinalizedAvg = avg;
+                cachedE = E;
+                cachedUsedRays = usedRays;
+                cachedSparse = sparse;
+            }
+        }
         publishDiagnostics(avg, usedRays, S * rayLimit(rays), sparse);
         // Normalize against the finalized IR, preserving each source's measured
         // band energy even when extrapolation changes the common envelope area.
@@ -1355,6 +1454,7 @@ struct Engine::Impl {
                 }
         // Apply AFTER computing the physical source/average gain ratio. Renormalizing
         // against a boosted tail would cancel its onset-preserving decay change.
+        const TailHist unshapedAvg = avg;
         reshapeTailDecay(avg, cfg.decayMultipliers);
         const size_t N = cfg.decayMultipliers == std::array<double,3>{{1,1,1}} ? (size_t)std::ceil(scn.length * sr) : (size_t)std::ceil(avg.nBins*avg.binDur*sr);
         renderedSeconds.store(N/sr);
@@ -1366,21 +1466,12 @@ struct Engine::Impl {
         // E4a: the same IR expressed in the current normalization (band b of receiver r scaled by sqrt(Nold / Nnew)):
         // with the gains of the new pose in the old normalization it sounds exactly like the new IR with the new gains.
         std::vector<float> cmul((size_t)R * 8, 1.f);
-        std::vector<std::vector<float>> irX;
         if (settle) {
             for (int r = 0; r < R; ++r)
                 for (int b = 0; b < NB; ++b) {
                     const double o = mref.N[(size_t)r * NB + b], nn = Eavg[(size_t)r * NB + b];
                     cmul[(size_t)r * 8 + b] = (o > 0 && nn > 0) ? (float)std::sqrt(o / nn) : 1.f;
                 }
-            BandBuf bx = buf;
-            for (int r = 0; r < R; ++r)
-                for (int b = 0; b < NB; ++b) {
-                    const double k = cmul[(size_t)r * 8 + b];
-                    for (auto& v : bx[(size_t)r][(size_t)b]) v *= k;
-                }
-            irX = combineBands(bx, sr, execution);
-            fadeTailEnd(irX, N, sr);
         }
         auto ir = combineBands(buf, sr, execution);
         fadeTailEnd(ir, N, sr);
@@ -1399,7 +1490,8 @@ struct Engine::Impl {
                 }
                 wf.run(tmp.data(), false);
                 const size_t o = (size_t)k * t.bins;
-                for (int b = 0; b < t.bins; ++b) { sl.re[o + (size_t)b] = tmp[(size_t)b].re; sl.im[o + (size_t)b] = tmp[(size_t)b].im; }
+                for (int b = 0; b <= B; ++b) { sl.re[o + (size_t)b] = tmp[(size_t)b].re; sl.im[o + (size_t)b] = tmp[(size_t)b].im; }
+                for (int b = B + 1; b < t.bins; ++b) { sl.re[o + (size_t)b] = 0.f; sl.im[o + (size_t)b] = 0.f; }
             }
         };
         const uint64_t epoch = ++epochCounter;
@@ -1416,22 +1508,9 @@ struct Engine::Impl {
                 trans.slotH[(size_t)r] = (cur + 2) % 3;
                 std::fill(t.freshRe.begin(),t.freshRe.end(),0.f);std::fill(t.freshIm.begin(),t.freshIm.end(),0.f);
                 std::fill(t.freshPrev.begin(),t.freshPrev.end(),0.f);std::fill(t.freshIn.begin(),t.freshIn.end(),0.f);
-                writeSlot(t, t.slot[trans.slotX[(size_t)r]], irX[(size_t)r]);
+                std::fill(t.freshNz.begin(),t.freshNz.end(),uint8_t(0));
                 writeSlot(t, t.slot[trans.slotH[(size_t)r]], ir[(size_t)r]);
                 handoverCorrelation(t,t.slot[cur],t.slot[trans.slotH[(size_t)r]]);
-                // correlation of the old IR and the new one (white input), for the crossfade law
-                const Slot& a = t.slot[cur]; const Slot& x = t.slot[trans.slotX[(size_t)r]];
-                double ax = 0, aa = 0, xx = 0;
-                for (int k = 0; k < std::max(a.partitions, x.partitions); ++k)
-                    for (int b = 0; b < t.bins; ++b) {
-                        const double wgt = (b == 0 || b == t.bins - 1) ? 1.0 : 2.0;
-                        const size_t o = (size_t)k * t.bins + (size_t)b;
-                        const bool ha = k < a.partitions, hx = k < x.partitions;
-                        if (ha) aa += wgt * ((double)a.re[o] * a.re[o] + (double)a.im[o] * a.im[o]);
-                        if (hx) xx += wgt * ((double)x.re[o] * x.re[o] + (double)x.im[o] * x.im[o]);
-                        if (ha && hx) ax += wgt * ((double)a.re[o] * x.re[o] + (double)a.im[o] * x.im[o]);
-                    }
-                trans.rho[(size_t)r] = (aa > 0 && xx > 0) ? (float)std::min(1.0, std::max(0.0, ax / std::sqrt(aa * xx))) : 0.f;
                 return;
             }
             wslot[(size_t)r] = w;
@@ -1463,6 +1542,10 @@ struct Engine::Impl {
             transState.store(1, std::memory_order_release);
             srcHist.swap(work);
             histRays.swap(workRays);
+            cachedFinalizedAvg = unshapedAvg;
+            cachedE = E;
+            cachedUsedRays = usedRays;
+            cachedSparse = sparse;
             for (int s : dirty)
                 for (int i = 0; i < 4; ++i) srcs[(size_t)s]->lastPose[i] = poses[(size_t)s][(size_t)i];
         } else {
@@ -1486,6 +1569,10 @@ struct Engine::Impl {
             if (jumpRebuild) {
                 srcHist.swap(work);
                 histRays.swap(workRays);
+                cachedFinalizedAvg = unshapedAvg;
+                cachedE = E;
+                cachedUsedRays = usedRays;
+                cachedSparse = sparse;
                 for (int s : dirty) {
                     srcs[(size_t)s]->lastPattern = std::min(std::max(workerPattern(s), 0.0), 1.0);
                     for (int i = 0; i < 4; ++i) srcs[(size_t)s]->lastPose[i] = poses[(size_t)s][(size_t)i];
@@ -1494,25 +1581,32 @@ struct Engine::Impl {
         }
         // the reference of the motion estimates: the poses, energies and normalization of this build
         mref.epoch = epoch; mref.E = E; mref.N = Eavg; mref.G = G;
-        for (int i = 0; i < 4; ++i) mref.lst[i] = lst[i];
-        mref.pose.resize((size_t)S);
-        for (int s = 0; s < S; ++s) for (int i = 0; i < 4; ++i) mref.pose[(size_t)s][(size_t)i] = srcs[(size_t)s]->lastPose[i];
-        mref.recValid = false;
+        if (!decayOnly) {
+            for (int i = 0; i < 4; ++i) mref.lst[i] = lst[i];
+            mref.pose.resize((size_t)S);
+            for (int s = 0; s < S; ++s) for (int i = 0; i < 4; ++i) mref.pose[(size_t)s][(size_t)i] = srcs[(size_t)s]->lastPose[i];
+            mref.recValid = false;
+        }
         prevPub = G; pubIsRef = true;
         {
             std::lock_guard<std::mutex> lk(epochMx);
             epochN.push_back({epoch, Eavg});
             if (epochN.size() > 6) epochN.erase(epochN.begin());
         }
-        for (int i = 0; i < 4; ++i) { sLastLst[i] = lst[i]; stRefLst[(size_t)i].store(lst[i]); }
+        if (!decayOnly) {
+            for (int i = 0; i < 4; ++i) { sLastLst[i] = lst[i]; stRefLst[(size_t)i].store(lst[i]); }
+        }
         sLastGeom = wsnap->serial;
         sLastQuality = workerQuality;
-        for(int s=0;s<S;++s) {
-            auto source=scn.sources[s]; source.pos={poses[s][0],poses[s][1],poses[s][2]}; source.azimuthDeg=poses[s][3];
-            source.pattern=srcs[s]->lastPattern;
-            updateAutoPoint(s,scn,source,rc,srcHist[s]);
+        sLastTraceQuality = workerTraceQuality;
+        if (!decayOnly) {
+            for(int s=0;s<S;++s) {
+                auto source=scn.sources[s]; source.pos={poses[s][0],poses[s][1],poses[s][2]}; source.azimuthDeg=poses[s][3];
+                source.pattern=srcs[s]->lastPattern;
+                updateAutoPoint(s,scn,source,rc,srcHist[s]);
+            }
+            publishAutoEnergy();
         }
-        publishAutoEnergy();
         if(settle||jumpRebuild)publishTailLength(wsnap,scn.length);
         sharedBusy.store(false,std::memory_order_release);
         ++refreshCount;
@@ -1595,9 +1689,9 @@ struct Engine::Impl {
                         const int moving=t.path.object<0?0:4+4*t.path.object;
                         covered=t.path.project(P.data()+moving,u);
                         if(covered)for(size_t j=1;j<t.movingPaths.size();++j){
-                            const auto&path=t.movingPaths[j];auto expected=path.at(u);
+                            const auto&path=t.movingPaths[j];
                             const int off=path.object<0?0:4+4*path.object;
-                            covered=covered&&!poseFar(P.data()+off,expected.data(),.02,1.);
+                            covered=covered&&path.matchesAt(P.data()+off,u);
                         }
                     }
                     if(covered)for(int s:t.groupSources)if(s>=0&&s<S)bakeCovered[(size_t)s]=1;
@@ -1687,7 +1781,9 @@ struct Engine::Impl {
 #include "baked_worker.inc"
 
     // One pass of the shared-tail worker (every 10 ms on the worker thread, or Engine::runWorkerStep()).
+    bool sharedTailHandoverWaiting = false; // coordinator only
     void sharedWorkerStep() {
+        sharedTailHandoverWaiting = false;
         if (p7Enabled) p7.workerStepCalls.fetch_add(1, std::memory_order_relaxed);
         syncQuality();
         {
@@ -1695,7 +1791,7 @@ struct Engine::Impl {
             const uint64_t ack = ackSerial.load();
             worlds.erase(std::remove_if(worlds.begin(), worlds.end(), [&](const std::shared_ptr<World>& w) { return w->serial <= ack && w != latest && w.get()!=audioWorld.load(std::memory_order_acquire); }), worlds.end());
         }
-        for (auto& c : sconv) if (c->pending.load() >= 0) return;
+        for (auto& c : sconv) if (c->pending.load() >= 0) { sharedTailHandoverWaiting = true; return; }
         const uint64_t jser = jumpSerial.load(std::memory_order_acquire);
         const bool jumpPending = (jser != workerJumpSeen);
         const auto now = std::chrono::steady_clock::now();
@@ -1716,7 +1812,10 @@ struct Engine::Impl {
             catch(const std::runtime_error&) {sharedBusy=false;if(!jumpPending){sLastGeom=0;for(auto& sp:srcs)sp->lastGeom=0;}}
             return;
         }
-        if (lateGseenPub.load(std::memory_order_acquire) != lateGserial.load(std::memory_order_acquire)) return;  // not yet taken
+        if (lateGseenPub.load(std::memory_order_acquire) != lateGserial.load(std::memory_order_acquire)) {
+            sharedTailHandoverWaiting = true;
+            return; // audio has yet to take the new gains
+        }
         const int ts = transState.load(std::memory_order_acquire);
         std::shared_ptr<World> wsnap;
         {std::lock_guard<std::mutex> lk(worldMx);wsnap=latest;}
@@ -1758,7 +1857,7 @@ struct Engine::Impl {
         bool legacy = wsnap->serial != sLastGeom || workerQuality != sLastQuality;
         for (int s = 0; s < S; ++s) legacy |= std::min(std::max(workerPattern(s), 0.0), 1.0) != srcs[(size_t)s]->lastPattern;
         if (legacy) {
-            if (ts == 1 || ts == 2) return;  // the long crossfade finishes first (motionFadeSec at most)
+            if (ts == 1 || ts == 2) { sharedTailHandoverWaiting = true; return; } // finish the audio crossfade
             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLegacy).count() < cfg.tailRefreshMs) return;
             if (p7Enabled) p7.workerLegacyTriggers.fetch_add(1, std::memory_order_relaxed);
             const auto t0 = std::chrono::steady_clock::now();
@@ -1789,7 +1888,7 @@ struct Engine::Impl {
         const bool settled = (double)(pos - anchorStream) >= cfg.motionSettleSec * sr
             || (!cfg.manualWorker && std::chrono::duration<double>(now - anchorWall).count() >= cfg.motionSettleSec);
         if (settled) {
-            if (ts != 0) return;  // the previous transition is still running
+            if (ts != 0) { sharedTailHandoverWaiting = true; return; } // finish the audio transition
             if (p7Enabled) p7.workerSettleTriggers.fetch_add(1, std::memory_order_relaxed);
             const auto t0 = std::chrono::steady_clock::now();
             const std::vector<double> ra = rawAnchor.empty() ? rawP : rawAnchor;
@@ -1857,6 +1956,10 @@ struct Engine::Impl {
     std::vector<uint64_t> psLastStream;  // manualWorker: the refresh interval in stream time (deterministic tests)
     std::vector<bool> psLengthCheck;
     int psRR = 0;
+    static bool tailHandoverWaiting(const TailConv& tail) {
+        const int pending = tail.pending.load(std::memory_order_acquire);
+        return pending >= 0 && pending != tail.publishedHandover.load(std::memory_order_acquire);
+    }
     void perSourceWorkerStep() {
         if (psLast.empty()) { psLast.assign((size_t)S, std::chrono::steady_clock::now()); psLastStream.assign((size_t)S, streamPos.load()); }
         if (psLengthCheck.empty()) psLengthCheck.assign((size_t)S, false);
@@ -1898,7 +2001,7 @@ struct Engine::Impl {
         for (int k = 0; k < S && running; ++k) {
             int s = (psRR + k) % S;
             Src& sp = *srcs[s];
-            if (sp.tail.pending.load() >= 0 && sp.tail.pending.load()!=sp.tail.publishedHandover.load(std::memory_order_acquire)) {
+            if (tailHandoverWaiting(sp.tail)) {
                 jumpDeferred = true; continue;
             }
             auto now = std::chrono::steady_clock::now();
@@ -1937,6 +2040,11 @@ struct Engine::Impl {
             }
             if ((sp.tail.publishedHandover.load(std::memory_order_acquire) >= 0 || sp.tail.cleanSynced.load(std::memory_order_acquire) < sp.tail.P) && !other) continue;
             if (!moved) continue;
+            if (p7Enabled) {
+                auto& trigger = longFade ? p7.workerSettleTriggers :
+                    jumpPending ? p7.workerJumpTriggers : p7.workerLegacyTriggers;
+                trigger.fetch_add(1, std::memory_order_relaxed);
+            }
             Transducer st = currentSource(s);
             st.pattern = pat;
             st.pos = {pose[0], pose[1], pose[2]};
@@ -1978,16 +2086,23 @@ struct Engine::Impl {
                     psLengthCheck[(size_t)s] = false;
                 } else if (jumpPending) {
                     settledScene.length = jumpTailLength(*wsnap, lst, rc, cacheHit, &effSrcs);
-                    buildTail(s, settledScene, st, rc, w, wsnap->serial, [this, jser] { return jumpSerial.load(std::memory_order_acquire) != jser; }, false);
+                    buildTail(s, settledScene, st, rc, w, wsnap->serial, [this, jser] { return jumpSerial.load(std::memory_order_acquire) != jser; }, false, false);
                     psLengthCheck[(size_t)s] = !cacheHit;
-                } else buildTail(s, wsnap->sc, st, rc, w, wsnap->serial, {}, cfg.motionMode <= 0);
+                } else {
+                    const bool psTraceDirty = durationChanged || gser != sp.lastGeom || pat != sp.lastPattern || sp.lastTraceQuality != workerTraceQuality
+                        || dp > (cfg.motionMode <= 0 ? 0.05 : dm) || dl > (cfg.motionMode <= 0 ? 0.05 : dm)
+                        || std::fabs(std::remainder(pose[3] - sp.lastPose[3], 360.0)) > (cfg.motionMode <= 0 ? 2.0 : dd)
+                        || std::fabs(std::remainder(lst[3] - sp.lastLst[3], 360.0)) > (cfg.motionMode <= 0 ? 2.0 : dd);
+                    const bool psDecayOnly = !psTraceDirty && !srcHist[s].h.empty() && (sp.lastQuality != workerQuality);
+                    buildTail(s, wsnap->sc, st, rc, w, wsnap->serial, {}, cfg.motionMode <= 0, psDecayOnly);
+                }
             }
             catch(const std::runtime_error&) {
                 sp.tail.workerBusy=false;if(longFade||jumpPending)++stCancelled;else sp.lastGeom=0;if(jumpPending){jumpDeferred=true;break;}continue;
             }
             sp.tail.longReq = 0;
             sp.tail.slot[w].isJump = jumpPending;
-            if(longFade){std::fill(sp.tail.freshRe.begin(),sp.tail.freshRe.end(),0.f);std::fill(sp.tail.freshIm.begin(),sp.tail.freshIm.end(),0.f);std::fill(sp.tail.freshPrev.begin(),sp.tail.freshPrev.end(),0.f);std::fill(sp.tail.freshIn.begin(),sp.tail.freshIn.end(),0.f);}
+            if(longFade){std::fill(sp.tail.freshRe.begin(),sp.tail.freshRe.end(),0.f);std::fill(sp.tail.freshIm.begin(),sp.tail.freshIm.end(),0.f);std::fill(sp.tail.freshPrev.begin(),sp.tail.freshPrev.end(),0.f);std::fill(sp.tail.freshIn.begin(),sp.tail.freshIn.end(),0.f);std::fill(sp.tail.freshNz.begin(),sp.tail.freshNz.end(),uint8_t(0));}
             if(longFade)handoverCorrelation(sp.tail,sp.tail.slot[cur],sp.tail.slot[w]);
             if (longFade) {  // correlation of the old and the new IR (white input) for the first block of the crossfade
                 const Slot& a = sp.tail.slot[cur]; const Slot& x = sp.tail.slot[w];
@@ -1995,8 +2110,8 @@ struct Engine::Impl {
                 const int bins = sp.tail.bins;
                 for (int r = 0; r < R; ++r)
                     for (int k2 = 0; k2 < std::max(a.partitions, x.partitions); ++k2)
-                        for (int b = 0; b < bins; ++b) {
-                            const double wgt = (b == 0 || b == bins - 1) ? 1.0 : 2.0;
+                        for (int b = 0; b <= B; ++b) {
+                            const double wgt = (b == 0 || b == B) ? 1.0 : 2.0;
                             const bool ha = k2 < a.partitions, hx = k2 < x.partitions;
                             const size_t oa = ((size_t)r * a.partitions + k2) * bins + b, ox = ((size_t)r * x.partitions + k2) * bins + b;
                             if (ha) aa += wgt * ((double)a.re[oa] * a.re[oa] + (double)a.im[oa] * a.im[oa]);
@@ -2007,7 +2122,10 @@ struct Engine::Impl {
                 sp.tail.longReq = std::max(1, (int)std::lround(cfg.motionFadeSec * sr / B));
 
             }
-            if(!running||geomSerial.load()!=wsnap->serial||qualitySerial.load()!=workerQuality||jumpSerial.load()!=jser||livePoseFar(taskPose,dm,dd)){
+            // A jump or settle builds for a specific pose. Legacy refreshes
+            // in motion mode may complete while the listener keeps moving.
+            const bool poseSensitive = jumpPending || longFade || cfg.motionMode <= 0;
+            if(!running||geomSerial.load()!=wsnap->serial||traceQualitySerial.load(std::memory_order_acquire)!=workerTraceQuality||jumpSerial.load()!=jser||(poseSensitive&&livePoseFar(taskPose,dm,dd))){
                 sp.tail.workerBusy=false;sp.lastGeom=0;++stCancelled;
                 if(jumpPending){jumpDeferred=true;break;}continue;
             }
@@ -2196,9 +2314,14 @@ struct Engine::Impl {
             softSpent+=NB*8+16;++softEvals;
             memo->serial=wd->serial;memo->speed=c;memo->epoch=sp.earlyEpoch;memo->revision=revision;memo->len=length;memo->early=earlyG;
         }
-        double rg[NB];
-        dirGainBands(rc, unit(first - rc.pos), rg);  // the receiver's pattern may depend on frequency
-        for (int b = 0; b < NB; ++b) amp[b] *= (float)rg[b];
+        const Vec3 inDir = unit(first - rc.pos);
+        if (coincidentOmni) {
+            evalCoincidentRg(inDir, f.rg);
+        } else {
+            double rg[NB];
+            dirGainBands(rc, inDir, rg);  // the receiver's pattern may depend on frequency
+            for (int b = 0; b < NB; ++b) amp[b] *= (float)rg[b];
+        }
         if constexpr (Profile) {
             double sg[NB];
             dirGainBands(src, unit(last - src.pos), sg);
@@ -2210,6 +2333,26 @@ struct Engine::Impl {
         }
         if(memo)memo->value=f;
         return true;
+    }
+
+    void evalCoincidentRg(Vec3 inDir, float* outRg) const {
+        if (rcvAbs[0].shIndex >= 0) {
+            double x = inDir.x, y = inDir.y;
+            const double az = rcvAbs[0].azimuthDeg;
+            if (az != 0.0) {
+                const double a = az * kPi / 180.0, ca = std::cos(a), sa = std::sin(a);
+                x = inDir.x * ca + inDir.y * sa;
+                y = -inDir.x * sa + inDir.y * ca;
+            }
+            for (int r = 0; r < R; ++r) {
+                const Transducer& t = rcvAbs[(size_t)r];
+                const double gdb = t.gainDb == 0.0 ? 1.0 : std::pow(10.0, t.gainDb / 20.0);
+                outRg[r] = (float)(shSN3D(t.shIndex, x, y, inDir.z) * gdb);
+            }
+            return;
+        }
+        for (int r = 0; r < R; ++r)
+            outRg[r] = (float)analyticDirGainScalar(rcvAbs[(size_t)r], inDir);
     }
 
     void finish(Found& f, uint32_t key, Vec3 D, double gain, const float* amp) const {
@@ -2248,10 +2391,15 @@ struct Engine::Impl {
                 const double u = L / c * sr / cfg.ctrlInterval;
                 L = norm(histPos(sp, u) - dp.first) + dp.inner + norm(rc.pos - dp.last);
             }
-            double rg[NB];
-            dirGainBands(rc, unit(dp.last - rc.pos), rg);
-            for (int b = 0; b < NB; ++b) dp.amp[b] *= (float)rg[b];
             Found f;
+            const Vec3 inDir = unit(dp.last - rc.pos);
+            if (coincidentOmni) {
+                evalCoincidentRg(inDir, f.rg);
+            } else {
+                double rg[NB];
+                dirGainBands(rc, inDir, rg);
+                for (int b = 0; b < NB; ++b) dp.amp[b] *= (float)rg[b];
+            }
             if constexpr (Profile) {
                 double sg[NB];
                 dirGainBands(src, unit(dp.first - src.pos), sg);
@@ -2267,10 +2415,14 @@ struct Engine::Impl {
             const bool screened = damp[3] < 0.5f;  // the straight path loses 6 dB or more on the way (mid band)
             if (diffr) litEdgeAttenuation(G(), src.pos, rc.pos, c, damp);  // a wall end right beside the path trims it
             Vec3 d = unit(rc.pos - src.pos);
-            double rg[NB];
-            dirGainBands(rc, d * -1.0, rg);
-            for (int b = 0; b < NB; ++b) damp[b] *= (float)rg[b];
             Found f;
+            if (coincidentOmni) {
+                evalCoincidentRg(d * -1.0, f.rg);
+            } else {
+                double rg[NB];
+                dirGainBands(rc, d * -1.0, rg);
+                for (int b = 0; b < NB; ++b) damp[b] *= (float)rg[b];
+            }
             if constexpr (Profile) {
                 double sg[NB];
                 dirGainBands(src, d, sg);
@@ -2299,15 +2451,19 @@ struct Engine::Impl {
         auto& taps = links[(size_t)s * RM + r];
         const int fadeN = std::max(1, fadePeriods);
         const int glideN = std::max(1, nextGlideLen);
-        auto snapTapToStart = [](Tap& t) {
+        auto snapTapToStart = [this](Tap& t) {
             if (t.glideIdx + 1 >= t.glideLen) {
                 t.d0 = t.d1;
                 std::memcpy(t.g0, t.g1, sizeof(float) * NB);
+                if (coincidentOmni) std::memcpy(t.rg0, t.rg1, sizeof(float) * (size_t)R);
             } else {
                 const double frac = (double)(t.glideIdx + 1) / (double)std::max(1, t.glideLen);
                 t.d0 = t.d0 + (t.d1 - t.d0) * frac;
                 const float ff = (float)frac;
                 for (int b = 0; b < NB; ++b) t.g0[b] = t.g0[b] + (t.g1[b] - t.g0[b]) * ff;
+                if (coincidentOmni) {
+                    for (int ch = 0; ch < R; ++ch) t.rg0[ch] = t.rg0[ch] + (t.rg1[ch] - t.rg0[ch]) * ff;
+                }
             }
             t.g0[7] = 0.f;
         };
@@ -2315,6 +2471,7 @@ struct Engine::Impl {
             for (auto& t : taps) {
                 snapTapToStart(t);
                 t.d1 = t.d0;
+                if (coincidentOmni) std::memcpy(t.rg1, t.rg0, sizeof(float) * (size_t)R);
                 t.glideIdx = 0;
                 t.glideLen = 1;
                 t.jumpFadeIn = false;
@@ -2357,8 +2514,14 @@ struct Engine::Impl {
                 std::memcpy(t.fadeTarget, fc.amp, sizeof t.fadeTarget);
                 const float frac = 1.f - (float)t.fadeLeft / (float)t.fadeTotal;
                 for (int b = 0; b < NB; ++b) { t.g0[b] = 0.f; t.g1[b] = fc.amp[b] * frac; }
+                if (coincidentOmni) {
+                    std::memcpy(t.rg0, fc.rg, sizeof(float) * (size_t)R);
+                    std::memcpy(t.rg1, fc.rg, sizeof(float) * (size_t)R);
+                }
                 appendTap(t);
             }
+            srcs[s]->dopplerSettling = false;
+            srcs[s]->solvedEarlyG = earlyG;
             if (p7Enabled) p7.spSolveTapsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tt0).count();
             return;
         }
@@ -2370,12 +2533,18 @@ struct Engine::Impl {
                 if (t.fadeLeft > 0) --t.fadeLeft;
                 const float frac = (float)t.fadeLeft / (float)t.fadeTotal;
                 for (int b = 0; b < NB; ++b) t.g1[b] = t.fadeStart[b] * frac;
+                if (coincidentOmni) std::memcpy(t.rg1, t.rg0, sizeof(float) * (size_t)R);
                 t.seen = true;
             } else {
                 t.seen = false;
             }
         }
-        const double effDopA = (glideN <= 1) ? dopA : (1.0 - std::pow(1.0 - dopA, glideN));
+        const double effDopA = [&]() {
+            const bool objStill = (!lmovedNow && srcs[s]->stillPeriods >= 8);
+            const double baseA = objStill ? (1.0 - std::exp(-(double)cfg.ctrlInterval / (0.05 * sr))) : dopA;
+            return (glideN <= 1) ? baseA : (1.0 - std::pow(1.0 - baseA, glideN));
+        }();
+        bool anyDopplerDiff = false;
         for (const Found& fc : found) {
             Found f = fc;
             if (f.delay >= maxDelay) continue;
@@ -2385,16 +2554,24 @@ struct Engine::Impl {
             const double tru = f.delay;
             if (tp) {
                 // Doppler strength: blend the true delay with its slow average (k=1: physical, 0: pitch-free)
-                if (firstSolve) tp->ref = tru;
-                else tp->ref += effDopA * (tru - tp->ref);
-                if (dopK != 1.0) f.delay = std::max(2.0, tp->ref + dopK * (tru - tp->ref));
+                if (firstSolve || dopK == 1.0 || lastDopK == 1.0) tp->ref = tru;
+                else {
+                    tp->ref += effDopA * (tru - tp->ref);
+                    if (std::fabs(tru - tp->ref) <= 1e-4) tp->ref = tru;
+                }
+                if (dopK != 1.0) {
+                    if (std::fabs(tru - tp->ref) > 1e-4) anyDopplerDiff = true;
+                    f.delay = std::max(2.0, tp->ref + dopK * (tru - tp->ref));
+                }
                 if (!firstSolve && std::fabs(f.delay - tp->d0) > 0.5 * cfg.ctrlInterval * glideN && taps.size() < taps.capacity()) {
                     Tap dying = *tp;  // teleport: let the old one fade out in place, start a new one
                     dying.jumpFadeOut = true; dying.seen = true; dying.d1 = dying.d0;
                     dying.jumpFadeIn = false; dying.fadeTotal = 0; dying.fadeLeft = 0;
                     dying.glideIdx = 0; dying.glideLen = glideN;
                     for (int b = 0; b < NB; ++b) dying.g1[b] = 0.f;
+                    if (coincidentOmni) std::memcpy(dying.rg1, dying.rg0, sizeof(float) * (size_t)R);
                     for (int b = 0; b < NB; ++b) { tp->g0[b] = 0.f; }
+                    if (coincidentOmni) std::memcpy(tp->rg0, f.rg, sizeof(float) * (size_t)R);
                     tp->d0 = f.delay;
                     tp->jumpFadeIn = false; tp->fadeTotal = 0; tp->fadeLeft = 0;
                     taps.push_back(dying);
@@ -2406,6 +2583,7 @@ struct Engine::Impl {
                 tp->d1 = f.delay;
                 tp->glideIdx = 0;
                 tp->glideLen = glideN;
+                if (coincidentOmni) std::memcpy(tp->rg1, f.rg, sizeof(float) * (size_t)R);
                 if (tp->jumpFadeIn && tp->fadeTotal > 0) {
                     if (tp->fadeLeft > 0) --tp->fadeLeft;
                     const float frac = 1.f - (float)tp->fadeLeft / (float)tp->fadeTotal;
@@ -2415,18 +2593,37 @@ struct Engine::Impl {
                 } else {
                     std::memcpy(tp->g1, f.amp, sizeof(float) * NB);
                 }
-                if (firstSolve) { tp->d0 = tp->d1; std::memcpy(tp->g0, tp->g1, sizeof tp->g0); tp->glideIdx = 0; tp->glideLen = 1; }
+                if (firstSolve) {
+                    tp->d0 = tp->d1;
+                    std::memcpy(tp->g0, tp->g1, sizeof tp->g0);
+                    if (coincidentOmni) std::memcpy(tp->rg0, tp->rg1, sizeof(float) * (size_t)R);
+                    tp->glideIdx = 0; tp->glideLen = 1;
+                }
             } else if (taps.size() < taps.capacity()) {
                 Tap t;
                 t.key = f.key; t.seen = true; t.d0 = t.d1 = f.delay; t.ref = tru;
                 t.glideIdx = 0; t.glideLen = firstSolve ? 1 : glideN;
                 std::memcpy(t.g1, f.amp, sizeof(float) * NB);
                 if (firstSolve) std::memcpy(t.g0, t.g1, sizeof t.g0);
+                if (coincidentOmni) {
+                    std::memcpy(t.rg0, f.rg, sizeof(float) * (size_t)R);
+                    std::memcpy(t.rg1, f.rg, sizeof(float) * (size_t)R);
+                }
                 taps.push_back(t);
             }
         }
         for (auto& t : taps)
-            if (!t.seen) { t.d1 = t.d0; t.jumpFadeIn = false; t.fadeTotal = 0; t.fadeLeft = 0; for (int b = 0; b < NB; ++b) t.g1[b] = 0.f; }
+            if (!t.seen) {
+                t.d1 = t.d0; t.jumpFadeIn = false; t.fadeTotal = 0; t.fadeLeft = 0;
+                for (int b = 0; b < NB; ++b) t.g1[b] = 0.f;
+                if (coincidentOmni) std::memcpy(t.rg1, t.rg0, sizeof(float) * (size_t)R);
+            }
+        if (r == 0) {
+            srcs[s]->dopplerSettling = anyDopplerDiff;
+            srcs[s]->solvedEarlyG = earlyG;
+        } else if (anyDopplerDiff) {
+            srcs[s]->dopplerSettling = true;
+        }
         if (p7Enabled) p7.spSolveTapsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tt0).count();
     }
 
@@ -2554,7 +2751,8 @@ struct Engine::Impl {
             for (int i = 0; i < 4; ++i) rawS[i] = params[s * 4 + i].load();
             resolvePose4(G(), wd->serial, audioSrcHist[(size_t)s], rawS, effS);
             const Vec3 sp{effS[0], effS[1], effS[2]};
-            for (int r = 0; r < RM; ++r) {
+            const int preRM = coincidentOmni ? 1 : RM;
+            for (int r = 0; r < preRM; ++r) {
                 const Vec3 rp = rcvAbs[(size_t)r].pos;
                 float damp[NB];
                 for (int b = 0; b < NB; ++b) damp[b] = 1.f;
@@ -2745,14 +2943,21 @@ struct Engine::Impl {
                     feedB0[i]=0.f;feedBd[i]=0.f;
                 }
             } else {
+                const uint64_t elapsedPeriods = (gcount >= handoverStart) ? (gcount - handoverStart) : 0;
                 for(int r=0;r<R;++r)if(sconv[r]->hoSlot>=0)for(int s=0;s<S;++s)for(int b=0;b<7;++b) {
-                    const size_t i=((size_t)r*S+s)*8+b;float a[2],n[2];
+                    const size_t i=((size_t)r*S+s)*8+b;
+                    const float g=handoverLegacy?lateGuse[i]:(motionExact?trans.gNew[i]:lateGuse[i]*trans.cmul[(size_t)r*8+b]);
+                    if (handoverLegacy || elapsedPeriods >= (uint64_t)glideSteps[i] * (uint64_t)cfg.ctrlInterval) {
+                        feedA0[i]=0.f;feedAd[i]=0.f;
+                        feedB0[i]=g;feedBd[i]=0.f;
+                        continue;
+                    }
+                    float a[2],n[2];
                     for(int endpoint=0;endpoint<2;++endpoint) {
                         const double u=std::clamp(double(gcount+endpoint*(cfg.ctrlInterval-1)-handoverStart)/(glideSteps[i]*cfg.ctrlInterval),0.,1.);
-                        const float w=handoverLegacy?1.f:(float)(.5-.5*std::cos(kPi*u));
-                        const float norm=handoverLegacy?1.f:std::pow((1-w)*(1-w)+w*w+2*sconv[r]->bandRho[b]*w*(1-w),-.28f);
+                        const float w=(float)(.5-.5*std::cos(kPi*u));
+                        const float norm=std::pow((1-w)*(1-w)+w*w+2*sconv[r]->bandRho[b]*w*(1-w),-.28f);
                         a[endpoint]=glide0[i]*norm*(1-w);
-                        const float g=handoverLegacy?lateGuse[i]:(motionExact?trans.gNew[i]:lateGuse[i]*trans.cmul[(size_t)r*8+b]);
                         n[endpoint]=g*norm*w;
                     }
                     feedA0[i]=a[0];feedAd[i]=(a[1]-a[0])/std::max(1,cfg.ctrlInterval-1);
@@ -2779,10 +2984,12 @@ struct Engine::Impl {
         if(earlyG!=targetEarly) {
             earlyG=firstSolve?targetEarly:earlyG+(targetEarly-earlyG)*(1.-std::exp(-cfg.ctrlInterval/(.02*sr)));
             if(std::abs(earlyG-targetEarly)<1e-9)earlyG=targetEarly;
-            lmoved=true;
         }
+        const bool earlyChanged = (!firstSolve && earlyG != lastEarlyG);
+        lastEarlyG = earlyG;
         lastEarlyDb=earlyDb;
         for (int i = 0; i < 4; ++i) lmoved |= lst[i] != lastListener[i];
+        lmovedNow = lmoved;
         if (!firstSolve) for(int i=0;i<4;++i) if(lst[i]!=lastListener[i]) autoMovingUntil.store(gcount+(uint64_t)(.4*sr),std::memory_order_relaxed);
         for (int i = 0; i < 4; ++i) lastRawListener[i] = rawLst[i];
         if (lmoved) {
@@ -2792,7 +2999,9 @@ struct Engine::Impl {
         }
         const auto sp1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         if (p7Enabled) p7.spSetupNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(sp1 - sp0).count();
-        const int settle = (int)(ringMask / cfg.ctrlInterval) + 2 + (dopK != 1.0 ? (int)(50.0 * sr / cfg.ctrlInterval) : 0);
+        const int baseSettle = (int)(ringMask / cfg.ctrlInterval) + 2;
+        const int dopSettle = (int)(50.0 * sr / cfg.ctrlInterval);
+        const int effRM = coincidentOmni ? 1 : RM;
         int dirtyCount = 0;
         const auto tpPose0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         for (int s = 0; s < S; ++s) {
@@ -2816,7 +3025,7 @@ struct Engine::Impl {
             const auto* curDir = state.profile.get();
             const double curAmt = state.amount;
             const double curAimAz = state.aimAzDeg, curAimEl = state.aimElDeg, curAimRoll = state.aimRollDeg;
-            bool changed = lmoved || firstSolve || worldChanged || audioJumped || dopK != lastDopK || pat != sp.solvedPattern
+            bool changed = lmoved || firstSolve || worldChanged || audioJumped || (dopK != lastDopK && sp.dopplerSettling) || pat != sp.solvedPattern
                 || curDir != sp.solvedDirectivity
                 || (curDir != nullptr && (curAmt != sp.solvedAmount || curAimAz != sp.solvedAimAz || curAimEl != sp.solvedAimEl || curAimRoll != sp.solvedAimRoll));
             sp.solvedPattern = pat;
@@ -2837,7 +3046,8 @@ struct Engine::Impl {
             if (changed) { sp.quiet = 0; sp.pendingSolve = true; }
             else if (!sp.pendingSolve && sp.quiet < (1 << 30)) ++sp.quiet;
             for (int i = 0; i < 4; ++i) { sp.solvedPose[i] = pose[i]; sp.solvedRawPose[i] = rawPose[i]; }
-            const bool want = sp.pendingSolve || (sp.quiet <= settle) || (sp.fadeLeftPeriods > 0);
+            const int srcSettle = baseSettle + ((dopK != 1.0 && sp.dopplerSettling) ? dopSettle : 0);
+            const bool want = sp.pendingSolve || (sp.quiet <= srcSettle) || (sp.fadeLeftPeriods > 0);
             spNeedSolve[(size_t)s] = want ? 1 : 0;
             spDoSolve[(size_t)s] = 0;
             if (want) ++dirtyCount;
@@ -2868,17 +3078,36 @@ struct Engine::Impl {
         for (int s = 0; s < S; ++s) {
             Src& sp = *srcs[s];
             if (!spDoSolve[(size_t)s]) {
-                for (int r = 0; r < RM; ++r)
+                const bool rescaleEarly = (earlyChanged || sp.solvedEarlyG != earlyG) && sp.solvedEarlyG > 0.0;
+                const float earlyRatio = rescaleEarly ? (float)(earlyG / sp.solvedEarlyG) : 1.f;
+                for (int r = 0; r < effRM; ++r)
                     for (auto& t : links[(size_t)s * RM + r]) {
                         if (t.glideIdx + 1 < t.glideLen) {
                             ++t.glideIdx;
                         } else {
                             t.d0 = t.d1;
                             std::memcpy(t.g0, t.g1, sizeof t.g0);
+                            if (coincidentOmni) std::memcpy(t.rg0, t.rg1, sizeof(float) * (size_t)R);
                             t.glideIdx = 0;
                             t.glideLen = 1;
                         }
+                        if (rescaleEarly && t.key != 0 && t.key != kDiffKey && !t.jumpFadeOut && t.seen) {
+                            if (t.glideIdx > 0 && t.glideIdx < t.glideLen) {
+                                const float ff = (float)t.glideIdx / (float)std::max(1, t.glideLen);
+                                for (int b = 0; b < NB; ++b) t.g0[b] = t.g0[b] + (t.g1[b] - t.g0[b]) * ff;
+                                if (coincidentOmni) {
+                                    for (int ch = 0; ch < R; ++ch) t.rg0[ch] = t.rg0[ch] + (t.rg1[ch] - t.rg0[ch]) * ff;
+                                }
+                                t.glideIdx = 0;
+                                t.glideLen = 1;
+                            }
+                            for (int b = 0; b < NB; ++b) {
+                                t.g1[b] *= earlyRatio;
+                                if (t.jumpFadeIn) t.fadeTarget[b] *= earlyRatio;
+                            }
+                        }
                     }
+                if (rescaleEarly) sp.solvedEarlyG = earlyG;
                 if (p7Enabled) ++p7.spSourceSkips;
                 continue;
             }
@@ -2901,8 +3130,8 @@ struct Engine::Impl {
             if (!buildImages(st.pos)) nodes.resize(1);
             if (p7Enabled) p7.spBuildImagesNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tb0).count();
             diffPendingNow = false;
-            if (st.directivityView) {for (int r=0;r<RM;++r) solveLink<true>(s,r,st,audioJumped,fadePeriods,srcGlideLen);}
-            else {for (int r=0;r<RM;++r) solveLink<false>(s,r,st,audioJumped,fadePeriods,srcGlideLen);}
+            if (st.directivityView) {for (int r=0;r<effRM;++r) solveLink<true>(s,r,st,audioJumped,fadePeriods,srcGlideLen);}
+            else {for (int r=0;r<effRM;++r) solveLink<false>(s,r,st,audioJumped,fadePeriods,srcGlideLen);}
             if (diffPendingNow) { sp.quiet = 0; sp.pendingSolve = true; }  // an answer is still being searched for: keep solving this source
         }
         const auto tdj0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -2929,6 +3158,20 @@ struct Engine::Impl {
 
     void endPeriod() {
         tapsActive = 0;
+        if (coincidentOmni) {
+            for (int s = 0; s < S; ++s) {
+                auto& l = links[(size_t)s * RM];
+                for (size_t i = 0; i < l.size();) {
+                    Tap& t = l[i];
+                    float m = 0;
+                    for (int b = 0; b < NB; ++b) m = std::max(m, std::fabs(t.g1[b]));
+                    if (m == 0.f && t.glideIdx + 1 >= t.glideLen) { l[i] = l.back(); l.pop_back(); }
+                    else ++i;
+                }
+                tapsActive += (int)l.size() * R;
+            }
+            return;
+        }
         for (auto& l : links) {
             for (size_t i = 0; i < l.size();) {
                 Tap& t = l[i];
@@ -2951,7 +3194,30 @@ struct Engine::Impl {
         const float* sgn = &vSgn[(size_t)r * kVelvetN];
         const float norm = 1.f / std::sqrt((float)kVelvetN);
         const float cd_ = std::cos(amount * 1.57079633f) , sd_ = std::sin(amount * 1.57079633f) * norm;  // equal-power crossfade
-        for (int j = 0; j < m; ++j) {
+        int j = 0;
+       #if VERB_REQUIRE_AVX2
+        const __m256 vcd = _mm256_set1_ps(cd_), vsd = _mm256_set1_ps(sd_);
+        for (; j + 8 <= m; j += 8) {
+            const uint64_t t0 = gcount + (uint64_t)j;
+            __m256 vy = _mm256_setzero_ps();
+            for (int k = 0; k < kVelvetN; ++k) {
+                const size_t idx0 = (size_t)(t0 - (uint64_t)pos[k]) & vMask;
+                const __m256 vs = _mm256_set1_ps(sgn[k]);
+                __m256 vh;
+                if (idx0 + 8 <= vMask + 1) {
+                    vh = _mm256_loadu_ps(h + idx0);
+                } else {
+                    alignas(32) float tmp[8];
+                    for (int lane = 0; lane < 8; ++lane) tmp[lane] = h[(idx0 + (size_t)lane) & vMask];
+                    vh = _mm256_load_ps(tmp);
+                }
+                vy = _mm256_add_ps(vy, _mm256_mul_ps(vs, vh));
+            }
+            const __m256 vx = _mm256_loadu_ps(x + j);
+            _mm256_storeu_ps(x + j, _mm256_add_ps(_mm256_mul_ps(vcd, vx), _mm256_mul_ps(vsd, vy)));
+        }
+       #endif
+        for (; j < m; ++j) {
             const uint64_t t = gcount + (uint64_t)j;
             float y = 0.f;
             for (int k = 0; k < kVelvetN; ++k) y += sgn[k] * h[(t - (uint64_t)pos[k]) & vMask];
@@ -3172,23 +3438,365 @@ struct Engine::Impl {
         }
     }
 
+    // Coincident frequency-independent receivers (e.g. AmbiX1/2/3, StereoXY): fold 7 bands and cubic-interpolate
+    // delay ONCE per tap of source s, then project onto all R output channels using their directional scalars rg0/rg1.
+    void renderCoincidentTaps(int s, int ph, int m) {
+        Src& sp = *srcs[s];
+        const float* ring = sp.ring.data();
+        const int ctrl = cfg.ctrlInterval;
+        const float invCtrl = 1.f / (float)ctrl;
+        float* const uBuf = omniU.data();
+        float* const vBuf = omniV.data();
+
+        auto projectStat = [&](const float* rg, float gmax, float* const baseDst) {
+            for (int r = 0; r < R; ++r) {
+                const float g = rg[r];
+                if (gmax * std::fabs(g) < 3e-5f) continue;
+                float* dst = baseDst + (size_t)r * ctrl;
+                int j = 0;
+               #if VERB_REQUIRE_AVX2
+                const __m256 vg = _mm256_set1_ps(g);
+                for (; j + 8 <= m; j += 8) {
+                    _mm256_storeu_ps(dst + j, _mm256_add_ps(_mm256_loadu_ps(dst + j), _mm256_mul_ps(vg, _mm256_loadu_ps(uBuf + j))));
+                }
+               #endif
+                for (; j < m; ++j) dst[j] += g * uBuf[j];
+            }
+        };
+
+        auto projectDual = [&](const float* rg0, const float* rg1, float g0max, float g1max, float* const baseDst) {
+            for (int r = 0; r < R; ++r) {
+                const float g0 = rg0[r], g1 = rg1[r];
+                if (std::max(g0max * std::fabs(g0), g1max * std::fabs(g1)) < 3e-5f) continue;
+                float* dst = baseDst + (size_t)r * ctrl;
+                int j = 0;
+               #if VERB_REQUIRE_AVX2
+                const __m256 vg0 = _mm256_set1_ps(g0), vg1 = _mm256_set1_ps(g1);
+                for (; j + 8 <= m; j += 8) {
+                    const __m256 val = _mm256_add_ps(_mm256_mul_ps(vg0, _mm256_loadu_ps(uBuf + j)),
+                                                     _mm256_mul_ps(vg1, _mm256_loadu_ps(vBuf + j)));
+                    _mm256_storeu_ps(dst + j, _mm256_add_ps(_mm256_loadu_ps(dst + j), val));
+                }
+               #endif
+                for (; j < m; ++j) dst[j] += g0 * uBuf[j] + g1 * vBuf[j];
+            }
+        };
+
+        for (const Tap& t : links[(size_t)s * RM]) {
+            float g0max = 0.f, g1max = 0.f; bool gainsStat = true;
+            for (int k = 0; k < NB; ++k) {
+                g0max = std::max(g0max, std::fabs(t.g0[k]));
+                g1max = std::max(g1max, std::fabs(t.g1[k]));
+                gainsStat = gainsStat && t.g0[k] == t.g1[k];
+            }
+            const float gmax = std::max(g0max, g1max);
+            float rgMax = 0.f; bool rgStat = true;
+            for (int r = 0; r < R; ++r) {
+                rgMax = std::max(rgMax, std::max(std::fabs(t.rg0[r]), std::fabs(t.rg1[r])));
+                rgStat = rgStat && t.rg0[r] == t.rg1[r];
+            }
+            if (gmax * rgMax < 3e-5f) {
+                if (p7Enabled) p7.tapsSkipped += (uint64_t)R;
+                continue;
+            }
+            float* const baseDst = (t.key == 0 || t.key == kDiffKey) ? tmpOut.data() : tmpEarly.data();
+            const bool constDelay = (t.d0 == t.d1);
+
+            if (constDelay && gainsStat && rgStat) {
+                if (p7Enabled) p7.tapsStat += (uint64_t)R;
+                const double pos0 = (double)(int64_t)gcount - t.d1;
+                const int64_t i00 = (int64_t)std::floor(pos0);
+                const float f = (float)(pos0 - (double)i00), f2 = f * f, f3 = f2 * f;
+                const float w0 = -0.5f * f3 + f2 - 0.5f * f, w1 = 1.5f * f3 - 2.5f * f2 + 1.f, w2 = -1.5f * f3 + 2.f * f2 + 0.5f * f, w3 = 0.5f * f3 - 0.5f * f2;
+                float* sb = sbA.data();
+                foldFrames<false>(t.g1, nullptr, ring, i00 - 1, m + 3, sb, nullptr);
+                int j = 0;
+               #if VERB_REQUIRE_AVX2
+                const __m256 vw0 = _mm256_set1_ps(w0), vw1 = _mm256_set1_ps(w1), vw2 = _mm256_set1_ps(w2), vw3 = _mm256_set1_ps(w3);
+                for (; j + 8 <= m; j += 8) {
+                    __m256 v = _mm256_mul_ps(vw0, _mm256_loadu_ps(sb + j));
+                    v = _mm256_add_ps(v, _mm256_mul_ps(vw1, _mm256_loadu_ps(sb + j + 1)));
+                    v = _mm256_add_ps(v, _mm256_mul_ps(vw2, _mm256_loadu_ps(sb + j + 2)));
+                    v = _mm256_add_ps(v, _mm256_mul_ps(vw3, _mm256_loadu_ps(sb + j + 3)));
+                    _mm256_storeu_ps(uBuf + j, v);
+                }
+               #endif
+                for (; j < m; ++j) uBuf[j] = w0 * sb[j] + w1 * sb[j + 1] + w2 * sb[j + 2] + w3 * sb[j + 3];
+                projectStat(t.rg1, g1max, baseDst);
+                continue;
+            }
+
+            const int glen = std::max(1, t.glideLen);
+            const int gph = t.glideIdx * ctrl + ph;
+            const float invGlide = (glen == 1) ? invCtrl : (1.f / (float)(glen * ctrl));
+            if (p7Enabled) p7.tapsMoving += (uint64_t)R;
+
+            if (constDelay) {
+                const double pos0 = (double)(int64_t)gcount - t.d1;
+                const int64_t i00 = (int64_t)std::floor(pos0);
+                const float f = (float)(pos0 - (double)i00), f2 = f * f, f3 = f2 * f;
+                const float w0 = -0.5f * f3 + f2 - 0.5f * f, w1 = 1.5f * f3 - 2.5f * f2 + 1.f, w2 = -1.5f * f3 + 2.f * f2 + 0.5f * f, w3 = 0.5f * f3 - 0.5f * f2;
+                float* s0 = sbA.data();
+                float* s1 = sbB.data();
+                if (gainsStat) { foldFrames<false>(t.g0, nullptr, ring, i00 - 1, m + 3, s0, nullptr); s1 = s0; }
+                else foldFrames<true>(t.g0, t.g1, ring, i00 - 1, m + 3, s0, s1);
+                int j = 0;
+               #if VERB_REQUIRE_AVX2
+                const __m256 vw0 = _mm256_set1_ps(w0), vw1 = _mm256_set1_ps(w1), vw2 = _mm256_set1_ps(w2), vw3 = _mm256_set1_ps(w3);
+                const __m256 vone = _mm256_set1_ps(1.f);
+                __m256 vtt = _mm256_mul_ps(_mm256_setr_ps((float)(gph + 1), (float)(gph + 2), (float)(gph + 3), (float)(gph + 4),
+                                                          (float)(gph + 5), (float)(gph + 6), (float)(gph + 7), (float)(gph + 8)), _mm256_set1_ps(invGlide));
+                const __m256 vdt = _mm256_set1_ps(8.f * invGlide);
+                for (; j + 8 <= m; j += 8) {
+                    __m256 a = _mm256_mul_ps(vw0, _mm256_loadu_ps(s0 + j));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(vw1, _mm256_loadu_ps(s0 + j + 1)));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(vw2, _mm256_loadu_ps(s0 + j + 2)));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(vw3, _mm256_loadu_ps(s0 + j + 3)));
+                    __m256 b = a;
+                    if (!gainsStat) {
+                        b = _mm256_mul_ps(vw0, _mm256_loadu_ps(s1 + j));
+                        b = _mm256_add_ps(b, _mm256_mul_ps(vw1, _mm256_loadu_ps(s1 + j + 1)));
+                        b = _mm256_add_ps(b, _mm256_mul_ps(vw2, _mm256_loadu_ps(s1 + j + 2)));
+                        b = _mm256_add_ps(b, _mm256_mul_ps(vw3, _mm256_loadu_ps(s1 + j + 3)));
+                    }
+                    if (rgStat) {
+                        _mm256_storeu_ps(uBuf + j, _mm256_add_ps(a, _mm256_mul_ps(vtt, _mm256_sub_ps(b, a))));
+                    } else {
+                        _mm256_storeu_ps(uBuf + j, _mm256_mul_ps(_mm256_sub_ps(vone, vtt), a));
+                        _mm256_storeu_ps(vBuf + j, _mm256_mul_ps(vtt, b));
+                    }
+                    vtt = _mm256_add_ps(vtt, vdt);
+                }
+               #endif
+                for (; j < m; ++j) {
+                    const float tt = (gph + j + 1) * invGlide;
+                    const float a = w0 * s0[j] + w1 * s0[j + 1] + w2 * s0[j + 2] + w3 * s0[j + 3];
+                    const float b = gainsStat ? a : (w0 * s1[j] + w1 * s1[j + 1] + w2 * s1[j + 2] + w3 * s1[j + 3]);
+                    if (rgStat) {
+                        uBuf[j] = a + tt * (b - a);
+                    } else {
+                        uBuf[j] = (1.f - tt) * a;
+                        vBuf[j] = tt * b;
+                    }
+                }
+                if (rgStat) projectStat(t.rg1, gmax, baseDst);
+                else projectDual(t.rg0, t.rg1, g0max, g1max, baseDst);
+                continue;
+            }
+
+            // Moving delay
+            const double dA = t.d0 + (t.d1 - t.d0) * (gph + 1) * invGlide, dB = t.d0 + (t.d1 - t.d0) * (gph + m) * invGlide;
+            const double pA = (double)(int64_t)gcount - dA, pB = (double)(int64_t)(gcount + m - 1) - dB;
+            const int64_t iLo = (int64_t)std::floor(std::min(pA, pB)) - 2, iHi = (int64_t)std::floor(std::max(pA, pB)) + 3;
+            const int cnt = (int)(iHi - iLo) + 1;
+            if (cnt > (int)sbA.size()) continue;
+            float* s0 = sbA.data();
+            float* s1 = sbB.data();
+            if (gainsStat) { foldFrames<false>(t.g0, nullptr, ring, iLo, cnt, s0, nullptr); s1 = s0; }
+            else foldFrames<true>(t.g0, t.g1, ring, iLo, cnt, s0, s1);
+            int j = 0;
+           #if VERB_REQUIRE_AVX2
+            const double ddScalar = t.d1 - t.d0;
+            const double posBase = (double)(int64_t)gcount - (t.d0 + ddScalar * (double)(gph + 1) * (double)invGlide);
+            const double dPos = 1.0 - ddScalar * (double)invGlide;
+            const double relBase = posBase - (double)(iLo + 1);
+            __m256d vRel0 = _mm256_setr_pd(relBase, relBase + dPos, relBase + 2.0 * dPos, relBase + 3.0 * dPos);
+            __m256d vRel1 = _mm256_add_pd(vRel0, _mm256_set1_pd(4.0 * dPos));
+            const __m256d vStep8 = _mm256_set1_pd(8.0 * dPos);
+            __m256 vtt = _mm256_mul_ps(_mm256_setr_ps((float)(gph + 1), (float)(gph + 2), (float)(gph + 3), (float)(gph + 4),
+                                                      (float)(gph + 5), (float)(gph + 6), (float)(gph + 7), (float)(gph + 8)), _mm256_set1_ps(invGlide));
+            const __m256 vdt = _mm256_set1_ps(8.f * invGlide);
+            const __m256 halfNeg = _mm256_set1_ps(-0.5f), halfPos = _mm256_set1_ps(0.5f), one = _mm256_set1_ps(1.f);
+            const __m256 c15 = _mm256_set1_ps(1.5f), c25 = _mm256_set1_ps(2.5f), c15n = _mm256_set1_ps(-1.5f), c2 = _mm256_set1_ps(2.f);
+            const __m256i vSeq = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+            for (; j + 8 <= m; j += 8) {
+                const __m256d w0d = _mm256_floor_pd(vRel0);
+                const __m256d w1d = _mm256_floor_pd(vRel1);
+                const __m128i i0_4 = _mm256_cvtpd_epi32(w0d);
+                const __m128i i1_4 = _mm256_cvtpd_epi32(w1d);
+                const __m256i indices = _mm256_inserti128_si256(_mm256_castsi128_si256(i0_4), i1_4, 1);
+                const __m128 f0_4 = _mm256_cvtpd_ps(_mm256_sub_pd(vRel0, w0d));
+                const __m128 f1_4 = _mm256_cvtpd_ps(_mm256_sub_pd(vRel1, w1d));
+                const __m256 f = _mm256_insertf128_ps(_mm256_castps128_ps256(f0_4), f1_4, 1);
+                const __m256 f2 = _mm256_mul_ps(f, f), f3 = _mm256_mul_ps(f2, f);
+                const __m256 w0 = _mm256_sub_ps(_mm256_add_ps(_mm256_mul_ps(halfNeg, f3), f2), _mm256_mul_ps(halfPos, f));
+                const __m256 w1 = _mm256_add_ps(_mm256_sub_ps(_mm256_mul_ps(c15, f3), _mm256_mul_ps(c25, f2)), one);
+                const __m256 w2 = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(c15n, f3), _mm256_mul_ps(c2, f2)), _mm256_mul_ps(halfPos, f));
+                const __m256 w3 = _mm256_sub_ps(_mm256_mul_ps(halfPos, f3), _mm256_mul_ps(halfPos, f2));
+                const int idx0 = _mm_cvtsi128_si32(i0_4);
+                const bool contiguous = (_mm256_movemask_epi8(_mm256_cmpeq_epi32(indices, _mm256_add_epi32(_mm256_set1_epi32(idx0), vSeq))) == -1);
+                __m256 a, b;
+                if (contiguous) {
+                    const float* base0 = s0 + idx0;
+                    a = _mm256_mul_ps(w0, _mm256_loadu_ps(base0));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(w1, _mm256_loadu_ps(base0 + 1)));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(w2, _mm256_loadu_ps(base0 + 2)));
+                    a = _mm256_add_ps(a, _mm256_mul_ps(w3, _mm256_loadu_ps(base0 + 3)));
+                    if (gainsStat) {
+                        b = a;
+                    } else {
+                        const float* base1 = s1 + idx0;
+                        b = _mm256_mul_ps(w0, _mm256_loadu_ps(base1));
+                        b = _mm256_add_ps(b, _mm256_mul_ps(w1, _mm256_loadu_ps(base1 + 1)));
+                        b = _mm256_add_ps(b, _mm256_mul_ps(w2, _mm256_loadu_ps(base1 + 2)));
+                        b = _mm256_add_ps(b, _mm256_mul_ps(w3, _mm256_loadu_ps(base1 + 3)));
+                    }
+                } else {
+                    auto gatherInterp = [&](const float* vals) {
+                        __m256 res = _mm256_mul_ps(w0, _mm256_i32gather_ps(vals, indices, 4));
+                        res = _mm256_add_ps(res, _mm256_mul_ps(w1, _mm256_i32gather_ps(vals + 1, indices, 4)));
+                        res = _mm256_add_ps(res, _mm256_mul_ps(w2, _mm256_i32gather_ps(vals + 2, indices, 4)));
+                        return _mm256_add_ps(res, _mm256_mul_ps(w3, _mm256_i32gather_ps(vals + 3, indices, 4)));
+                    };
+                    a = gatherInterp(s0);
+                    b = gainsStat ? a : gatherInterp(s1);
+                }
+                if (rgStat) {
+                    _mm256_storeu_ps(uBuf + j, _mm256_add_ps(a, _mm256_mul_ps(vtt, _mm256_sub_ps(b, a))));
+                } else {
+                    _mm256_storeu_ps(uBuf + j, _mm256_mul_ps(_mm256_sub_ps(one, vtt), a));
+                    _mm256_storeu_ps(vBuf + j, _mm256_mul_ps(vtt, b));
+                }
+                vRel0 = _mm256_add_pd(vRel0, vStep8);
+                vRel1 = _mm256_add_pd(vRel1, vStep8);
+                vtt = _mm256_add_ps(vtt, vdt);
+            }
+           #endif
+            for (; j < m; ++j) {
+                const float tt = (gph + j + 1) * invGlide;
+                const double pos = (double)(int64_t)(gcount + j) - (t.d0 + (t.d1 - t.d0) * tt);
+                const int64_t i0 = (int64_t)std::floor(pos);
+                const float f = (float)(pos - (double)i0), f2 = f * f, f3 = f2 * f;
+                const float w0 = -0.5f * f3 + f2 - 0.5f * f, w1 = 1.5f * f3 - 2.5f * f2 + 1.f, w2 = -1.5f * f3 + 2.f * f2 + 0.5f * f, w3 = 0.5f * f3 - 0.5f * f2;
+                const int u = (int)(i0 - 1 - iLo);
+                const float A = w0 * s0[u] + w1 * s0[u + 1] + w2 * s0[u + 2] + w3 * s0[u + 3];
+                const float Bv = gainsStat ? A : w0 * s1[u] + w1 * s1[u + 1] + w2 * s1[u + 2] + w3 * s1[u + 3];
+                if (rgStat) {
+                    uBuf[j] = A + tt * (Bv - A);
+                } else {
+                    uBuf[j] = (1.f - tt) * A;
+                    vBuf[j] = tt * Bv;
+                }
+            }
+            if (rgStat) projectStat(t.rg1, gmax, baseDst);
+            else projectDual(t.rg0, t.rg1, g0max, g1max, baseDst);
+        }
+    }
+
     // ---- tail convolution ----
-    void accumulateFdlRange(const TailConv& t, const Slot& sl, int r, int k0, int k1, const float* fdlRe, const float* fdlIm, float* ar, float* ai) const {
-        std::fill(ar, ar + t.bins, 0.f);
-        std::fill(ai, ai + t.bins, 0.f);
+    static bool blockHasSignal(const float* a, const float* b, int n) noexcept {
+        int i = 0;
+       #if VERB_REQUIRE_AVX2
+        __m256 orv = _mm256_setzero_ps();
+        const __m256 signMask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+        for (; i + 8 <= n; i += 8) {
+            orv = _mm256_or_ps(orv, _mm256_and_ps(_mm256_loadu_ps(a + i), signMask));
+            orv = _mm256_or_ps(orv, _mm256_and_ps(_mm256_loadu_ps(b + i), signMask));
+        }
+        if (!_mm256_testz_si256(_mm256_castps_si256(orv), _mm256_castps_si256(orv))) return true;
+       #endif
+        for (; i < n; ++i) if (a[i] != 0.f || b[i] != 0.f) return true;
+        return false;
+    }
+
+    static void sliceBounds(int partitions, int q, int& k0, int& k1) noexcept {
+        const int p1 = std::max(0, partitions - 1);
+        static constexpr int num[5] = {0, 3, 6, 9, 11};
+        k0 = 1 + (p1 * num[q]) / 11;
+        k1 = 1 + (p1 * num[q + 1]) / 11;
+    }
+
+    void accumulateFdlRangeAdd(const TailConv& t, const Slot& sl, int r, int k0, int k1,
+                               const float* fdlRe, const float* fdlIm, const uint8_t* fdlNz,
+                               int headIdx, float* ar, float* ai) const {
         const int hiK = std::min(k1, sl.partitions);
-        const size_t base = (size_t)r * sl.partitions * t.bins;
-        for (int k = std::max(0, k0); k < hiK; ++k) {
-            int e = t.head - k;
+        const int loK = std::max(0, k0);
+        if (loK >= hiK) return;
+        int* const actK = activePartitions.data();
+        int* const actE = activeFdlSlots.data();
+        int nAct = 0;
+        for (int k = loK; k < hiK; ++k) {
+            int e = headIdx - k;
             if (e < 0) e += t.P;
-            const float* xr = &fdlRe[(size_t)e * t.bins];
-            const float* xi = &fdlIm[(size_t)e * t.bins];
-            const float* hr = &sl.re[base + (size_t)k * t.bins];
-            const float* hi = &sl.im[base + (size_t)k * t.bins];
+            if (fdlNz && !fdlNz[(size_t)e]) continue;
+            actK[nAct] = k;
+            actE[nAct] = e;
+            ++nAct;
+        }
+        if (nAct == 0) return;
+        const size_t base = (size_t)r * sl.partitions * t.bins;
+        int idx = 0;
+        for (; idx + 2 <= nAct; idx += 2) {
+            const float* xr0 = &fdlRe[(size_t)actE[idx] * t.bins];
+            const float* xi0 = &fdlIm[(size_t)actE[idx] * t.bins];
+            const float* hr0 = &sl.re[base + (size_t)actK[idx] * t.bins];
+            const float* hi0 = &sl.im[base + (size_t)actK[idx] * t.bins];
+
+            const float* xr1 = &fdlRe[(size_t)actE[idx + 1] * t.bins];
+            const float* xi1 = &fdlIm[(size_t)actE[idx + 1] * t.bins];
+            const float* hr1 = &sl.re[base + (size_t)actK[idx + 1] * t.bins];
+            const float* hi1 = &sl.im[base + (size_t)actK[idx + 1] * t.bins];
+
             int b = 0;
            #if VERB_REQUIRE_AVX2
-            // Independent frequency bins; keep partition order and separate mul/add
-            // rounding exactly as in the scalar path (no FMA reassociation).
+            for (; b + 16 <= t.bins; b += 16) {
+                __m256 ar0 = _mm256_loadu_ps(ar + b),     ai0 = _mm256_loadu_ps(ai + b);
+                __m256 ar1 = _mm256_loadu_ps(ar + b + 8), ai1 = _mm256_loadu_ps(ai + b + 8);
+                {
+                    const auto xre0 = _mm256_loadu_ps(xr0 + b),     xim0 = _mm256_loadu_ps(xi0 + b);
+                    const auto hre0 = _mm256_loadu_ps(hr0 + b),     him0 = _mm256_loadu_ps(hi0 + b);
+                    const auto xre1 = _mm256_loadu_ps(xr0 + b + 8), xim1 = _mm256_loadu_ps(xi0 + b + 8);
+                    const auto hre1 = _mm256_loadu_ps(hr0 + b + 8), him1 = _mm256_loadu_ps(hi0 + b + 8);
+                    ar0 = _mm256_add_ps(ar0, _mm256_sub_ps(_mm256_mul_ps(xre0, hre0), _mm256_mul_ps(xim0, him0)));
+                    ai0 = _mm256_add_ps(ai0, _mm256_add_ps(_mm256_mul_ps(xre0, him0), _mm256_mul_ps(xim0, hre0)));
+                    ar1 = _mm256_add_ps(ar1, _mm256_sub_ps(_mm256_mul_ps(xre1, hre1), _mm256_mul_ps(xim1, him1)));
+                    ai1 = _mm256_add_ps(ai1, _mm256_add_ps(_mm256_mul_ps(xre1, him1), _mm256_mul_ps(xim1, hre1)));
+                }
+                {
+                    const auto xre0 = _mm256_loadu_ps(xr1 + b),     xim0 = _mm256_loadu_ps(xi1 + b);
+                    const auto hre0 = _mm256_loadu_ps(hr1 + b),     him0 = _mm256_loadu_ps(hi1 + b);
+                    const auto xre1 = _mm256_loadu_ps(xr1 + b + 8), xim1 = _mm256_loadu_ps(xi1 + b + 8);
+                    const auto hre1 = _mm256_loadu_ps(hr1 + b + 8), him1 = _mm256_loadu_ps(hi1 + b + 8);
+                    ar0 = _mm256_add_ps(ar0, _mm256_sub_ps(_mm256_mul_ps(xre0, hre0), _mm256_mul_ps(xim0, him0)));
+                    ai0 = _mm256_add_ps(ai0, _mm256_add_ps(_mm256_mul_ps(xre0, him0), _mm256_mul_ps(xim0, hre0)));
+                    ar1 = _mm256_add_ps(ar1, _mm256_sub_ps(_mm256_mul_ps(xre1, hre1), _mm256_mul_ps(xim1, him1)));
+                    ai1 = _mm256_add_ps(ai1, _mm256_add_ps(_mm256_mul_ps(xre1, him1), _mm256_mul_ps(xim1, hre1)));
+                }
+                _mm256_storeu_ps(ar + b, ar0);     _mm256_storeu_ps(ai + b, ai0);
+                _mm256_storeu_ps(ar + b + 8, ar1); _mm256_storeu_ps(ai + b + 8, ai1);
+            }
+            for (; b + 8 <= t.bins; b += 8) {
+                __m256 arV = _mm256_loadu_ps(ar + b), aiV = _mm256_loadu_ps(ai + b);
+                {
+                    const auto xre = _mm256_loadu_ps(xr0 + b), xim = _mm256_loadu_ps(xi0 + b);
+                    const auto hre = _mm256_loadu_ps(hr0 + b), him = _mm256_loadu_ps(hi0 + b);
+                    arV = _mm256_add_ps(arV, _mm256_sub_ps(_mm256_mul_ps(xre, hre), _mm256_mul_ps(xim, him)));
+                    aiV = _mm256_add_ps(aiV, _mm256_add_ps(_mm256_mul_ps(xre, him), _mm256_mul_ps(xim, hre)));
+                }
+                {
+                    const auto xre = _mm256_loadu_ps(xr1 + b), xim = _mm256_loadu_ps(xi1 + b);
+                    const auto hre = _mm256_loadu_ps(hr1 + b), him = _mm256_loadu_ps(hi1 + b);
+                    arV = _mm256_add_ps(arV, _mm256_sub_ps(_mm256_mul_ps(xre, hre), _mm256_mul_ps(xim, him)));
+                    aiV = _mm256_add_ps(aiV, _mm256_add_ps(_mm256_mul_ps(xre, him), _mm256_mul_ps(xim, hre)));
+                }
+                _mm256_storeu_ps(ar + b, arV);
+                _mm256_storeu_ps(ai + b, aiV);
+            }
+           #endif
+            for (; b < t.bins; ++b) {
+                float rAcc = ar[b], iAcc = ai[b];
+                rAcc += xr0[b] * hr0[b] - xi0[b] * hi0[b]; iAcc += xr0[b] * hi0[b] + xi0[b] * hr0[b];
+                rAcc += xr1[b] * hr1[b] - xi1[b] * hi1[b]; iAcc += xr1[b] * hi1[b] + xi1[b] * hr1[b];
+                ar[b] = rAcc; ai[b] = iAcc;
+            }
+        }
+        for (; idx < nAct; ++idx) {
+            const float* xr = &fdlRe[(size_t)actE[idx] * t.bins];
+            const float* xi = &fdlIm[(size_t)actE[idx] * t.bins];
+            const float* hr = &sl.re[base + (size_t)actK[idx] * t.bins];
+            const float* hi = &sl.im[base + (size_t)actK[idx] * t.bins];
+            int b = 0;
+           #if VERB_REQUIRE_AVX2
             for (; b + 8 <= t.bins; b += 8) {
                 const auto xre=_mm256_loadu_ps(xr+b), xim=_mm256_loadu_ps(xi+b);
                 const auto hre=_mm256_loadu_ps(hr+b), him=_mm256_loadu_ps(hi+b);
@@ -3204,14 +3812,27 @@ struct Engine::Impl {
             }
         }
     }
+
+    void accumulateFdlRange(const TailConv& t, const Slot& sl, int r, int k0, int k1, const float* fdlRe, const float* fdlIm, float* ar, float* ai, const uint8_t* fdlNz = nullptr, int headIdx = -1) const {
+        std::fill(ar, ar + t.bins, 0.f);
+        std::fill(ai, ai + t.bins, 0.f);
+        const uint8_t* nz = fdlNz;
+        if (!nz) {
+            if (fdlRe == t.fdlRe.data()) nz = t.fdlNz.data();
+            else if (fdlRe == t.freshRe.data()) nz = t.freshNz.data();
+            else if (!shared && fdlRe == t.cleanRe.data()) nz = t.cleanNz.data();
+        }
+        accumulateFdlRangeAdd(t, sl, r, k0, k1, fdlRe, fdlIm, nz, headIdx >= 0 ? headIdx : t.head, ar, ai);
+    }
     void accumulateFdl(const TailConv& t, const Slot& sl, int r, const float* fdlRe, const float* fdlIm, float* ar, float* ai) const {
         accumulateFdlRange(t, sl, r, 0, sl.partitions, fdlRe, fdlIm, ar, ai);
     }
     void accumulateWindows(const TailConv& t, const Slot& sl, int r, const float* fdlRe, const float* fdlIm) const {
         int k0 = 0;
+        const size_t winStride = (size_t)(B + 1);
         for (int w = 0; w < kBakeWinCount; ++w) {
             const int k1 = (w + 1 == kBakeWinCount) ? sl.partitions : std::min(sl.partitions, eqWinEndK[(size_t)w]);
-            accumulateFdlRange(t, sl, r, k0, k1, fdlRe, fdlIm, &eqWinRe[(size_t)w * (size_t)t.bins], &eqWinIm[(size_t)w * (size_t)t.bins]);
+            accumulateFdlRange(t, sl, r, k0, k1, fdlRe, fdlIm, &eqWinRe[(size_t)w * winStride], &eqWinIm[(size_t)w * winStride]);
             k0 = std::max(k0, k1);
         }
     }
@@ -3224,7 +3845,7 @@ struct Engine::Impl {
         accumulateFdl(t, sl, r, fRe, fIm, ar, ai);
     }
     void accumulateClean(const TailConv& t, const Slot& sl, int r, float* ar, float* ai) const {
-        accumulateFdl(t, sl, r, t.cleanRe.data(), t.cleanIm.data(), ar, ai);
+        accumulateFdlRange(t, sl, r, 0, sl.partitions, t.cleanRe.data(), t.cleanIm.data(), ar, ai, t.cleanNz.data());
     }
 
     void inverse(const float* ar, const float* ai, float* out) {
@@ -3242,7 +3863,7 @@ struct Engine::Impl {
 
     void handoverCorrelation(TailConv& t,const Slot& old,const Slot& fresh) {
         double aa[NB]={},bb[NB]={},ab[NB]={};
-        for(int bin=0;bin<t.bins;++bin) {
+        for(int bin=0;bin<=B;++bin) {
             const double w=2*kPi*bin/(2*B);const std::complex<double> z{std::cos(w),-std::sin(w)};
             std::complex<double> low[NB-1];double weights[NB];
             for(int b=0;b<NB-1;++b){double a=1-std::exp(-2*kPi*kBandHz[b]*std::sqrt(2.)/sr);low[b]=a/(1.-(1.-a)*z);}
@@ -3259,13 +3880,13 @@ struct Engine::Impl {
         for(int b=0;b<NB;++b)t.bandRho[b]=aa[b]>1e-30&&bb[b]>1e-30?(float)std::clamp(ab[b]/std::sqrt(aa[b]*bb[b]),0.,1.):1.f;
     }
     void accumulateFresh(TailConv& t,const Slot& sl,int r,float* ar,float* ai) {
-        t.fdlRe.swap(t.freshRe);t.fdlIm.swap(t.freshIm);
-        accumulateFdl(t,sl,r,t.fdlRe.data(),t.fdlIm.data(),ar,ai);
-        t.fdlRe.swap(t.freshRe);t.fdlIm.swap(t.freshIm);
+        accumulateFdlRange(t,sl,r,0,sl.partitions,t.freshRe.data(),t.freshIm.data(),ar,ai,t.freshNz.data());
     }
     void promoteFresh(TailConv& t) {
         t.fdlRe.swap(t.freshRe);t.fdlIm.swap(t.freshIm);
+        t.fdlNz.swap(t.freshNz);
         t.prevIn.swap(t.freshPrev);t.inAcc.swap(t.freshIn);
+        t.preDoneQ = 0;
     }
     void accumulateHandover(TailConv& t,int old,int r,float* ar,float* ai) {
         bakeEqualize(t,t.slot[old],r,ar,ai);
@@ -3318,6 +3939,48 @@ struct Engine::Impl {
         accumulateRange(t, t.slot[old], r, age, t.slot[old].partitions, ar, ai);
     }
 
+    void convSlice(TailConv& t, int q) {
+        const bool canPre = (t.pending.load(std::memory_order_relaxed) < 0)
+            && (t.longN == 0)
+            && !bakeEnabled.load(std::memory_order_relaxed)
+            && (shared || t.cleanSynced.load(std::memory_order_relaxed) >= t.P);
+        if (!canPre) { t.preDoneQ = 0; return; }
+        if (q == 0) {
+            t.preCurSlot = t.cur;
+            t.preHoSlot = t.hoSlot;
+            t.preDoneQ = 0;
+            std::fill(t.preRe.begin(), t.preRe.end(), 0.f);
+            std::fill(t.preIm.begin(), t.preIm.end(), 0.f);
+            if (t.hoSlot >= 0) {
+                std::fill(t.preFreshRe.begin(), t.preFreshRe.end(), 0.f);
+                std::fill(t.preFreshIm.begin(), t.preFreshIm.end(), 0.f);
+            }
+        } else if (t.preDoneQ != q || t.cur != t.preCurSlot || t.hoSlot != t.preHoSlot) {
+            t.preDoneQ = 0;
+            return;
+        }
+        const int nextHead = (t.head + 1) % t.P;
+        const Slot& sl = t.slot[t.cur];
+        int k0 = 1, k1 = 1;
+        sliceBounds(sl.partitions, q, k0, k1);
+        for (int r = 0; r < t.R; ++r) {
+            float* pr = &t.preRe[(size_t)r * t.bins];
+            float* pi = &t.preIm[(size_t)r * t.bins];
+            accumulateFdlRangeAdd(t, sl, r, k0, k1, t.fdlRe.data(), t.fdlIm.data(), t.fdlNz.data(), nextHead, pr, pi);
+        }
+        if (t.hoSlot >= 0) {
+            const Slot& hsl = t.slot[t.hoSlot];
+            int hk0 = 1, hk1 = 1;
+            sliceBounds(hsl.partitions, q, hk0, hk1);
+            for (int r = 0; r < t.R; ++r) {
+                float* pr = &t.preFreshRe[(size_t)r * t.bins];
+                float* pi = &t.preFreshIm[(size_t)r * t.bins];
+                accumulateFdlRangeAdd(t, hsl, r, hk0, hk1, t.freshRe.data(), t.freshIm.data(), t.freshNz.data(), nextHead, pr, pi);
+            }
+        }
+        t.preDoneQ = q + 1;
+    }
+
     // One block of a partitioned convolver; its `t.R` output channels accumulate into rows firstRow.. of tailTmp.
     void convBlock(TailConv& t, int firstRow) {
         int p = t.pending.load();
@@ -3339,28 +4002,62 @@ struct Engine::Impl {
             }
         }
         // spectrum of [prevIn | inAcc]
-        for (int i = 0; i < B; ++i) { fftBuf[i] = {t.prevIn[i], 0}; fftBuf[B + i] = {t.inAcc[i], 0}; }
-        fft.run(fftBuf.data(), false);
         t.head = (t.head + 1) % t.P;
-        for (int b = 0; b <= B; ++b) { t.fdlRe[(size_t)t.head * t.bins + b] = fftBuf[b].re; t.fdlIm[(size_t)t.head * t.bins + b] = fftBuf[b].im; }
+        const size_t headOff = (size_t)t.head * t.bins;
+        if (blockHasSignal(t.prevIn.data(), t.inAcc.data(), B)) {
+            for (int i = 0; i < B; ++i) { fftBuf[i] = {t.prevIn[i], 0}; fftBuf[B + i] = {t.inAcc[i], 0}; }
+            fft.run(fftBuf.data(), false);
+            for (int b = 0; b <= B; ++b) { t.fdlRe[headOff + b] = fftBuf[b].re; t.fdlIm[headOff + b] = fftBuf[b].im; }
+            t.fdlNz[(size_t)t.head] = 1;
+        } else {
+            if (t.fdlNz[(size_t)t.head]) {
+                std::fill_n(&t.fdlRe[headOff], t.bins, 0.f);
+                std::fill_n(&t.fdlIm[headOff], t.bins, 0.f);
+            }
+            t.fdlNz[(size_t)t.head] = 0;
+        }
         std::memcpy(t.prevIn.data(), t.inAcc.data(), sizeof(float) * B);
         if (t.hoSlot >= 0) {
-            for(int i=0;i<B;++i){fftBuf[i]={t.freshPrev[i],0};fftBuf[B+i]={t.freshIn[i],0};}
-            fft.run(fftBuf.data(),false);
-            for(int b=0;b<=B;++b){t.freshRe[(size_t)t.head*t.bins+b]=fftBuf[b].re;t.freshIm[(size_t)t.head*t.bins+b]=fftBuf[b].im;}
+            if (blockHasSignal(t.freshPrev.data(), t.freshIn.data(), B)) {
+                for(int i=0;i<B;++i){fftBuf[i]={t.freshPrev[i],0};fftBuf[B+i]={t.freshIn[i],0};}
+                fft.run(fftBuf.data(),false);
+                for(int b=0;b<=B;++b){t.freshRe[headOff+b]=fftBuf[b].re;t.freshIm[headOff+b]=fftBuf[b].im;}
+                t.freshNz[(size_t)t.head] = 1;
+            } else {
+                if (t.freshNz[(size_t)t.head]) {
+                    std::fill_n(&t.freshRe[headOff], t.bins, 0.f);
+                    std::fill_n(&t.freshIm[headOff], t.bins, 0.f);
+                }
+                t.freshNz[(size_t)t.head] = 0;
+            }
             std::memcpy(t.freshPrev.data(),t.freshIn.data(),sizeof(float)*B);
         }
         if (!shared) {
             if (t.hoSlot >= 0) {
-                for (int i = 0; i < B; ++i) { fftBuf[i] = {t.cleanPrev[i], 0}; fftBuf[B + i] = {t.cleanIn[i], 0}; }
-                fft.run(fftBuf.data(), false);
-                for (int b = 0; b <= B; ++b) { t.cleanRe[(size_t)t.head * t.bins + b] = fftBuf[b].re; t.cleanIm[(size_t)t.head * t.bins + b] = fftBuf[b].im; }
+                if (blockHasSignal(t.cleanPrev.data(), t.cleanIn.data(), B)) {
+                    for (int i = 0; i < B; ++i) { fftBuf[i] = {t.cleanPrev[i], 0}; fftBuf[B + i] = {t.cleanIn[i], 0}; }
+                    fft.run(fftBuf.data(), false);
+                    for (int b = 0; b <= B; ++b) { t.cleanRe[headOff + b] = fftBuf[b].re; t.cleanIm[headOff + b] = fftBuf[b].im; }
+                    t.cleanNz[(size_t)t.head] = 1;
+                } else {
+                    if (t.cleanNz[(size_t)t.head]) {
+                        std::fill_n(&t.cleanRe[headOff], t.bins, 0.f);
+                        std::fill_n(&t.cleanIm[headOff], t.bins, 0.f);
+                    }
+                    t.cleanNz[(size_t)t.head] = 0;
+                }
                 std::memcpy(t.cleanPrev.data(), t.cleanIn.data(), sizeof(float) * B);
                 t.cleanSynced.store(0, std::memory_order_release);
             } else {
-                const size_t off = (size_t)t.head * t.bins;
-                std::memcpy(&t.cleanRe[off], &t.fdlRe[off], sizeof(float) * (size_t)t.bins);
-                std::memcpy(&t.cleanIm[off], &t.fdlIm[off], sizeof(float) * (size_t)t.bins);
+                const size_t off = headOff;
+                if (t.fdlNz[(size_t)t.head]) {
+                    std::memcpy(&t.cleanRe[off], &t.fdlRe[off], sizeof(float) * (size_t)t.bins);
+                    std::memcpy(&t.cleanIm[off], &t.fdlIm[off], sizeof(float) * (size_t)t.bins);
+                } else if (t.cleanNz[(size_t)t.head]) {
+                    std::fill_n(&t.cleanRe[off], t.bins, 0.f);
+                    std::fill_n(&t.cleanIm[off], t.bins, 0.f);
+                }
+                t.cleanNz[(size_t)t.head] = t.fdlNz[(size_t)t.head];
                 std::memcpy(t.cleanPrev.data(), t.cleanIn.data(), sizeof(float) * B);
                 const int synced = t.cleanSynced.load(std::memory_order_relaxed);
                 if (synced < t.P) {
@@ -3371,11 +4068,16 @@ struct Engine::Impl {
                         const size_t eoff = (size_t)e * t.bins;
                         std::memcpy(&t.fdlRe[eoff], &t.cleanRe[eoff], sizeof(float) * (size_t)t.bins);
                         std::memcpy(&t.fdlIm[eoff], &t.cleanIm[eoff], sizeof(float) * (size_t)t.bins);
+                        t.fdlNz[(size_t)e] = t.cleanNz[(size_t)e];
                     }
                     t.cleanSynced.store(nextSynced, std::memory_order_release);
                 }
             }
         }
+        const bool usePre = (!fade && t.longN == 0 && t.preDoneQ == 3 && t.cur == t.preCurSlot && t.hoSlot == t.preHoSlot
+                             && !bakeEnabled.load(std::memory_order_relaxed)
+                             && (shared || t.cleanSynced.load(std::memory_order_relaxed) >= t.P));
+        t.preDoneQ = 0;
         if (t.hoSlot >= 0) ++t.hoAge;
         double ab = 0, aa = 0, bb = 0;  // products of the two outputs of a long crossfade, all channels
         for (int r = 0; r < t.R; ++r) {
@@ -3421,12 +4123,42 @@ struct Engine::Impl {
                     dst[i] += k * (sN * blkA[i] + aO * blkB[i]);
                 }
             } else if (t.hoSlot >= 0) {
-                accumulateHandover(t,t.cur,r,accRe.data(),accIm.data());
-                inverse(accRe.data(),accIm.data(),blkA.data());
+                if (usePre) {
+                    const Slot& sl = t.slot[t.cur];
+                    int k0 = 1, k1 = 1;
+                    sliceBounds(sl.partitions, 3, k0, k1);
+                    float* pr = &t.preRe[(size_t)r * t.bins];
+                    float* pi = &t.preIm[(size_t)r * t.bins];
+                    accumulateFdlRangeAdd(t, sl, r, k0, k1, t.fdlRe.data(), t.fdlIm.data(), t.fdlNz.data(), t.head, pr, pi);
+                    accumulateFdlRangeAdd(t, sl, r, 0, 1, t.fdlRe.data(), t.fdlIm.data(), t.fdlNz.data(), t.head, pr, pi);
+                    const Slot& hsl = t.slot[t.hoSlot];
+                    int hk0 = 1, hk1 = 1;
+                    sliceBounds(hsl.partitions, 3, hk0, hk1);
+                    float* fpr = &t.preFreshRe[(size_t)r * t.bins];
+                    float* fpi = &t.preFreshIm[(size_t)r * t.bins];
+                    accumulateFdlRangeAdd(t, hsl, r, hk0, hk1, t.freshRe.data(), t.freshIm.data(), t.freshNz.data(), t.head, fpr, fpi);
+                    accumulateFdlRangeAdd(t, hsl, r, 0, 1, t.freshRe.data(), t.freshIm.data(), t.freshNz.data(), t.head, fpr, fpi);
+                    for (int b = 0; b < t.bins; ++b) { pr[b] += fpr[b]; pi[b] += fpi[b]; }
+                    inverseRaw(pr, pi, blkA.data());
+                } else {
+                    accumulateHandover(t,t.cur,r,accRe.data(),accIm.data());
+                    inverse(accRe.data(),accIm.data(),blkA.data());
+                }
                 for(int i=0;i<B;++i)dst[i]+=blkA[i];
             } else {
-                accumulate(t, t.slot[t.cur], r, accRe.data(), accIm.data());
-                inverse(accRe.data(), accIm.data(), blkA.data());
+                if (usePre) {
+                    const Slot& sl = t.slot[t.cur];
+                    int k0 = 1, k1 = 1;
+                    sliceBounds(sl.partitions, 3, k0, k1);
+                    float* pr = &t.preRe[(size_t)r * t.bins];
+                    float* pi = &t.preIm[(size_t)r * t.bins];
+                    accumulateFdlRangeAdd(t, sl, r, k0, k1, t.fdlRe.data(), t.fdlIm.data(), t.fdlNz.data(), t.head, pr, pi);
+                    accumulateFdlRangeAdd(t, sl, r, 0, 1, t.fdlRe.data(), t.fdlIm.data(), t.fdlNz.data(), t.head, pr, pi);
+                    inverseRaw(pr, pi, blkA.data());
+                } else {
+                    accumulate(t, t.slot[t.cur], r, accRe.data(), accIm.data());
+                    inverse(accRe.data(), accIm.data(), blkA.data());
+                }
                 for (int i = 0; i < B; ++i) dst[i] += blkA[i];
             }
         }
@@ -3478,6 +4210,15 @@ struct Engine::Impl {
                 t.appliedScene.store(t.slot[t.cur].sceneRevision,std::memory_order_release);
                 if(t.longFromPending){t.longFromPending=false;t.pending.store(-1);stTransDone.fetch_add(1,std::memory_order_relaxed);}
             }
+        }
+    }
+
+    void tailSlice(int q) {
+        if (q < 0 || q >= 3) return;
+        if (shared) {
+            for (int r = 0; r < R; ++r) convSlice(*sconv[(size_t)r], q);
+        } else {
+            for (int s = 0; s < S; ++s) convSlice(srcs[(size_t)s]->tail, q);
         }
     }
 
@@ -3560,10 +4301,27 @@ struct Engine::Impl {
                     float* y = &lateY[(size_t)r * ctrl];
                     if(t.hoSlot<0) {
                     std::fill(y, y + m, 0.f);
+                    const size_t idx0 = (size_t)gcount & ringMask;
+                    const bool ringContig = (idx0 + (size_t)m <= ringMask + 1);
                     for (int s = 0; s < S; ++s) {
                         const float* g = &lateGuse[((size_t)r * S + s) * 8];
+                        if (g[0] == 0.f && g[1] == 0.f && g[2] == 0.f && g[3] == 0.f && g[4] == 0.f && g[5] == 0.f && g[6] == 0.f) continue;
                         const float* fr = srcs[(size_t)s]->ring.data();
-                        for (int j = 0; j < m; ++j) {
+                        int j = 0;
+                       #if VERB_REQUIRE_AVX2
+                        if (ringContig) {
+                            const __m256 vg = _mm256_setr_ps(g[0], g[1], g[2], g[3], g[4], g[5], g[6], 0.f);
+                            const float* f = fr + idx0 * 8;
+                            for (; j + 4 <= m; j += 4, f += 32) {
+                                const __m256 h01 = _mm256_hadd_ps(_mm256_mul_ps(vg, _mm256_loadu_ps(f)), _mm256_mul_ps(vg, _mm256_loadu_ps(f + 8)));
+                                const __m256 h23 = _mm256_hadd_ps(_mm256_mul_ps(vg, _mm256_loadu_ps(f + 16)), _mm256_mul_ps(vg, _mm256_loadu_ps(f + 24)));
+                                const __m256 sv = _mm256_hadd_ps(h01, h23);
+                                const __m128 sum4 = _mm_add_ps(_mm256_castps256_ps128(sv), _mm256_extractf128_ps(sv, 1));
+                                _mm_storeu_ps(y + j, _mm_add_ps(_mm_loadu_ps(y + j), sum4));
+                            }
+                        }
+                       #endif
+                        for (; j < m; ++j) {
                             const float* f = fr + (((size_t)(gcount + j)) & ringMask) * 8;
                             y[j] += g[0] * f[0] + g[1] * f[1] + g[2] * f[2] + g[3] * f[3] + g[4] * f[4] + g[5] * f[5] + g[6] * f[6];
                         }
@@ -3598,33 +4356,63 @@ struct Engine::Impl {
                     }
                     componentMix[(size_t)k * ctrl + j] = componentGain[k];
                 }
-            for (int r = 0; r < R; ++r) {
+            if (coincidentOmni) {
                 const auto trt0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-                float* acc = &tmpOut[(size_t)r * ctrl];
-                float* ear = &tmpEarly[(size_t)r * ctrl];
-                std::fill(acc, acc + m, 0.f);
-                std::fill(ear, ear + m, 0.f);
-                for (int s = 0; s < S; ++s)
-                    for (int k = 0; k < M; ++k) renderTaps(s, r * M + k, ph, m, acc, ear);
-                if (M > 1) {
-                    const float inv = 1.f / (float)M;
-                    for (int j = 0; j < m; ++j) { acc[j] *= inv; ear[j] *= inv; }
+                for (int r = 0; r < R; ++r) {
+                    float* acc = &tmpOut[(size_t)r * ctrl];
+                    float* ear = &tmpEarly[(size_t)r * ctrl];
+                    std::fill(acc, acc + m, 0.f);
+                    std::fill(ear, ear + m, 0.f);
                 }
+                for (int s = 0; s < S; ++s) renderCoincidentTaps(s, ph, m);
                 const auto trt1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 if (p7Enabled) p7.renderTapsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(trt1 - trt0).count();
-                diffuse(r, ear, m, diffG);
-                const auto tdf1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-                if (p7Enabled) p7.diffuseNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(tdf1 - trt1).count();
-                const size_t tr = tailMask + 1;
-                for (int j = 0; j < m; ++j) {
-                    const float tg = tailGa + (tailGb - tailGa) * (float)(ph + j + 1) / (float)ctrl;
-                    creativeDirect[(size_t)r*ctrl+j]=componentMix[j]*acc[j];
-                    creativeTail[(size_t)r*ctrl+j]=tg*tailRing[(size_t)r*tr+((gcount+j)&tailMask)];
-                    // Preserve the exact pre-E1 arithmetic on the neutral path.
-                    out[r][done+j]=componentMix[j]*acc[j]+componentMix[ctrl+j]*ear[j]
-                        +componentMix[2*ctrl+j]*tg*tailRing[(size_t)r*tr+((gcount+j)&tailMask)];
+                for (int r = 0; r < R; ++r) {
+                    const auto tdf0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    float* acc = &tmpOut[(size_t)r * ctrl];
+                    float* ear = &tmpEarly[(size_t)r * ctrl];
+                    diffuse(r, ear, m, diffG);
+                    const auto tdf1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    if (p7Enabled) p7.diffuseNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(tdf1 - tdf0).count();
+                    const size_t tr = tailMask + 1;
+                    for (int j = 0; j < m; ++j) {
+                        const float tg = tailGa + (tailGb - tailGa) * (float)(ph + j + 1) / (float)ctrl;
+                        creativeDirect[(size_t)r*ctrl+j]=componentMix[j]*acc[j];
+                        creativeTail[(size_t)r*ctrl+j]=tg*tailRing[(size_t)r*tr+((gcount+j)&tailMask)];
+                        out[r][done+j]=componentMix[j]*acc[j]+componentMix[ctrl+j]*ear[j]
+                            +componentMix[2*ctrl+j]*tg*tailRing[(size_t)r*tr+((gcount+j)&tailMask)];
+                    }
+                    if (p7Enabled) p7.creativeWetNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tdf1).count();
                 }
-                if (p7Enabled) p7.creativeWetNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tdf1).count();
+            } else {
+                for (int r = 0; r < R; ++r) {
+                    const auto trt0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    float* acc = &tmpOut[(size_t)r * ctrl];
+                    float* ear = &tmpEarly[(size_t)r * ctrl];
+                    std::fill(acc, acc + m, 0.f);
+                    std::fill(ear, ear + m, 0.f);
+                    for (int s = 0; s < S; ++s)
+                        for (int k = 0; k < M; ++k) renderTaps(s, r * M + k, ph, m, acc, ear);
+                    if (M > 1) {
+                        const float inv = 1.f / (float)M;
+                        for (int j = 0; j < m; ++j) { acc[j] *= inv; ear[j] *= inv; }
+                    }
+                    const auto trt1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    if (p7Enabled) p7.renderTapsNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(trt1 - trt0).count();
+                    diffuse(r, ear, m, diffG);
+                    const auto tdf1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                    if (p7Enabled) p7.diffuseNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(tdf1 - trt1).count();
+                    const size_t tr = tailMask + 1;
+                    for (int j = 0; j < m; ++j) {
+                        const float tg = tailGa + (tailGb - tailGa) * (float)(ph + j + 1) / (float)ctrl;
+                        creativeDirect[(size_t)r*ctrl+j]=componentMix[j]*acc[j];
+                        creativeTail[(size_t)r*ctrl+j]=tg*tailRing[(size_t)r*tr+((gcount+j)&tailMask)];
+                        // Preserve the exact pre-E1 arithmetic on the neutral path.
+                        out[r][done+j]=componentMix[j]*acc[j]+componentMix[ctrl+j]*ear[j]
+                            +componentMix[2*ctrl+j]*tg*tailRing[(size_t)r*tr+((gcount+j)&tailMask)];
+                    }
+                    if (p7Enabled) p7.creativeWetNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tdf1).count();
+                }
             }
             const auto tcw0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             const double pd=requestedPredelay.load(std::memory_order_relaxed);
@@ -3672,6 +4460,10 @@ struct Engine::Impl {
                 const auto ttb0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 tailBlock();
                 if (p7Enabled) p7.tailBlockNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ttb0).count();
+            } else if (B == 4 * ctrl && (gcount % ctrl) == 0) {
+                const auto ttb0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                tailSlice((int)((gcount % B) / ctrl) - 1);
+                if (p7Enabled) p7.tailBlockNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ttb0).count();
             }
         }
         publishedDiffractionMisses.store(diffractionScratch.capacityMisses + quickScratch.capacityMisses,std::memory_order_relaxed);
@@ -3710,6 +4502,7 @@ void Engine::setReverbMix(double amount) { p_->reverbMix.store((float)clampTo(am
 void Engine::setTailQuality(int rays, bool adaptive) {
     p_->requestedRays.store(std::min(std::max(rays, 8000), 384000));
     p_->requestedAdaptive.store(adaptive);
+    p_->traceQualitySerial.fetch_add(1, std::memory_order_release);
     p_->qualitySerial.fetch_add(1, std::memory_order_release);
 }
 void Engine::setDecayMultipliers(double low, double mid, double high) {
@@ -3740,7 +4533,10 @@ void Engine::setSourceDirectivity(int s, std::shared_ptr<const DirectivityProfil
     if (state.fixedPattern) p_->params[p_->S*4+8+s].store(state.pattern);
     if (p_->srcs[(size_t)s]->directivityState.publish(std::move(state))) {
         p_->srcs[(size_t)s]->directivitySerial.fetch_add(1,std::memory_order_release);
-        if(acousticChange) p_->qualitySerial.fetch_add(1, std::memory_order_release);
+        if(acousticChange) {
+            p_->traceQualitySerial.fetch_add(1, std::memory_order_release);
+            p_->qualitySerial.fetch_add(1, std::memory_order_release);
+        }
     } // workers, motion and baked tables invalidate together
 }
 void Engine::setSourceAzimuth(int s, double deg) { p_->params[s * 4 + 3].store(deg); }
@@ -4011,20 +4807,50 @@ void Engine::setBakeForcedBlock(bool blocked) {
     p_->bakeForcedBlock=blocked;
     p_->applyBakedPathsLocked(p_->declaredPaths);
 }
-void Engine::setBakedPaths(const std::vector<BakedPath>& declared) {
+void Engine::setBakedPaths(const std::vector<BakedPath>& declared, const std::vector<BakedYawMatch>& recordedYawMatch) {
     std::lock_guard<std::mutex> lock(p_->bakeRequestMx);
+    if(p_->recordedYawMatch!=recordedYawMatch){
+        p_->recordedYawMatch=recordedYawMatch;
+        p_->recordedYawMatchChanged=true;
+    }
     p_->applyBakedPathsLocked(declared);
 }
 void Engine::requestPathBake(unsigned workers) {
     std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+#if defined(_WIN32)
+    if (bake_diag::enabled()) {
+        p_->requestedDiagnostics.reset();
+        try {
+            p_->requestedDiagnostics = std::make_shared<bake_diag::Bake>(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
+        } catch (const std::bad_alloc&) {} // Diagnostic allocation must never prevent baking.
+    }
+#endif
     if(p_->passGeneration.load(std::memory_order_acquire)!=p_->passConsumed)
         p_->applyBakedPathsLocked(p_->declaredPaths);
     if(p_->bakeEnabled.load()){
-        for(const auto&gr:p_->bakeGroups)for(int o:gr.spec.objects){
-            const int idx=o<0?0:o+1;if(idx>=0&&idx<(int)p_->bakeObjectTouched.size())p_->bakeObjectTouched[(size_t)idx]=1;
+        for(auto& gr:p_->bakeGroups)for(auto& path:gr.spec.paths){
+            const int idx=path.object+1;
+            p_->bakeObjectTouched[(size_t)idx]=1;
+            if(path.yawMatch.free&&!path.recorded){
+                // Pull the reference angle from the latest declaration only on an explicit Bake.
+                const auto live=std::find_if(p_->declaredPaths.begin(),p_->declaredPaths.end(),[&](const auto& q){return q.object==path.object;});
+                if(live!=p_->declaredPaths.end()&&path==*live)
+                    for(size_t k=0;k<path.poses.size();++k)path.poses[k][3]=live->poses[k][3];
+            }
         }
     }
     p_->bakeWantedWorkers=workers;p_->bakePercent=0;p_->bakeDone=0;p_->bakeTotal=0;p_->bakeWaitReason=0;p_->bakeState=BakeState::Baking;++p_->bakeAction;p_->bakeRequested=true;p_->bakeRestored=0;
+}
+std::string Engine::bakeWorkerDiagnostics() const {
+#if defined(_WIN32)
+    std::shared_ptr<bake_diag::Bake> diagnostics;
+    {
+        const std::lock_guard<std::mutex> lock(p_->bakeRequestMx);
+        diagnostics = p_->requestedDiagnostics;
+    }
+    if (diagnostics) return diagnostics->describe();
+#endif
+    return {};
 }
 void Engine::cancelPathBake() {
     std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
@@ -4093,7 +4919,15 @@ bool Engine::installBakedTables(const std::vector<BakedTable>& tables) {
     for(size_t gi=0;gi<q.bakeGroups.size();++gi){
         const auto&gr=q.bakeGroups[gi];
         const BakedTable* match=nullptr;
-        for(const auto&t:tables)if(t.movingPaths==gr.spec.paths&&t.movesListener==gr.spec.movesListener){match=&t;break;}
+        // Serialized passes have no session generation. Compare the description and stamp the current
+        // generation only after the raw pass, scene and table signature have been verified.
+        for(const auto&t:tables){
+            if(t.movesListener==gr.spec.movesListener&&
+               std::equal(t.movingPaths.begin(),t.movingPaths.end(),gr.spec.paths.begin(),gr.spec.paths.end(),
+                          [](const auto& a,const auto& b){return a.sameDescription(b);})){
+                match=&t;break;
+            }
+        }
         if(!match)return reject("path match");
         BakedTable t=*match;
         if(t.estimator!=kBakeEstimatorVersion||t.u.size()<2||t.contentSig==0)return reject("estimator/sig");

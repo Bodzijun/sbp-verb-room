@@ -390,9 +390,11 @@ VerbWebEditor::VerbWebEditor(VerbProcessor& p, std::shared_ptr<UdfLease> l, juce
         cleaner->startThread(juce::Thread::Priority::low);
     }
 #endif
+    proc.bakeDiagnosticEditorOpened(true);
 }
 
 VerbWebEditor::~VerbWebEditor() {
+    proc.bakeDiagnosticEditorOpened(false);
     stopTimer();
     releaseHostKeys();
     mode = Mode::failed;  // late callbacks see a closed editor

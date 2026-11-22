@@ -232,6 +232,14 @@ export function scenePartsRoom(ctx) {
   const factorRow = slider('Scale factor', 1, .05, 20, .01, () => {}, '×'), factor = factorRow.querySelector('.readout'), include = check('Also move sources, listener and height', false, () => {});
   factor.setAttribute('aria-label', 'Scale factor');
   factorRow.querySelector('.track').setAttribute('aria-label', 'Scale factor slider');
+  const setSeed = seed => store.command({ op: 'room.setClutter', seed });
+  const seedRow = slider('Seed', s.clutter.seed, 1, 9999, 1, setSeed);
+  seedRow.classList.add('clutter-seed');
+  seedRow.querySelector('.numeric').append(button('Randomize', () => {
+    const current = store.state.document.scene.clutter.seed;
+    const pick = 1 + Math.floor(Math.random() * 9998);
+    setSeed(pick < current ? pick : pick + 1);
+  }, { 'aria-label': 'Randomize clutter seed' }));
   return {
     room: [slider('Ceiling height', s.heightM, 1, 30, 0.001, heightM => store.command({ op: 'room.setHeight', heightM }), 'm'),
       row('Floor', select('Floor material', materials, s.materials[s.floorMaterial]?.name, n => apply('floor', n))),
@@ -240,8 +248,8 @@ export function scenePartsRoom(ctx) {
       check('Open sky (no ceiling)', s.ceilingMaterial === null, open => store.command({ op: 'room.setOpening', ref: { kind: 'ceiling', index: 0 }, open })),
       check('Edge diffraction', s.diffraction, enabled => store.command({ op: 'room.setDiffraction', enabled }))],
     air: [slider('Temperature', s.tempC, -20, 45, 0.1, tempC => store.command({ op: 'room.setAir', tempC }), '°C'), slider('Humidity', s.humidityPct, 5, 100, 0.1, humidityPct => store.command({ op: 'room.setAir', humidityPct }), '%')],
-    clutter: [...[['Count', 'count', 0, 80, 1], ['Min length', 'minLenM', 0.1, 3, 0.1], ['Max length', 'maxLenM', 0.2, 5, 0.1], ['Min height', 'minHeightM', 0.1, 3, 0.1], ['Max height', 'maxHeightM', 0.2, 4, 0.1], ['Min TL', 'tlMinDb', 0, 30, 0.1], ['Max TL', 'tlMaxDb', 0, 40, 0.1], ['Seed', 'seed', 1, 9999, 1]]
-      .map(([label, key, min, max, step]) => slider(label, s.clutter[key], min, max, step, n => store.command({ op: 'room.setClutter', [key]: n }), key.endsWith('M') ? 'm' : key.endsWith('Db') ? 'dB' : '')), slider('Source clearance', s.clutter.minDistM, 0, 10, .01, minDistM => store.command({op:'room.setClutter',minDistM}), 'm')],
+    clutter: [...[['Count', 'count', 0, 80, 1], ['Min length', 'minLenM', 0.1, 3, 0.1], ['Max length', 'maxLenM', 0.2, 5, 0.1], ['Min height', 'minHeightM', 0.1, 3, 0.1], ['Max height', 'maxHeightM', 0.2, 4, 0.1], ['Min TL', 'tlMinDb', 0, 30, 0.1], ['Max TL', 'tlMaxDb', 0, 40, 0.1]]
+      .map(([label, key, min, max, step]) => slider(label, s.clutter[key], min, max, step, n => store.command({ op: 'room.setClutter', [key]: n }), key.endsWith('M') ? 'm' : key.endsWith('Db') ? 'dB' : '')), seedRow, slider('Source clearance', s.clutter.minDistM, 0, 10, .01, minDistM => store.command({op:'room.setClutter',minDistM}), 'm')],
     roughness: [slider('Roughness', s.roughness, 0, 1, 0.001, roughness => store.command({ op: 'room.setRoughness', roughness }))],
     scale: [note('Scale geometry once; this is not an automated Size parameter.'), factorRow, include, button('Apply scale', () => {
       const n = Number(factor.value); if (Number.isFinite(n) && n >= 0.05 && n <= 20) store.command({ op: 'room.scale', factor: n, includeObjects: include.checked });
@@ -326,7 +334,7 @@ export function orientationControls(ctx, object) {
   const objLabel = o => o === 32 ? 'Listener' : (sources[o]?.name || `Source ${o + 1}`);
   const send = patch => store.command({ op: 'path.setFlags', object, ...patch });
   const rows = [row('Orientation', select('Orientation', [['manual', 'Manual'], ['along', 'Along path'], ['lookAt', 'Look at']], mode, v => send({ orientMode: v }),
-    { 'data-orientation-mode': String(object), title: 'Manual: set by hand or automation · Along path: turn with the path direction · Look at: face another object or a point · Azimuth is added as an offset in both' }))];
+    { 'data-orientation-mode': String(object), title: 'Manual: the Azimuth control sets the direction and can be automated. Baked tails use the angles captured when baked. · Along path: turn with the path direction · Look at: face another object or a point · Azimuth is added as an offset in both' }))];
   if (mode === 'lookAt') {
     const targets = [['', 'Choose target…'], ...sources.map((_, s) => s).filter(s => s !== object).map(s => [s, objLabel(s)]), ...(object !== 32 ? [[32, 'Listener']] : []), ['point', 'Point…']];
     const current = Array.isArray(p.lookPos) ? 'point' : Number.isInteger(p.lookTarget) ? p.lookTarget : '';
@@ -404,6 +412,8 @@ export function pathControls(ctx, object) {
     element('div', { className: 'path-actions' }, actions)
   ]);
   const bakeStatus = element('small', { className: 'path-bake-status', 'aria-live': 'polite' });
+  const bakeHelp = 'Pre-compute the late tail so it follows the movement before objects stop. Large rooms can take 1–2 minutes. Bake again after changing the room, paths, or materials.';
+  const recordHelp = 'Record movement from DAW automation (X, Y, Z or azimuth), a listener and sources moving outside one group, or a Look at target moving on its own. Press Record pass, play the movement once, press Stop, then press Bake path. Record again if the automation changes. For drawn paths in one group, just press Bake path.';
   const bakeTarget = hasPath ? object : 'all';
   const bakeButton = button('Bake path', () => {
     const v = pathBakeView(store.telemetry['status.load']?.pathBake, hasPath ? object : -1);
@@ -418,16 +428,26 @@ export function pathControls(ctx, object) {
   });
   const updateBake = () => {
     const pass = store.telemetry['status.load']?.pathBake;
-    recordButton.textContent = pass?.passState === 1 ? 'Armed - Stop'
-      : pass?.passState === 2 ? `Recording ${pass.passSamples} - Stop`
-      : [3, 4].includes(pass?.passState) ? `Recorded ${pass.passSamples} - Record again`
-      : 'Record pass';
+    const recorded = [3, 4].includes(pass?.passState);
+    const samples = pass?.passSamples ?? 0;
+    const [recordLabel, recordTitle] = pass?.passState === 1
+      ? ['Armed - Stop', 'Recording starts when the host plays, and you can press Stop to cancel.']
+      : pass?.passState === 2
+        ? [`Recording ${samples} - Stop`, 'The movement is being recorded as the project plays, so press Stop when the movement ends.']
+        : recorded
+          ? [`Recorded ${samples} - Record again`, `${samples} samples ready: press Bake path to compute the tail or Record again to replace this pass.`]
+          : ['Record pass', recordHelp];
+    recordButton.textContent = recordLabel;
+    recordButton.title = recordTitle;
     const v = pathBakeView(pass, hasPath ? object : -1);
     bakeStatus.textContent = v.text;
     bakeStatus.title = v.text;
     bakeStatus.classList.toggle('warn', !!v.warn);
     bakeButton.classList.toggle('warn', !!v.warn);
     bakeButton.textContent = v.label;
+    bakeButton.title = v.running ? 'Stop the current bake.' : `${bakeHelp} ${recorded
+      ? 'Uses the recorded pass.'
+      : 'Uses drawn paths in one group or paths for independent sources. Uses the recording after Record pass.'}`;
   };
   updateBake();
   const bakeActions = element('div', { className: 'path-bake-actions' }, [recordButton, bakeButton, clearButton, bakeStatus]);

@@ -3,9 +3,7 @@
 #include <atomic>
 #include <sstream>
 #include "../src/layouts.hpp"
-struct E9bAccess {
-    static std::shared_ptr<verb::Engine> engine(VerbProcessor& p){juce::SpinLock::ScopedLockType lock(p.engineLock);return p.bundle?p.bundle->engine:nullptr;}
-};
+#include "tests/EngineTestAccess.h"
 static int testE9bRepro(){
     const int before=fails;VerbProcessor p;p.setPlayConfigDetails(2,2,48000,128);p.prepareToPlay(48000,128);check(waitReady(p,90),"E9b initial processor ready");juce::String error;
     auto file=repoFile("out/E9b/owner-repro-demo-motion.verbroom");

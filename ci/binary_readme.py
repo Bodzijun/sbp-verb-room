@@ -60,6 +60,8 @@ def write_binary_readme(stage: Path, version: str, target: str) -> None:
         text += "\nFiles ending in `_uk.md` are optional Ukrainian versions of the documentation.\n"
     license_name = "LICENSE.txt" if (stage / "LICENSE.txt").is_file() else "LICENSE"
     text += f"\n## License\n\nGNU Affero General Public License v3.0. See {license_name}.\n"
+    if (stage / "THIRD_PARTY_DIRECTIVITY.md").is_file():
+        text += "\n[THIRD_PARTY_DIRECTIVITY.md](THIRD_PARTY_DIRECTIVITY.md) lists the CC BY third-party directivity data and attribution.\n"
     (stage / "README.md").write_text(text, encoding="utf-8")
 
 

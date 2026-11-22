@@ -1,6 +1,6 @@
 # Verb Room 0.2.1
 
-Verb Room 0.2.1 is a maintenance and performance release over 0.2.0, addressing tester feedback on path baking, multi-source CPU load, and the web interface. Packages: Windows (x64), macOS (universal: Apple silicon and Intel) and Linux (classic interface only).
+Verb Room 0.2.1 is a maintenance and performance release over 0.2.0, addressing tester feedback on path baking, multi-source CPU load, and the web interface. Packages: Windows (x64) and macOS (universal: Apple silicon and Intel). A Linux package is not provided in this release.
 
 Thanks to everyone who tested 0.2.0 on Windows and macOS and reported audio, performance and workflow issues.
 

@@ -5,6 +5,8 @@
     std::atomic<uint64_t> passGeneration{0};
     uint64_t passConsumed=0;
     std::vector<BakedPath> recordedPaths,declaredPaths;
+    std::vector<BakedYawMatch> recordedYawMatch;
+    bool recordedYawMatchChanged=false;
     bool bakeForcedBlock=false,bakeForcedApplied=false; // E19: a Look at dependency the tables cannot represent (control thread, under bakeRequestMx)
     std::vector<double> bakeJointPose;
     std::atomic<bool> passOff{false};
@@ -51,9 +53,9 @@
     // Caller must hold bakeRequestMx.
     void consumeRecordedPass(){
         const uint64_t gen=passGeneration.load(std::memory_order_acquire);
-        if(gen==passConsumed)return;
+        if(gen==passConsumed&&!recordedYawMatchChanged)return;
         const int st=passState.load(std::memory_order_acquire);
-        if(st==0){recordedPaths.clear();passConsumed=gen;return;}
+        if(st==0){recordedPaths.clear();passConsumed=gen;recordedYawMatchChanged=false;return;}
         int ready=3;if(!passState.compare_exchange_strong(ready,4,std::memory_order_acq_rel))return;
         // Always release ownership, including on allocation failure.
         struct Release { std::atomic<int>& state;~Release(){state.store(3,std::memory_order_release);} } release{passState};
@@ -63,9 +65,24 @@
             std::vector<double> distance(n,0.);
             for(size_t i=1;i<n;++i){double e=0;for(size_t k=0;k<stride;++k){double v=passBuffer[i*stride+k]-passBuffer[(i-1)*stride+k];if(k%4==3)v=std::remainder(v,360.)*.01;e+=v*v;}distance[i]=distance[i-1]+std::sqrt(e);}
             if(distance.back()>0)for(int j=0;j<=S;++j){BakedPath p;p.object=j-1;p.group=2000;p.recorded=true;p.recording=gen;p.distance=distance;
-                for(size_t i=0;i<n;++i){std::array<double,4> v;for(int k=0;k<4;++k)v[k]=passBuffer[i*stride+4*j+k];p.poses.push_back(v);}next.push_back(std::move(p));}
+                for(size_t i=0;i<n;++i){std::array<double,4> v;for(int k=0;k<4;++k)v[k]=passBuffer[i*stride+4*j+k];p.poses.push_back(v);}
+                if((size_t)j<recordedYawMatch.size()&&recordedYawMatch[(size_t)j].free){
+                    const auto& match=recordedYawMatch[(size_t)j];
+                    const auto first=match.transform(p.poses.front().data(),-1.);
+                    const bool moved=std::any_of(p.poses.begin()+1,p.poses.end(),[&](const auto& raw){
+                        const auto q=match.transform(raw.data(),-1.);
+                        return std::hypot(std::hypot(q[0]-first[0],q[1]-first[1]),q[2]-first[2])>1e-6||
+                               std::abs(std::remainder(q[3]-first[3],360.))>1e-6;
+                    });
+                    // Keep the old metric for participants whose entire captured pose was static.
+                    if(moved){
+                        p.yawMatch=match;
+                        for(auto& v:p.poses)v=match.transform(v.data(),-1.);
+                    }
+                }
+                next.push_back(std::move(p));}
         }
-        recordedPaths=std::move(next);passConsumed=gen;
+        recordedPaths=std::move(next);passConsumed=gen;recordedYawMatchChanged=false;
     }
     std::mutex bakeRequestMx;
     std::vector<BakedPath> bakePaths;
@@ -148,6 +165,10 @@
     std::vector<Engine::BakeTraceDecision> bakeTraceDecisions;
     double bakeMaxGapMs=0;uint64_t bakeStepCalls=0,bakeWaitSteps=0;
     std::chrono::steady_clock::time_point bakeLastStepAt{};
+#if defined(_WIN32)
+    std::shared_ptr<bake_diag::Bake> requestedDiagnostics; // bakeRequestMx
+    std::shared_ptr<bake_diag::Bake> stationDiagnostics; // coordinator; copied into station closures
+#endif
     double bakeMs() const {return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-bakeStarted).count();}
     size_t bakeActiveLimit=1;
     std::vector<size_t> bakeProjectHints;
@@ -355,14 +376,42 @@
         }
         return specs;
     }
-    int bakePriority() const {
-        if(jumpSerial.load()!=workerJumpSeen)return 1;
-        if(shared){if(sLastGeom!=geomSerial.load()||sLastQuality!=workerQuality)return 2;}
-        else for(auto&sp:srcs)if(sp->lastGeom!=geomSerial.load()||sp->lastQuality!=workerQuality)return 5;
+    uint64_t bakeObservedStream = 0;
+    std::chrono::steady_clock::time_point bakeStreamChangedAt{};
+    int bakePriority(const World& world) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto stream = streamPos.load(std::memory_order_acquire);
+        if (bakeStreamChangedAt.time_since_epoch().count() == 0 || stream != bakeObservedStream) {
+            bakeObservedStream = stream;
+            bakeStreamChangedAt = now;
+        }
+        const bool audioIdle = !cfg.manualWorker &&
+            std::chrono::duration<double>(now - bakeStreamChangedAt).count() >= cfg.motionSettleSec;
+        const auto geometry = geomSerial.load();
+        if (world.serial != geometry || workerQuality != qualitySerial.load()) return shared ? 2 : 5;
+        if (poseScaleReady.load(std::memory_order_acquire) != world.constructionPoseScale) return 16;
+
+        // Stations trace the latest World independently of the live IR slots.
+        // Keep rebuild priority while callbacks progress. A stopped callback
+        // cannot release a slot or finish a crossfade.
+        bool waitingForAudio = shared && sharedTailHandoverWaiting;
+        if (!shared) {
+            for (const auto& sp : srcs) waitingForAudio |= tailHandoverWaiting(sp->tail);
+        }
+        if (jumpSerial.load() != workerJumpSeen && !(audioIdle && waitingForAudio)) return 1;
+        if (shared) {
+            if ((sLastGeom != geometry || sLastQuality != workerQuality) && !(audioIdle && waitingForAudio)) return 2;
+        } else {
+            for (const auto& sp : srcs) {
+                if ((sp->lastGeom != geometry || sp->lastQuality != workerQuality) &&
+                    !(audioIdle && tailHandoverWaiting(sp->tail))) return 5;
+            }
+        }
+        if (audioIdle && waitingForAudio) return 0;
         if(!anchorValid)return 0;
         // Match the normal worker's resolved anchor; raw wall-line coordinates can differ permanently.
         bool moved=false;for(int j=0;j<=S;++j){const double*ref=j==0?(shared?sLastLst:srcs.front()->lastLst):srcs[(size_t)j-1]->lastPose;moved|=poseFar(anchor.data()+4*j,ref,cfg.motionDeadbandM,cfg.motionDeadbandDeg);}
-        return moved&&((double)(streamPos.load()-anchorStream)>=cfg.motionSettleSec*sr || (!cfg.manualWorker&&std::chrono::duration<double>(std::chrono::steady_clock::now()-anchorWall).count()>=cfg.motionSettleSec))?7:0;
+        return moved&&((double)(stream-anchorStream)>=cfg.motionSettleSec*sr || (!cfg.manualWorker&&std::chrono::duration<double>(now-anchorWall).count()>=cfg.motionSettleSec))?7:0;
     }
     // P3: does the RAW integrated energy of this trace still carry too much Monte-Carlo noise?
     // sigma_rel = sqrt(sum h2)/sum h per receiver/band (h2 = sum of squared per-ray contributions).
@@ -439,7 +488,7 @@
     void queueGroupStation(GroupBakeJob&jb,double u,int rays,bool adapt){
         auto job=std::make_shared<BakeBatch>();job->u=u;job->rays=rays;job->queuedMs=bakeMs();{size_t c=0;for(const auto&j2:bakeJobs)c+=j2.active.size();job->activeAtQueue=(int)c;}job->hist.resize(jb.table.groupSources.size());job->usedRays.assign(jb.table.groupSources.size(),rays);
         auto pose=jb.table.staticPose;
-        for(const auto&path:jb.table.movingPaths){auto v=path.at(u);int offset=path.object<0?0:4+4*path.object;for(int k=0;k<4;++k)pose[(size_t)offset+k]=v[k];}
+        for(const auto&path:jb.table.movingPaths){auto v=path.tracePose(u);int offset=path.object<0?0:4+4*path.object;for(int k=0;k<4;++k)pose[(size_t)offset+k]=v[k];}
         SurfaceSideHist lh;double listener[4];resolvePose4(bakeWorld->geo,bakeWorld->serial,lh,pose.data(),listener);
         auto receivers=std::make_shared<std::vector<Transducer>>();resolvedReceivers(bakeWorld->geo,listener,*receivers,!shared);
         auto world=bakeWorld;auto stop=bakeStop;const auto preempt=bakePreempt.load();job->preempt=preempt;const bool pooled=shared;
@@ -451,7 +500,15 @@
             Transducer source=currentSource(s);SurfaceSideHist sh;double eff[4];
             resolvePose4(world->geo,world->serial,sh,pose.data()+4+4*s,eff);
             source.pos={eff[0],eff[1],eff[2]};source.azimuthDeg=eff[3];source.pattern=workerPattern(s);
-            job->futures.push_back(bakePool->submit([this,world,refTable,stop,receivers,source,preempt,pooled,order,rays,limit,s,jobId,adapt,si,job]{
+            job->futures.push_back(bakePool->submit([this,world,refTable,stop,receivers,source,preempt,pooled,order,rays,limit,s,jobId,adapt,si,job
+#if defined(_WIN32)
+                ,diagnostics=stationDiagnostics
+#endif
+            ]{
+#if defined(_WIN32)
+                const bake_diag::ScopedDenormalMode testMode(BakePool::testStationDenormalMode);
+                const bake_diag::Bake::Job sample(diagnostics.get());
+#endif
                 auto cancelled=[&]{return !running||stop->load(std::memory_order_relaxed)||bakePreempt.load(std::memory_order_relaxed)!=preempt||jobId!=bakeAction.load(std::memory_order_relaxed)||!bakeContextTable(*refTable,false);};
                 if(cancelled())throw std::runtime_error("Bake superseded");
                 // P3: every bake trace uses the raised detection sphere (kBakeDetectRadiusMin); the live tail does not.
@@ -538,10 +595,14 @@
             // P4: Outdated/NotBaked with a matching cached content (typical after Undo/Redo) restores without a worker.
             const auto idleState=bakeState.load();
             if(idleState==BakeState::Outdated||idleState==BakeState::NotBaked){std::lock_guard<std::mutex>lock(bakeRequestMx);if(tryRestoreBakedCacheLocked(2))return;}
+            bakeStreamChangedAt={};
             stopBakeTasks();if(bakeFallbackAction!=bakeAction.load()){lastEstEpoch=~0ull;bakeFallbackAction=bakeAction.load();}return;
         }
         if(!bakeEnabled.load()||cfg.motionMode<2){const auto action=bakeAction.load();stopBakeTasks();endBake(BakeState::Blocked,10,action);return;}
-        bakeWaitReason=bakePriority();if(bakeWaitReason.load())return;
+        std::shared_ptr<World> world;
+        {std::lock_guard<std::mutex>lock(worldMx);world=latest;}
+        const int priority = bakePriority(*world);
+        bakeWaitReason=priority;if(priority)return;
         const auto action=bakeAction.load();
         if(action!=bakeWorkerAction){
             // Wait for the audio tracker to apply edits that preceded the button.
@@ -555,15 +616,18 @@
             uint64_t rev=0;
             {
                 std::lock_guard<std::mutex>lock(bakeRequestMx);
-                if(bakePaths.empty()||bakeGroups.empty())return;
+                if(!bakeRequested.load()||bakeAction.load()!=action||bakePaths.empty()||bakeGroups.empty())return;
                 groupsCopy=bakeGroups;
                 rev=bakeRevision.load();
+#if defined(_WIN32)
+                stationDiagnostics = bakeAction.load() == action ? requestedDiagnostics : nullptr;
+#endif
             }
-            const auto geom=geomSerial.load();const auto qual=qualitySerial.load();
+            const auto geom=world->serial;const auto qual=workerQuality;
             const auto live=livePose();
             std::vector<double> patterns((size_t)S,0.);for(int s=0;s<S;++s)patterns[(size_t)s]=workerPattern(s);
             std::vector<uint64_t> objRevs((size_t)S+1,0);for(int idx=0;idx<=S;++idx)objRevs[(size_t)idx]=bakeObjectRevision[(size_t)idx].load(std::memory_order_acquire);
-            {std::lock_guard<std::mutex>lock(worldMx);bakeWorld=latest;}
+            bakeWorld=std::move(world);
             double xmin=1e30,xmax=-1e30,ymin=1e30,ymax=-1e30;
             for(const auto&w:bakeWorld->sc.walls){xmin=std::min({xmin,w.ax,w.bx});xmax=std::max({xmax,w.ax,w.bx});ymin=std::min({ymin,w.ay,w.by});ymax=std::max({ymax,w.ay,w.by});}
             const double roomMin=xmax>xmin&&ymax>ymin?std::min({xmax-xmin,ymax-ymin,bakeWorld->sc.height}):5.;
@@ -622,7 +686,7 @@
             ensureRebuildPool(count);bakeWorkers=(int)count;
             const double histBytes=std::max(1.,std::ceil(bakeWorld->sc.length/.001)+2)*R*NB*16*maxGroupS;
             bakeActiveLimit=std::max<size_t>(1,std::min<size_t>(count,(size_t)(128.*1024*1024/histBytes)));
-            bakeStarted=std::chrono::steady_clock::now();bakeState=BakeState::Baking;
+            bakeStarted=std::chrono::steady_clock::now();
         }
         for(const auto&jb:bakeJobs)if(!bakeContextTable(jb.table,false)){invalidateBake();return;}
         for(auto&jb:bakeJobs){
@@ -854,8 +918,18 @@
             }
             doneSum+=d;totalSum+=jb.initial.size()+jb.segments.size();
         }
+        double shownSum=0.,weight=0.;
+        for(const auto&jb:bakeJobs){
+            size_t stale=0;
+            if(jb.raysDecided)for(const auto&kv:jb.raysAt)if(kv.second<jb.selectedRays)++stale;
+            const double est=std::max(1.,bakedStationEstimate(jb.initial.size(),jb.segments.size(),jb.segmentAt,jb.nodes.size())+stale);
+            shownSum+=jb.finished?99.*est:jb.progressShown*est;
+            weight+=est;
+        }
+        const int agg=weight>0.?std::min(99,(int)(shownSum/weight)):0;
         {
             std::lock_guard<std::mutex>lock(bakeRequestMx);
+            if(!bakeRequested.load()||bakeAction.load()!=action)return;
             for(const auto&jb:bakeJobs)if(jb.groupIndex<bakeGroups.size()){
                 auto&gr=bakeGroups[jb.groupIndex];
                 size_t d=0;
@@ -864,11 +938,9 @@
                 gr.done=(int)d;gr.total=(int)(jb.initial.size()+jb.segments.size());
                 gr.percent=jb.finished?100:std::min(99,(int)jb.progressShown);
             }
+            bakeDone=(int)doneSum;bakeTotal=(int)totalSum;
+            bakePercent.store(std::max(bakePercent.load(),agg));
         }
-        bakeDone=(int)doneSum;bakeTotal=(int)totalSum;
-        {double shownSum=0.,weight=0.;for(const auto&jb:bakeJobs){double stale=0;if(jb.raysDecided)for(const auto&kv:jb.raysAt)if(kv.second<jb.selectedRays)++stale;const double est=std::max(1.,bakedStationEstimate(jb.initial.size(),jb.segments.size(),jb.segmentAt,jb.nodes.size())+stale);shownSum+=jb.finished?99.*est:jb.progressShown*est;weight+=est;}
-         const int agg=weight>0.?std::min(99,(int)(shownSum/weight)):0;
-         bakePercent.store(std::max(bakePercent.load(),agg));}
     }
     void bakeWorkerStep(){const auto action=bakeAction.load();try{bakeWorkerStepImpl();}catch(const std::exception&){stopBakeTasks();endBake(BakeState::Failed,15,action);}}
 
@@ -909,10 +981,10 @@
             }else{
                 if(!t.path.project(pose,u,hint))continue;
                 for(size_t j=1;j<t.movingPaths.size();++j){
-                    const auto&p=t.movingPaths[j];auto expected=p.at(u);double actual[4];
+                    const auto&p=t.movingPaths[j];double actual[4];
                     const int moff=p.object<0?S*4:p.object*4;
                     for(int k=0;k<4;++k)actual[k]=params[moff+k].load(std::memory_order_relaxed);
-                    if(poseFar(actual,expected.data(),.02,1.)){match=false;break;}
+                    if(!p.matchesAt(actual,u)){match=false;break;}
                 }
             }
             if(!match)continue;

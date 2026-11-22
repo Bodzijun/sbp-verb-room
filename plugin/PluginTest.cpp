@@ -158,9 +158,13 @@ static juce::File repoFile(const juce::String& relative) {
 #include "BakeClickTest.h"
 #include "BakeImpulseTest.h"
 #include "P4Test.h"
+#include "F3Test.h"
+#include "F4Test.h"
 #include "P5Test.h"
 #include "P6Test.h"
 #include "P7Test.h"
+#include "P8Test.h"
+#include "P9Test.h"
 #include "C1Test.h"
 #include "E23Test.h"
 #include "E21Test.h"
@@ -197,9 +201,13 @@ int main() {
         {"VERB_ONLY_BAKE_CLICK", testBakeClick},
         {"VERB_ONLY_BAKE_IMPULSE", testBakeImpulse},
         {"VERB_ONLY_P4", +[]() { return testP4Persist() | testP4Undo() | testP4MultiGroup(); }},
+        {"VERB_ONLY_F3", testF3},
+        {"VERB_ONLY_F4", testF4},
         {"VERB_ONLY_P5", testP5},
         {"VERB_ONLY_P6", testP6},
         {"VERB_ONLY_P7", testP7},
+        {"VERB_ONLY_P8", testP8},
+        {"VERB_ONLY_P9", testP9},
         {"VERB_ONLY_C1", testC1},
         {"VERB_ONLY_E8", testE8Plugin},
         {"VERB_ONLY_E7_MAKEUP", testE7Makeup},

@@ -173,7 +173,8 @@ public:
     };
     RecordedPassData exportRecordedPass() const;
     bool importRecordedPass(const RecordedPassData& data);
-    void setBakedPaths(const std::vector<BakedPath>& paths);
+    // Optional recorded-pass matching policy in pose order (listener, then source points).
+    void setBakedPaths(const std::vector<BakedPath>& paths, const std::vector<BakedYawMatch>& recordedYawMatch = {});
     // E19: true when an object's orientation depends on an independently moving target. Behaves like an uncoupled moving listener:
     // Blocked unless a recorded pass is available. Control thread only.
     void setBakeForcedBlock(bool blocked);
@@ -213,6 +214,7 @@ public:
     struct BakeTraceDecision { int group=0; double a=0,b=0,error=0; int decision=0; /*0 accept,1 split,2 approximate*/ size_t nodes=0; double ms=0; };
     struct BakeTrace { std::vector<BakeTraceStation> stations; std::vector<BakeTraceDecision> decisions; double maxStepGapMs=0; uint64_t stepCalls=0,waitSteps=0; int activeLimit=0,workers=0; };
     BakeTrace bakeTrace() const;
+    std::string bakeWorkerDiagnostics() const; // opt-in Windows station counters, control thread only
     BakeStats bakeStats() const;
     std::shared_ptr<const BakedTable> bakedTableSnapshot() const;
     std::vector<std::shared_ptr<const BakedTable>> bakedTablesSnapshot() const;

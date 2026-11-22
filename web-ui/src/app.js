@@ -27,6 +27,12 @@ app.addEventListener('scroll', e => {
 }, { capture: true, passive: true });
 const params = new URLSearchParams(location.search), requestedBridge = params.get('bridge') || 'mock';
 let bridge, store, viewport, rendered = null, pendingRender = false, closed = false, lastSelection = '';
+// Scroll positions survive the full re-render after every command. They are matched by a stable key (class + occurrence)
+// instead of the element index, and re-applied after layout settles (the status line and banners change the heights after
+// the first restore, which would otherwise clamp a long list such as 32 Sources). A user scroll cancels the pending restore.
+let pendingScroll = null, renderSeq = 0;
+const scrollKeys = nodes => { const seen = new Map(); return nodes.map(n => { const base = String(n.className); const i = seen.get(base) || 0; seen.set(base, i + 1); return `${base}#${i}`; }); };
+for (const type of ['wheel', 'pointerdown', 'keydown', 'touchstart']) document.addEventListener(type, () => { pendingScroll = null; }, { capture: true, passive: true });
 function errorMessage(error) {
   if(!error || typeof error!=='object')error={message:String(error)};
   bridge?.diagnostic?.(error);
@@ -160,7 +166,8 @@ function render() {
   if (store.view.page === 'edit' && selectionKey !== lastSelection && store.view.selection.length && store.view.inspectorTab === 'scene') store.view.inspectorTab = 'selected';
   lastSelection = selectionKey;
   const active = document.activeElement, key = active?.getAttribute('data-focus-key'), restoreFocus = !!key && (active.tagName === 'INPUT' || active.matches?.(':focus-visible')), selection = restoreFocus && typeof active.setSelectionRange === 'function' && active.selectionStart !== null ? [active.selectionStart, active.selectionEnd] : null;
-  const scrolls = [...app.querySelectorAll('.scroll')].map(n => n.scrollTop);
+  const oldScrollNodes = [...app.querySelectorAll('.scroll')], oldScrollKeys = scrollKeys(oldScrollNodes);
+  const scrolls = new Map(oldScrollNodes.map((n, i) => [oldScrollKeys[i], pendingScroll?.get(oldScrollKeys[i]) ?? n.scrollTop]));
   disposeControls();
   const ctx = { store, bridge, param: (id, opts) => parameterControl(store, bridge, id, opts), snapStep: () => viewport?.currentSnapStep?.() ?? 0.1 };
   const state = store.state;
@@ -190,7 +197,10 @@ function render() {
   } else { workspace.append(centre, mainSplitter(workspace), controlRack(ctx)); applyMainSplit(workspace, state.preferences?.mainSplit); }
   const dev = bridge.mode === 'mock' && params.get('dev') !== '0' ? element('details', { className: 'mock-dev' }, [element('summary', { text: 'MOCK', title: 'Development fixtures' }), element('div', { className: 'mock-bar panel' }, [element('strong', { text: 'MOCK BRIDGE · offline fixtures · no audio' }), select('Mock fixture', FIXTURES.map(v => [v, v]), bridge.selectedFixture, name => store.fixture(name)), button('Error / resync', () => bridge.injectResync()), button('Host automation demo', () => bridge.automate('mix', state.parameters.values.mix === 100 ? 37.5 : 100)), element('span', { text: 'Energy / curves / meters are synthetic test data' })])]) : null;
   app.replaceChildren(...[header(), dev, workspace, footer()].filter(Boolean)); app.setAttribute('aria-busy', String(!store.ready));
-  [...app.querySelectorAll('.scroll')].forEach((n, i) => { n.scrollTop = scrolls[i] || 0; });
+  const restoreScrolls = () => { const nodes = [...app.querySelectorAll('.scroll')], keys = scrollKeys(nodes); nodes.forEach((n, i) => { const want = scrolls.get(keys[i]); if (want != null && Math.abs(n.scrollTop - want) > 1) n.scrollTop = want; }); };
+  restoreScrolls(); pendingScroll = scrolls;
+  const stamp = ++renderSeq, again = () => { if (renderSeq === stamp && pendingScroll === scrolls) restoreScrolls(); };
+  requestAnimationFrame(() => { again(); requestAnimationFrame(again); }); setTimeout(() => { again(); if (pendingScroll === scrolls) pendingScroll = null; }, 250);
   if (restoreFocus) { const next = [...app.querySelectorAll('[data-focus-key]')].find(n => n.getAttribute('data-focus-key') === key); if (next) { next.focus({ preventScroll: true }); if (selection) next.setSelectionRange(...selection); } }
   refreshSnapFace();
   updateStatus();
@@ -306,7 +316,8 @@ async function init() {
     // Only state/view changes may rebuild chrome. Meter/status events never scan the document.
     if (['snapshot','patch','parameters','view','resync','catalogs.list'].includes(reason)) {
       const state = store.state;
-      const viewKey = reason === 'view' ? JSON.stringify({ ...store.view, camera: undefined, previewCamera: undefined, pathDraft: undefined }) : rendered?.viewKey;
+      const viewKey = ['view', 'snapshot', 'resync'].includes(reason)
+        ? JSON.stringify({ ...store.view, camera: undefined, previewCamera: undefined, pathDraft: undefined }) : rendered?.viewKey;
       const docSig = rendered && rendered.document === state.document ? rendered.docSig : JSON.stringify(state.document);
       const prefsSig = rendered && rendered.preferences === state.preferences ? rendered.prefsSig : JSON.stringify({ ...(state.preferences || {}), sessionViewState: undefined });
       // Host channel counts / layout feed the inspector and the source budget text: a host change must rebuild them.

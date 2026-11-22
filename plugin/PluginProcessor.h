@@ -58,6 +58,7 @@ public:
     using juce::AudioProcessor::processBlock;
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
+    void bakeDiagnosticEditorOpened(bool opened) noexcept; // editor lifetime, opt-in diagnostic
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     // Hosts may query and cache this before the asynchronous room has loaded.
@@ -296,6 +297,10 @@ private:
     std::atomic<int> webBakeStart{-2};
     std::atomic<bool> webBakeCancel{false};
     std::atomic<bool> webBakeClear{false};
+    double bakeLogDispatchMs = -1.0; // loader thread only, opt-in timing
+    std::atomic<int> bakeLogEditors{0};
+    uint64_t bakeLogStartBlocks = 0;
+    int bakeLogWaitReason = 0;
     std::atomic<int> webPassAction{0};
     mutable juce::CriticalSection webBakeLock;
     juce::var webBakeStatus;

@@ -50,8 +50,7 @@ need testers.
 
 ## Where we are
 
-**Latest release: 0.1.16** (classic interface). **Version 0.2.0 is ready and being finished** for Windows and macOS
-(universal); downloads will be posted on the project's Ko-fi page. It is a large step from 0.1.16:
+**Latest release: [0.2.2](Release_0.2.2_en.md)** for Windows x64 and macOS Universal. Downloads are posted on the project's Ko-fi page.
 
 - **A new interface:** resizable, with a 3D room editor, material inspector, dimensions and scale, outliner, decay
   curves, energy map and a CPU load meter. The classic interface stays available. On macOS this is its first release
@@ -92,6 +91,15 @@ We would like to call the next major version 1.0 when the following is in place.
 - Movement paths: draw a path for a source or the listener in the viewport and automate one "position on path"
   parameter instead of X/Y/Z separately (requested by a tester). **Done in 0.2.0**, together with pre-computed
   ("baked") tails along a path, timing, groups and orientation.
+- Fix: turning an object by hand (Manual orientation) must not break a bake. A baked table is currently used only while
+  the live azimuth stays within 1 degree of the azimuth at bake time. For Manual objects the table should not require
+  an azimuth match (position still has to match); the direct sound and early reflections keep following the live
+  azimuth, and the baked tail stays as baked. The same applies to a recorded pass: during the motion the baked tail is
+  not used when a Manual azimuth deviates, and the correct tail only appears after the motion stops, in the rebuild.
+- Azimuth keys on the timeline: a strip for the azimuth of each object next to its movement strip, locked to the same
+  position axis and the same table. Add keys anywhere and set the angle on a key with a slider or by turning the object
+  in the scene editor. Keys support hold and easing. The azimuth is then known in advance and baked with the path, so
+  turning an object by hand no longer breaks a bake.
 - Still to do: orientation of objects at sharp path corners, and more tests with other hosts.
 
 **2. Lower CPU for big scenes**
@@ -104,14 +112,25 @@ We would like to call the next major version 1.0 when the following is in place.
 
 **4. More realism**
 - Instrument and loudspeaker directivity from user-supplied data files (**done in 0.2.0**).
-- Ambisonics output: **AmbiX up to 3rd order is in 0.2.0**; a directional tail is experimental; binaural output is still
-  to come.
+- Ambisonics output: **AmbiX up to 3rd order is in 0.2.0**; binaural output is still to come.
+- Directivity profiles act on the direct sound and the early reflections. The late tail treats every source as
+  omnidirectional; a directional tail is not planned for 1.0.
+- Ambisonics normalization option: AmbiX output uses ACN channel order with SN3D normalization now. Add the other common
+  conventions (N3D, and FuMa for older material) as a selectable option.
+- Ambisonics output level: AmbiX output is louder than the same source through stereo. Add an optional gain
+  compensation, selectable, so the level can be matched to stereo.
 - Low-frequency room modes.
 
 **5. Easier room drawing**
 - A box primitive: a closed body with clean joints for car bodies, columns, furniture.
 - Edge extrusion in the editor (slide, then extrude), so surfaces share edges by construction.
 - An auto level button and a wider output range for quiet listener positions in big halls.
+- A Randomize button next to the Clutter seed (it existed in the classic interface).
+- Faster setup of many sources: at the top of the Sources list, choose the channel type for all sources at once and
+  switch Sum on or off for all of them at once. Also add a Sum button for each source in the lower source list, so it can
+  be switched per source without opening the inspector.
+- Fix: auto-link of corners does not work when a wall is moved (found in 0.2.1). Moving a wall should keep its corners
+  linked to the neighboring walls.
 - After 1.0: full 3D meshes with sloped surfaces.
 
 **6. Product basics**

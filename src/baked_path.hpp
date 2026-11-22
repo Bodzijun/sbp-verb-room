@@ -92,6 +92,22 @@ struct BakedTimingKey {
     bool operator==(const BakedTimingKey& o) const noexcept { return t == o.t && f == o.f && easing == o.easing; }
 };
 // Control-thread description, one physical lap. object=-1: listener; otherwise engine point index.
+struct BakedYawMatch {
+    bool free=false;
+    // Scaled offset of an engine point in the source's local XY frame.
+    double x=0.,y=0.;
+    bool operator==(const BakedYawMatch& q) const noexcept { return free==q.free&&x==q.x&&y==q.y; }
+    std::array<double,4> transform(const double* pose,double sign) const noexcept {
+        std::array<double,4> p{pose[0],pose[1],pose[2],pose[3]};
+        if(x!=0.||y!=0.){
+            const double a=p[3]*kPi/180.,c=std::cos(a),s=std::sin(a);
+            p[0]+=sign*(c*x-s*y);
+            p[1]+=sign*(s*x+c*y);
+        }
+        return p;
+    }
+};
+
 struct BakedPath {
     int object=-1,group=-1;
     bool closed=false;
@@ -106,7 +122,19 @@ struct BakedPath {
     // E28: the table coordinate IS the group Position u (distance[i]=u_i*D, startU=0,endU=1,laps=1): the description of an owner that
     // looks at a moving member of the same Group. Only selects the joint-curve station placement; the maths of at() is unchanged.
     bool uIndexed=false;
-    bool operator==(const BakedPath& p) const {return object==p.object&&group==p.group&&closed==p.closed&&recorded==p.recorded&&recording==p.recording&&uIndexed==p.uIndexed&&startU==p.startU&&endU==p.endU&&laps==p.laps&&timingSig==p.timingSig&&poses==p.poses&&distance==p.distance&&timingKeys==p.timingKeys;}
+    BakedYawMatch yawMatch;
+    bool operator==(const BakedPath& p) const {
+        return recording==p.recording&&sameDescription(p);
+    }
+    bool sameDescription(const BakedPath& p) const {
+        if(!(object==p.object&&group==p.group&&closed==p.closed&&recorded==p.recorded&&uIndexed==p.uIndexed&&startU==p.startU&&endU==p.endU&&laps==p.laps&&timingSig==p.timingSig&&yawMatch==p.yawMatch&&distance==p.distance&&timingKeys==p.timingKeys))
+            return false;
+        if(recorded||!yawMatch.free)return poses==p.poses;
+        // The Manual angle of a declared path is sampled for tracing. Live edits do not change this path's identity.
+        return poses.size()==p.poses.size()&&std::equal(poses.begin(),poses.end(),p.poses.begin(),[](const auto& a,const auto& b){
+            return a[0]==b[0]&&a[1]==b[1]&&a[2]==b[2];
+        });
+    }
     bool hasTiming() const noexcept { return startU > 0.0 || endU < 1.0 || !timingKeys.empty() || laps > 1; }
     double mapTime(double u) const noexcept {
         double c=std::clamp(u,0.,1.);
@@ -142,8 +170,19 @@ struct BakedPath {
         auto p=poses[j-1];for(int k=0;k<3;++k)p[k]+=(poses[j][k]-p[k])*f;
         p[3]+=std::remainder(poses[j][3]-p[3],360.)*f;return p;
     }
+    std::array<double,4> tracePose(double u) const {
+        const auto p=at(u);
+        return yawMatch.transform(p.data(),1.);
+    }
+    bool matchesAt(const double* live,double u) const noexcept {
+        const auto expected=at(u),p=yawMatch.transform(live,-1.);
+        const double dx=p[0]-expected[0],dy=p[1]-expected[1],dz=p[2]-expected[2];
+        return std::hypot(std::hypot(dx,dy),dz)<=.02&&
+               (yawMatch.free||std::abs(std::remainder(p[3]-expected[3],360.))<=1.);
+    }
     // Nearest path segment; bounded, allocation-free. No sqrt on the search path.
-    bool project(const double* p,double& u,size_t* hint=nullptr) const noexcept {
+    bool project(const double* live,double& u,size_t* hint=nullptr) const noexcept {
+        const auto p=yawMatch.transform(live,-1.);
         double best=1e30;size_t jBest=0;double fBest=0;
         size_t lo=1,hi=poses.size();if(hint&&*hint>0&&*hint<poses.size()){lo=*hint>4?*hint-4:1;hi=std::min(poses.size(),*hint+5);}
         for(size_t pass=0;pass<2;++pass){for(size_t j=lo;j<hi;++j){double dot=0,span=0;for(int k=0;k<3;++k){double d=poses[j][k]-poses[j-1][k];dot+=(p[k]-poses[j-1][k])*d;span+=d*d;}
@@ -152,6 +191,7 @@ struct BakedPath {
         if(hint)*hint=jBest;
         if(!jBest||best>.02*.02||distance.back()<=0)return false;
         u=(distance[jBest-1]+fBest*(distance[jBest]-distance[jBest-1]))/distance.back();
+        if(yawMatch.free)return true;
         const double spanYaw=std::remainder(poses[jBest][3]-poses[jBest-1][3],360.);
         const double yaw=poses[jBest-1][3]+spanYaw*fBest;
         return std::abs(std::remainder(p[3]-yaw,360.))<=1.+std::abs(spanYaw);
@@ -208,7 +248,7 @@ struct BakedTable {
             }
             if(i>0){
                 double sq=0.;
-                for(size_t m=0;m<M;++m)for(int k=0;k<4;++k){
+                for(size_t m=0;m<M;++m)for(int k=0;k<(movingPaths[m].yawMatch.free?3:4);++k){
                     double d=jointPoses[(i*M+m)*4+(size_t)k]-jointPoses[((i-1)*M+m)*4+(size_t)k];
                     if(k==3)d=std::remainder(d,360.)*.01;
                     sq+=d*d;
@@ -246,16 +286,21 @@ struct BakedTable {
     bool projectDeclared(const double* pose,double& uOut,size_t* hint=nullptr) const noexcept {
         const size_t N=jointU.size(), M=movingPaths.size();
         if(N<2||M==0||jointPoses.size()<N*M*4)return false;
+        std::array<std::array<double,4>,1025> live;
+        if(M>live.size())return false;
+        for(size_t m=0;m<M;++m){
+            const auto& p=movingPaths[m];
+            live[m]=p.yawMatch.transform(pose+4*(p.object+1),-1.);
+        }
         double best=1e30, bestF=0.; size_t bestJ=0; bool bestTol=false;
         auto evalSeg=[&](size_t j,double& fOut,bool& tolOk)->double{
             double dot=0.,span=0.;
             const double* a=&jointPoses[((j-1)*M)*4];
             const double* b=&jointPoses[(j*M)*4];
             for(size_t m=0;m<M;++m){
-                const int off=4*(movingPaths[m].object+1);
-                for(int k=0;k<4;++k){
+                for(int k=0;k<(movingPaths[m].yawMatch.free?3:4);++k){
                     double delta=b[m*4+k]-a[m*4+k];
-                    double v=pose[off+k]-a[m*4+k];
+                    double v=live[m][k]-a[m*4+k];
                     if(k==3){delta=std::remainder(delta,360.)*.01;v=std::remainder(v,360.)*.01;}
                     dot+=v*delta;span+=delta*delta;
                 }
@@ -263,18 +308,21 @@ struct BakedTable {
             const double f=span>0.?std::clamp(dot/span,0.,1.):0.;
             double e=0.; bool ok=true;
             for(size_t m=0;m<M;++m){
-                const int off=4*(movingPaths[m].object+1);
                 double posSq=0.;
                 for(int k=0;k<3;++k){
                     const double interp=a[m*4+k]+f*(b[m*4+k]-a[m*4+k]);
-                    const double diff=pose[off+k]-interp;
+                    const double diff=live[m][k]-interp;
                     posSq+=diff*diff;
                 }
-                const double spanYaw=std::remainder(b[m*4+3]-a[m*4+3],360.);
-                const double yawInterp=a[m*4+3]+f*spanYaw;
-                const double yawErr=std::abs(std::remainder(pose[off+3]-yawInterp,360.));
-                e+=posSq+(yawErr*.01)*(yawErr*.01);
-                if(posSq>.02*.02||yawErr>1.+std::abs(spanYaw))ok=false;
+                if(posSq>.02*.02)ok=false;
+                if(movingPaths[m].yawMatch.free)e+=posSq;
+                else{
+                    const double spanYaw=std::remainder(b[m*4+3]-a[m*4+3],360.);
+                    const double yawInterp=a[m*4+3]+f*spanYaw;
+                    const double yawErr=std::abs(std::remainder(live[m][3]-yawInterp,360.));
+                    e+=posSq+(yawErr*.01)*(yawErr*.01);
+                    if(yawErr>1.+std::abs(spanYaw))ok=false;
+                }
             }
             fOut=f;tolOk=ok;return e;
         };
@@ -294,27 +342,39 @@ struct BakedTable {
         uOut=jointU[bestJ-1]+bestF*(jointU[bestJ]-jointU[bestJ-1]);
         return true;
     }
-    // Joint metric: metres, with one degree of yaw worth one centimetre.
+    // Joint metric: metres, with one degree of computed yaw worth one centimetre.
     // Full bounded search includes jumps/loops; hint breaks ties for continuity.
     bool projectJoint(const double* pose,double& phase,size_t* hint=nullptr) const noexcept {
         if(movingPaths.empty())return false;
         const auto& d=movingPaths.front().distance;
         if(d.size()<2||d.back()<=0)return false;
+        std::array<std::array<double,4>,1025> live;
+        if(movingPaths.size()>live.size())return false;
+        for(size_t m=0;m<movingPaths.size();++m){
+            const auto& p=movingPaths[m];
+            live[m]=p.yawMatch.transform(pose+4*(p.object+1),-1.);
+        }
         double best=1e30,bestF=0;size_t bestJ=0;
         size_t lo=1,hi=d.size();
         if(hint&&*hint>0&&*hint<d.size()){lo=*hint>8?*hint-8:1;hi=std::min(d.size(),*hint+9);}
         for(int pass=0;pass<2;++pass){
         for(size_t j=lo;j<hi;++j){
             double dot=0,span=0;
-            for(const auto&p:movingPaths)for(int k=0;k<4;++k){
+            for(size_t m=0;m<movingPaths.size();++m){
+              const auto& p=movingPaths[m];
+              for(int k=0;k<(p.yawMatch.free?3:4);++k){
                 double delta=k==3?std::remainder(p.poses[j][k]-p.poses[j-1][k],360.)*.01:p.poses[j][k]-p.poses[j-1][k];
-                double v=pose[4*(p.object+1)+k]-p.poses[j-1][k];if(k==3)v=std::remainder(v,360.)*.01;
+                double v=live[m][k]-p.poses[j-1][k];if(k==3)v=std::remainder(v,360.)*.01;
                 dot+=v*delta;span+=delta*delta;
+              }
             }
             double f=span>0?std::clamp(dot/span,0.,1.):0,e=0;
-            for(const auto&p:movingPaths)for(int k=0;k<4;++k){
+            for(size_t m=0;m<movingPaths.size();++m){
+              const auto& p=movingPaths[m];
+              for(int k=0;k<(p.yawMatch.free?3:4);++k){
                 double delta=k==3?std::remainder(p.poses[j][k]-p.poses[j-1][k],360.):p.poses[j][k]-p.poses[j-1][k];
-                double v=pose[4*(p.object+1)+k]-p.poses[j-1][k]-f*delta;if(k==3)v=std::remainder(v,360.)*.01;e+=v*v;
+                double v=live[m][k]-p.poses[j-1][k]-f*delta;if(k==3)v=std::remainder(v,360.)*.01;e+=v*v;
+              }
             }
             if(e<best){best=e;bestF=f;bestJ=j;}
         }

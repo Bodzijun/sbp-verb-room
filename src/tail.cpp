@@ -973,6 +973,33 @@ TailDiagnostics analyzeTail(const TailHist& h) {
     return out;
 }
 
+static double analyzeBandRt60(const TailHist& h, int b, std::vector<double>& energy) {
+    energy.assign(h.nBins + 1, 0.0);
+    for (size_t r = 0; r < h.h.size(); ++r) {
+        const auto& band = h.h[r][b];
+        const size_t n = std::min(h.nBins, band.size());
+        for (size_t k = 0; k < n; ++k) energy[k] += band[k];
+    }
+    for (size_t k = h.nBins; k-- > 0;) energy[k] += energy[k + 1];
+    if (!(energy[0] > 0.0)) return -1.0;
+    const double invE0 = 1.0 / energy[0];
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    size_t count = 0;
+    for (size_t k = 0; k < h.nBins; ++k) {
+        const double db = std::max(-100.0, 10.0 * std::log10(std::max(energy[k] * invE0, 1e-10)));
+        if (db < -25.0) break;
+        if (db > -5.0) continue;
+        const double t = k * h.binDur;
+        sx += t; sy += db; sxx += t * t; sxy += t * db; ++count;
+    }
+    const double denom = count * sxx - sx * sx;
+    if (count >= 4 && denom > 1e-12) {
+        const double slope = (count * sxy - sx * sy) / denom;
+        if (slope < -1e-6) return -60.0 / slope;
+    }
+    return -1.0;
+}
+
 void reshapeTailDecay(TailHist& h, const std::array<double, 3>& multipliers) {
     if (multipliers == std::array<double, 3>{{1, 1, 1}} || h.h.empty()) return;
     const auto original = h;
@@ -999,6 +1026,7 @@ void reshapeTailDecay(TailHist& h, const std::array<double, 3>& multipliers) {
     }
     h.nBins=bins;
     for(auto& rc:h.h)for(auto& band:rc)band.resize(bins,0.);
+    std::vector<double> energyScratch(bins + 1, 0.0);
     for(int b=0;b<NB;++b) {
         if(targets[b]<=0)continue;
         // Every trial is rebuilt from the physical data, never from a previously lifted residue.
@@ -1030,7 +1058,7 @@ void reshapeTailDecay(TailHist& h, const std::array<double, 3>& multipliers) {
         double bestError=INFINITY;
         std::vector<std::vector<double>> best(h.h.size());
         auto assess=[&](double tilt) {
-            trial(tilt);const double actual=analyzeTail(h).rt60[b];
+            trial(tilt);const double actual=analyzeBandRt60(h,b,energyScratch);
             const double error=actual>0?std::abs(std::log(actual/targets[b])):INFINITY;
             if(error<bestError) {bestError=error;for(size_t r=0;r<h.h.size();++r)best[r]=h.h[r][b];}
             return actual;
@@ -1217,14 +1245,15 @@ std::vector<std::vector<float>> combineBands(const BandBuf& buf, double sr, cons
         fft(Hf[b], false);
     });
     std::vector<std::vector<float>> out(R, std::vector<float>(N));
+    const size_t budget=128u*1024u*1024u;
+    const unsigned width=(unsigned)std::max<size_t>(1,std::min<size_t>(NB,
+        std::min<size_t>(runExec.workers,budget/std::max<size_t>(1,FN*sizeof(cd)))));
+    std::vector<cd> acc(FN,cd(0));
+    std::vector<std::vector<cd>> tmp(width,std::vector<cd>(FN));
     for (size_t r = 0; r < R; ++r) {
         // FFTs are independent. Merge bands in the ORIGINAL b/i order;
         // partial histogram or band sums would change the legacy low bits.
-        const size_t budget=128u*1024u*1024u;
-        const unsigned width=(unsigned)std::max<size_t>(1,std::min<size_t>(NB,
-            std::min<size_t>(runExec.workers,budget/std::max<size_t>(1,FN*sizeof(cd)))));
-        std::vector<cd> acc(FN,cd(0));
-        std::vector<std::vector<cd>> tmp(width,std::vector<cd>(FN));
+        std::fill(acc.begin(),acc.end(),cd(0));
         for(int first=0;first<NB;first+=(int)width){
             const size_t count=std::min<size_t>(width,NB-first);
             tailFor(runExec,count,[&](size_t j){

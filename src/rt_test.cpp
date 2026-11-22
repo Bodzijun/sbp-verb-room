@@ -3288,7 +3288,14 @@ static void testE8WallAndCapsules() {
 #include "e18_test.inc"
 #include "e23_test.inc"
 
+#include "f2_rebuild_test.inc"
+
 int main(int argc, char** argv) {
+    if (std::getenv("VERB_ONLY_F2")) {
+        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        testF2Rebuild();
+        return fails ? 1 : 0;
+    }
     if(std::getenv("VERB_ONLY_E23")){std::setvbuf(stdout,nullptr,_IONBF,0);testE23Bake();testE23Scaling();std::printf(fails?"\n%d check(s) FAILED\n":"\nall checks passed\n",fails);return fails?1:0;}
     if(std::getenv("VERB_ONLY_E18")){std::setvbuf(stdout,nullptr,_IONBF,0);testE18TimedBake();std::printf("E18 failures %d\n",fails);return fails?1:0;}
     if(std::getenv("VERB_ONLY_E17")){std::setvbuf(stdout,nullptr,_IONBF,0);testE17Pass();std::printf("E17 failures %d\n",fails);return fails?1:0;}

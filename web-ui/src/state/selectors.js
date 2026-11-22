@@ -25,6 +25,21 @@ export function expandedRefs(scene, refs, includeGroups = true) {
   const groups = includeGroups ? refs.map(r => surface(scene, r)?.editor?.group).filter(Boolean) : [];
   return surfaceRefs(scene).filter(r => refs.some(s => s.kind === r.kind && s.index === r.index) || groups.includes(surface(scene, r)?.editor?.group));
 }
+export const WALL_CORNER_TOLERANCE = 1e-4;
+export function translatedWallLinks(scene, refs, wallLayerMode) {
+  const links = new Map();
+  if (wallLayerMode) return links;
+  const moved = new Set(refs.filter(r => r.kind === 'wall' && scene.walls[r.index]).map(r => r.index));
+  if (!moved.size) return links;
+  const corners = [...moved].flatMap(index => [scene.walls[index].a, scene.walls[index].b]);
+  scene.walls.forEach((wall, index) => {
+    if (moved.has(index) || wall.editor.hidden || wall.editor.locked) return;
+    const ends = ['a', 'b'].filter(end => corners.some(([x, y]) =>
+      Math.hypot(wall[end][0] - x, wall[end][1] - y) <= WALL_CORNER_TOLERANCE));
+    if (ends.length) links.set(index, ends);
+  });
+  return links;
+}
 export function layerKey(scene, ref) {
   const object = surface(scene, ref);
   if (ref.kind === 'wall') return 'walls';

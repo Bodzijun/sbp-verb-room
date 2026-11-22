@@ -195,7 +195,7 @@ set_tests_properties(e1_neutral_null PROPERTIES ENVIRONMENT "VERB_E1_NULL=1" WOR
 
 # Path / orientation / Ambisonics / keep-alive suites (E9..E28). Each is selected by an environment variable of VerbPluginTest.
 # Suites that read test scenes from out/ or test/ (not part of a clean checkout) are registered only when those files exist.
-foreach(suite C1 E9 E16 E17 E18 E19 E21 E23 E28 P4 P5 P6 P7)
+foreach(suite C1 E9 E16 E17 E18 E19 E21 E23 E28 P4 P5 P6 P7 P8)
   set(need_fixture FALSE)
   if(suite STREQUAL "E9" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/out/E9b/owner-repro-demo-motion.verbroom")
     set(need_fixture TRUE)
@@ -206,7 +206,7 @@ foreach(suite C1 E9 E16 E17 E18 E19 E21 E23 E28 P4 P5 P6 P7)
   if((suite STREQUAL "P5" OR suite STREQUAL "P6") AND NOT EXISTS "${CMAKE_SOURCE_DIR}/test/Flate.verbroom")
     set(need_fixture TRUE)
   endif()
-  if(suite STREQUAL "P7" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/out/vsl-hall/presets/VSL_Grand_Hall_Audience.verbroom")
+  if((suite STREQUAL "P7" OR suite STREQUAL "P8") AND NOT EXISTS "${CMAKE_SOURCE_DIR}/out/vsl-hall/presets/VSL_Grand_Hall_Audience.verbroom")
     set(need_fixture TRUE)
   endif()
   if(need_fixture)
@@ -215,11 +215,19 @@ foreach(suite C1 E9 E16 E17 E18 E19 E21 E23 E28 P4 P5 P6 P7)
     add_test(NAME ${suite}_suite COMMAND VerbPluginTest)
     if(suite STREQUAL "P7")
       set_tests_properties(${suite}_suite PROPERTIES ENVIRONMENT "VERB_ONLY_P7=1;VERB_P7_CTEST=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
+    elseif(suite STREQUAL "P8")
+      set_tests_properties(${suite}_suite PROPERTIES ENVIRONMENT "VERB_ONLY_P8=1;VERB_P8_CTEST=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
     else()
       set_tests_properties(${suite}_suite PROPERTIES ENVIRONMENT "VERB_ONLY_${suite}=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
     endif()
   endif()
 endforeach()
+
+# Opt-in benchmark: ctest -C Benchmark -R ^P9_suite$ (or VERB_ONLY_P9=1 directly).
+if(EXISTS "${CMAKE_SOURCE_DIR}/test/Flate.verbroom")
+  add_test(NAME P9_suite COMMAND VerbPluginTest CONFIGURATIONS Benchmark)
+  set_tests_properties(P9_suite PROPERTIES ENVIRONMENT "VERB_ONLY_P9=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 600)
+endif()
 
 # E13 source profile state, bridge, undo/redo and acoustic integration.
 juce_add_console_app(VerbDirectivityTest PRODUCT_NAME "VerbDirectivityTest")

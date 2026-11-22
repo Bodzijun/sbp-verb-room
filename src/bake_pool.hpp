@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 #if defined(_WIN32)
+#include "bake_diagnostics.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -35,6 +36,11 @@ class BakePool {
     std::vector<std::thread> threads;
     bool stopping=false;
 public:
+#if defined(_WIN32)
+    // Set by the standalone benchmark entry points before creating any engine.
+    inline static int testCreatorDenormalMode = -1;
+    inline static int testStationDenormalMode = -1;
+#endif
     static void lowerCurrentThread(bool analysis=false) noexcept {
        #if defined(_WIN32)
         SetThreadPriority(GetCurrentThread(),analysis?THREAD_PRIORITY_LOWEST:THREAD_PRIORITY_BELOW_NORMAL);
@@ -47,10 +53,21 @@ public:
        #endif
     }
     explicit BakePool(unsigned count){
-        try{for(unsigned i=0;i<count;++i)threads.emplace_back([this]{
+#if defined(_WIN32)
+        const bake_diag::ScopedDenormalMode creatorMode(testCreatorDenormalMode);
+        const bool diagnose = bake_diag::enabled();
+        const auto creatorFp = diagnose ? bake_diag::FpState::read() : bake_diag::FpState{};
+        const auto creatorId = diagnose ? GetCurrentThreadId() : 0;
+        const auto startWorker = [this, diagnose, creatorFp, creatorId](unsigned index) {
+            if (diagnose) bake_diag::workerStart = {index, GetCurrentThreadId(), bake_diag::FpState::read(), creatorFp, creatorId};
+#else
+        const auto startWorker = [this](unsigned) {
+#endif
             lowerCurrentThread(true);
             for(;;){std::function<void()>job;{std::unique_lock<std::mutex>lock(mutex);ready.wait(lock,[this]{return stopping||!jobs.empty()||!analysisJobs.empty();});if(stopping&&jobs.empty()&&analysisJobs.empty())return;auto& queue=jobs.empty()?analysisJobs:jobs;job=std::move(queue.front());queue.pop_front();}job();}
-        });}catch(...){ {std::lock_guard<std::mutex>lock(mutex);stopping=true;}ready.notify_all();for(auto&t:threads)t.join();throw;}
+        };
+        try{for(unsigned i=0;i<count;++i)threads.emplace_back(startWorker,i);}
+        catch(...){ {std::lock_guard<std::mutex>lock(mutex);stopping=true;}ready.notify_all();for(auto&t:threads)t.join();throw;}
     }
     ~BakePool(){ {std::lock_guard<std::mutex>lock(mutex);stopping=true;}ready.notify_all();for(auto&t:threads)t.join(); }
     static unsigned effectiveCpuCount() noexcept {

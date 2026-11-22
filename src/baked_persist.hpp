@@ -67,12 +67,18 @@ inline uint64_t bakeDirectivityStateHash(const DirectivityState& st) {
 inline uint64_t bakePathContentHash(const BakedPath& p) {
     uint64_t h = bakeMixI32(p.object, 1469598103934665603ull);
     h = bakeMixI32(p.group, h);
-    h = bakeMixU8(p.closed ? 1 : 0, h); h = bakeMixU8(p.recorded ? 1 : 0, h); h = bakeMixU8(p.uIndexed ? 1 : 0, h);
+    h = bakeMixU8(p.closed ? 1 : 0, h); h = bakeMixU8(p.recorded ? 1 : 0, h);
+    h = bakeMixU8((p.uIndexed ? 1 : 0) | (p.yawMatch.free ? 2 : 0), h);
+    if (p.yawMatch.free) {
+        h = bakeMixF64(p.yawMatch.x, h); h = bakeMixF64(p.yawMatch.y, h);
+    }
     h = bakeMixF64(p.startU, h); h = bakeMixF64(p.endU, h);
     h = bakeMixI32(p.laps, h);
     h = bakeMixU64(p.timingSig, h);
     h = bakeMixU64(p.poses.size(), h);
-    for (const auto& q : p.poses) for (double v : q) h = bakeMixF64(v, h);
+    for (const auto& q : p.poses)
+        for (size_t k = 0; k < q.size(); ++k)
+            h = bakeMixF64(k == 3 && p.yawMatch.free && !p.recorded ? 0. : q[k], h);
     h = bakeMixU64(p.distance.size(), h);
     for (double d : p.distance) h = bakeMixF64(d, h);
     h = bakeMixU64(p.timingKeys.size(), h);
@@ -146,9 +152,13 @@ struct BakeByteWriter {
     void f64vec(const std::vector<double>& v) { u32((uint32_t)v.size()); for (double x : v) f64(x); }
     void path(const BakedPath& p) {
         i32(p.object); i32(p.group);
-        u8(p.closed ? 1 : 0); u8(p.recorded ? 1 : 0); u8(p.uIndexed ? 1 : 0);
+        // Extend the v2 uIndexed byte with optional bits. Old paths have only bit 0.
+        const bool hasOffset = p.yawMatch.x != 0. || p.yawMatch.y != 0.;
+        u8(p.closed ? 1 : 0); u8(p.recorded ? 1 : 0);
+        u8((p.uIndexed ? 1 : 0) | (p.yawMatch.free ? 2 : 0) | (hasOffset ? 4 : 0));
         f64(p.startU); f64(p.endU); i32(p.laps); u64(p.timingSig);
         u64(0);  // recording generation is session-local: never persisted
+        if (hasOffset) { f64(p.yawMatch.x); f64(p.yawMatch.y); }
         u32((uint32_t)p.poses.size()); for (const auto& q : p.poses) for (double v : q) f64(v);
         f64vec(p.distance);
         u32((uint32_t)p.timingKeys.size());
@@ -169,9 +179,17 @@ struct BakeByteReader {
     }
     bool path(BakedPath& out) {
         out.object = i32(); out.group = i32();
-        out.closed = u8() != 0; out.recorded = u8() != 0; out.uIndexed = u8() != 0;
+        out.closed = u8() != 0; out.recorded = u8() != 0;
+        const uint8_t flags = u8();
+        if (flags > 7 || ((flags & 4) && !(flags & 2))) { ok = false; return false; }
+        out.uIndexed = (flags & 1) != 0;
+        out.yawMatch.free = (flags & 2) != 0;
         out.startU = f64(); out.endU = f64(); out.laps = i32(); out.timingSig = u64();
         out.recording = u64();
+        if (flags & 4) {
+            out.yawMatch.x = f64(); out.yawMatch.y = f64();
+            if (!std::isfinite(out.yawMatch.x) || !std::isfinite(out.yawMatch.y)) { ok = false; return false; }
+        }
         const uint32_t np = u32(); if (!ok || np > 8193) { ok = false; return false; }
         out.poses.resize(np);
         for (auto& q : out.poses) for (double& v : q) { v = f64(); if (!std::isfinite(v)) ok = false; }

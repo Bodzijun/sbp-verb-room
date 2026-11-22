@@ -54,10 +54,14 @@ struct HostListener : juce::AudioProcessorParameter::Listener {
 #include "T9ReviewTest.h"
 #if VERB_WEB_UI_ENABLED
 #include "LivePointerHarness.h"
+#include "P9WebBake.h"
 #endif
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0); juce::ScopedJuceInitialiser_GUI init;
     const auto started = juce::Time::getMillisecondCounterHiRes();
+#if VERB_WEB_UI_ENABLED
+    if (juce::SystemStats::getEnvironmentVariable("VERB_ONLY_P9", {}) == "1") return runP9WebBake();
+#endif
     schemas.load(juce::File("web-ui/schema"));
     VerbProcessor p; p.setTailSettings({8000, false}); p.prepareToPlay(48000, 256);
     p.loadSceneText(boxText(5,4,3,0,true), "Bridge test box", true); check(ready(p), "tiny test room loads");
@@ -693,6 +697,14 @@ int main() {
         waitJs("!!document.querySelector('[aria-label=\"Source clearance value\"]')");
         eval("{const e=document.querySelector('[aria-label=\"Source clearance value\"]');if(e){e.value='0.8';e.dispatchEvent(new Event('change',{bubbles:true}));}}'ok'");
         check(waitJs("document.querySelector('[aria-label=\"Source clearance value\"]')?.value === '0.8'") && std::abs(p.getDisplayScene().clutter.minDist-.8)<1e-5, "clutter clearance control sends real command");
+        const int seedBefore = p.getDisplayScene().clutter.seed;
+        eval("document.querySelector('button[aria-label=\"Randomize clutter seed\"]')?.click();'ok'");
+        const bool seedChanged = waitJs("(()=>{const n=Number(document.querySelector('[aria-label=\"Seed value\"]')?.value);return n>=1 && n<=9999 && n!==" + juce::String(seedBefore) + ";})()");
+        const auto randomized = p.getDisplayScene();
+        check(seedChanged && randomized.clutter.seed != seedBefore && randomized.clutter.seed >= 1 &&
+              randomized.clutter.seed <= 9999 && randomized.roughSeed == randomized.clutter.seed &&
+              std::abs(randomized.clutter.minDist - .8) < 1e-5,
+              "F1 Randomize changes the real clutter and roughness seeds together");
         eval("[...document.querySelectorAll('.acc-head')].find(e=>e.textContent.startsWith('Scale room'))?.click();'ok'");
         waitJs("!!document.querySelector('[aria-label=\"Scale factor\"]')");
         eval("document.querySelector('[aria-label=\"Lock wall 1\"]')?.click();'ok'");

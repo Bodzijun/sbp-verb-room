@@ -14,11 +14,38 @@
 #include "InputOrder.h"
 #include "tail.hpp"
 #include "PluginEditor.h"
+#if JUCE_WINDOWS
+#include "bake_diagnostics.hpp"
+#endif
 #if VERB_WEB_UI_ENABLED
 #include "VerbWebEditor.h"
 #endif
 
 namespace {
+
+bool bakeLogEnabled() {
+#if JUCE_WINDOWS
+    return verb::bake_diag::enabled();
+#else
+    static const bool enabled = juce::SystemStats::getEnvironmentVariable("VERB_BAKE_LOG", {}) == "1";
+    return enabled;
+#endif
+}
+
+void writeBakeLog(const void* instance, double now, const juce::String& message) {
+    static juce::CriticalSection lock;
+    const juce::ScopedLock guard(lock);
+    auto prefix = juce::Time::getCurrentTime().toISO8601(true) + " VERB_BAKE_LOG instance="
+        + juce::String::toHexString((juce::uint64)reinterpret_cast<uintptr_t>(instance))
+        + " clockMs=" + juce::String(now, 1);
+#if JUCE_WINDOWS
+    prefix += " pid=" + juce::String((juce::uint64)GetCurrentProcessId());
+#endif
+    juce::String block;
+    for (const auto& line : juce::StringArray::fromLines(message)) block += prefix + " " + line + "\n";
+    const auto file = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("VerbRoom-bake.log");
+    if (!file.appendText(block)) juce::Logger::outputDebugString(block);
+}
 
 const char* kDefaultScene = R"(# Built-in demo room: furnished 8 x 6 x 3 m room, one source.
 # material: name, absorption 125 Hz .. 8 kHz, scatter at 125 Hz, scatter at 8 kHz (rough surfaces scatter HF more)
@@ -339,6 +366,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
         }
     }
     bool objJumped[verbp::kMaxSources + 1] = {};
+    bool yawJumped[verbp::kMaxSources + 1] = {};
     bool anyJumped = false;
     bool anyMoved = false;
     if (!newEngine && n > 0) {
@@ -349,7 +377,11 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             const bool largeStep = dPos > std::max(0.75, 90.0 * blockSec);
             const bool fastStep = (dtSinceMove <= 1.5 * blockSec) && dPos > std::max(0.45, 90.0 * blockSec);
             const bool angJump = dAng > std::max(45.0, 1440.0 * blockSec);
-            if (largeStep || fastStep || angJump) { objJumped[o] = true; anyJumped = true; }
+            // A Manual turn still snaps azimuth and triggers the acoustic jump handling.
+            // It must not reset the XYZ tracker while the object continues along its trajectory.
+            yawJumped[o] = angJump;
+            if (largeStep || fastStep || (angJump && (cp[o]->orient || cp[o]->lookAt))) objJumped[o] = true;
+            anyJumped |= objJumped[o] || yawJumped[o];
             if (dPos > 0.02 || dAng > 2.0) anyMoved = true;
             if (dPos > 1e-6 || dAng > 1e-4) samplesSinceMove[o] = 0;
             else samplesSinceMove[o] += (uint64_t)n;
@@ -509,7 +541,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             // per block makes the velocity jump at every block boundary, which is heard as steps in the Doppler pitch)
             auto mix = [&](int o, int k) {
                 if (k >= 3) {
-                    if (objJumped[o]) return cur[o][k];
+                    if (objJumped[o] || yawJumped[o]) return cur[o][k];
                     return prev[o][k] + std::remainder(cur[o][k] - prev[o][k], 360.0) * t;
                 }
                 const HermSeg& sg = hs[o][k];
@@ -1507,7 +1539,14 @@ bool VerbProcessor::startPathBake(int object) {
             if(!((pass.state==3||pass.state==4)&&pass.samples>=2))return false;
         }
     }
-    webBakePercent=0;webBakeCancel=false;webBakeStart=object;wake.signal();return true;
+    const auto logAt = bakeLogEnabled() ? juce::Time::getMillisecondCounterHiRes() : -1.;
+    webBakePercent=0;webBakeCancel=false;webBakeStart=object;wake.signal();
+    if (logAt >= 0.) writeBakeLog(this, logAt, "request object=" + juce::String(object)
+        + " editorOpen=" + juce::String(int(bakeLogEditors.load(std::memory_order_relaxed) > 0)));
+    return true;
+}
+void VerbProcessor::bakeDiagnosticEditorOpened(bool opened) noexcept {
+    if (bakeLogEnabled()) bakeLogEditors.fetch_add(opened ? 1 : -1, std::memory_order_relaxed);
 }
 void VerbProcessor::cancelPathBake(){webBakeStart=-2;webBakeCancel=true;wake.signal();}
 void VerbProcessor::clearPathBake(){webBakeStart=-2;webBakeClear=true;wake.signal();}
@@ -1528,6 +1567,10 @@ void VerbProcessor::publishWebDiagnostics() {
     const bool listenerActive = rawPaths[verbp::kListener].enabled && rawPaths[verbp::kListener].points.size() >= 2;
     if (listenerActive) activeObjects.push_back(verbp::kListener);
     const double scale=engineSize.load()*.01,top=webMaximumZ();
+    auto yawMatchFor=[&](int o,double x,double y)->verb::BakedYawMatch{
+        if(verbp::orientModeOf(rawPaths[(size_t)o])!=verbp::OrientMode::Manual)return {};
+        return {true,x*scale,y*scale};
+    };
     auto groupMemberCount=[&](int g)->int{
         if(g<0)return 1;
         int c=0;
@@ -1572,6 +1615,7 @@ void VerbProcessor::publishWebDiagnostics() {
         const int origLaps=compiled.laps;
         compiled.laps=1;
         verb::BakedPath p;p.object=object;p.group=engGroup;p.closed=compiled.closed;
+        p.yawMatch=yawMatchFor(self,ox,oy);
         const double baseYaw=pv[self][3]->load();
         const bool dyn=own.lookAt;
         verbp::CompiledPath tgt;const verbp::CompiledPath* tgtPath=nullptr;
@@ -1677,7 +1721,9 @@ void VerbProcessor::publishWebDiagnostics() {
             samples.push_back(cur);
         }
         for(const auto& smp:samples){const double yaw=smp.yaw,a=yaw*verb::kPi/180.;
-            p.poses.push_back({(smp.q[0]+std::cos(a)*ox-std::sin(a)*oy)*scale,(smp.q[1]+std::sin(a)*ox+std::cos(a)*oy)*scale,std::clamp(std::clamp(smp.q[2],0.,top)+oz,0.,top)*scale,yaw});p.distance.push_back(smp.d*scale);}
+            const double dx=p.yawMatch.free?0.:std::cos(a)*ox-std::sin(a)*oy;
+            const double dy=p.yawMatch.free?0.:std::sin(a)*ox+std::cos(a)*oy;
+            p.poses.push_back({(smp.q[0]+dx)*scale,(smp.q[1]+dy)*scale,std::clamp(std::clamp(smp.q[2],0.,top)+oz,0.,top)*scale,yaw});p.distance.push_back(smp.d*scale);}
         if(compiled.hasTiming||(compiled.closed&&origLaps>1)){
             uint64_t sig=1469598103934665603ull;
             auto mix=[&](const void* v,size_t n){auto ptr=(const unsigned char*)v;for(size_t k=0;k<n;++k){sig^=ptr[k];sig*=1099511628211ull;}};
@@ -1715,20 +1761,43 @@ void VerbProcessor::publishWebDiagnostics() {
     if(passAction==1)bundle->engine->armRecordedPass();
     if(passAction==2)bundle->engine->stopRecordedPass();
     bundle->engine->setBakeForcedBlock(orientConflict);
-    bundle->engine->setBakedPaths(paths);
+    std::vector<verb::BakedYawMatch> recordedYawMatch;
+    recordedYawMatch.reserve(bundle->points.size()+1);
+    recordedYawMatch.push_back(yawMatchFor(verbp::kListener,0.,0.));
+    for(size_t j=0;j<bundle->points.size();++j)
+        recordedYawMatch.push_back(yawMatchFor(bundle->points[j].source,ptOff[j][0].load(),ptOff[j][1].load()));
+    bundle->engine->setBakedPaths(paths,recordedYawMatch);
     const int object = activeObjects.size() == 1 ? activeObjects.front() : -1;
-    if(webBakeClear.exchange(false)){webBakeStart=-2;webBakeTouched.fill(false);webRecordedTouched=false;bundle->engine->clearPathBake();}
-    else if(webBakeCancel.exchange(false)){webBakeStart=-2;bundle->engine->cancelPathBake();}
-    else {
+    if(webBakeClear.exchange(false)){webBakeTouched.fill(false);webRecordedTouched=false;bundle->engine->clearPathBake();}
+    else if(webBakeCancel.exchange(false)){bundle->engine->cancelPathBake();}
+    else if(isWebSceneCurrent() && !qualityDirty.load()) {
         const int requested=webBakeStart.exchange(-2);
         if(requested!=-2){
             for(int o:activeObjects)webBakeTouched[(size_t)o]=true;
             const auto ps=bundle->engine->recordedPassStats();
             if((ps.state==3||ps.state==4)&&ps.samples>=2)webRecordedTouched=true;
             bundle->engine->requestPathBake();
+            if (bakeLogEnabled()) {
+                bakeLogDispatchMs = juce::Time::getMillisecondCounterHiRes();
+                bakeLogStartBlocks = webAudioBlockCount();
+                bakeLogWaitReason = 0;
+                const auto quality = getTailSettings();
+                const auto profiled = std::count_if(bundle->cfg.begin(), bundle->cfg.end(),
+                    [](const auto& source) { return source.directivity != nullptr; });
+                writeBakeLog(this, bakeLogDispatchMs, "dispatch layout=" + juce::String(effectiveLayout())
+                    + " outputs=" + juce::String(bundle->R) + " points=" + juce::String((juce::uint64)bundle->points.size())
+                    + " profiledSources=" + juce::String((int)profiled) + " sr=" + juce::String(builtSr.load(), 0)
+                    + " block=" + juce::String(webLastBlockSize.load()) + " mode=" + juce::String(modeParam->load(), 0)
+                    + " early=" + juce::String(earlyParam->load(), 3) + " tail=" + juce::String(tailParam->load(), 3)
+                    + " baseRays=" + juce::String(quality.rays) + " adaptive=" + juce::String((int)quality.adaptive)
+                    + " editorOpen=" + juce::String(int(bakeLogEditors.load(std::memory_order_relaxed) > 0)));
+            }
         }
     }
-    auto bake=bundle->engine->bakeStats();webBakePercent=bake.percent;
+    auto bake=bundle->engine->bakeStats();
+    const bool bakeQueued=webBakeStart.load()!=-2;
+    if(bakeQueued){bake.state=verb::Engine::BakeState::Baking;bake.waitReason=2;bake.percent=0;bake.done=0;bake.total=0;}
+    webBakePercent=bake.percent;
     const auto pass=bundle->engine->recordedPassStats();
     const bool recordedActive=(!bake.groups.empty()&&bake.groups[0].group==2000)||(pass.samples>=2&&(paths.empty()||listenerActive));
     if(pass.state==0&&bake.groups.empty())webRecordedTouched=false;
@@ -1753,8 +1822,18 @@ void VerbProcessor::publishWebDiagnostics() {
         }
         return "Source "+juce::String(o+1);
     };
+    const auto bakeProgressText = [&](int percent, int done, int total) -> juce::String {
+        switch (bake.waitReason) {
+            case 1: return "Updating the tail after a timeline jump";
+            case 2: case 5: return "Rebuilding the room";
+            case 7: return "Updating the tail for settled poses";
+            case 14: return "Waiting for listener and source poses to settle";
+            case 16: return "Waiting for poses at the new room size";
+            default: return (percent<45?"Tracing stations":"Refining path")+juce::String(" - ")+juce::String(done)+"/"+juce::String(total)+" stations";
+        }
+    };
     switch(bake.state){
-        case verb::Engine::BakeState::Baking:bakeStateText="baking";reason=bake.waitReason==14?"Waiting for poses to settle":bake.waitReason?"Waiting for settled rebuild":(bake.percent<45?"Tracing stations":"Refining path")+juce::String(" - ")+juce::String(bake.done)+"/"+juce::String(bake.total)+" stations";break;
+        case verb::Engine::BakeState::Baking:bakeStateText="baking";reason=bakeProgressText(bake.percent,bake.done,bake.total);break;
         case verb::Engine::BakeState::Baked:bakeStateText="baked";reason=bakeHint;break;
         case verb::Engine::BakeState::Approximate:bakeStateText="approximate";reason=juce::String(bake.discontinuities)+" intervals above tolerance";if(bakeHint.isNotEmpty())reason+="; "+bakeHint;break;
         case verb::Engine::BakeState::Outdated:bakeStateText=anyTouched?"outdated":"notBaked";reason=anyTouched?(recordedActive?"Room, quality or recorded pass changed - bake again":"Room, quality or path changed - bake again"):"";break;
@@ -1793,10 +1872,10 @@ void VerbProcessor::publishWebDiagnostics() {
         const char* pState=bakeStateText;
         int pPercent=bake.percent,pDone=bake.done,pTotal=bake.total;
         juce::String pReason=reason;
-        if(bake.state!=verb::Engine::BakeState::Blocked&&bake.state!=verb::Engine::BakeState::Cancelled&&bake.state!=verb::Engine::BakeState::Failed&&grpStat){
+        if(!bakeQueued&&bake.state!=verb::Engine::BakeState::Blocked&&bake.state!=verb::Engine::BakeState::Cancelled&&bake.state!=verb::Engine::BakeState::Failed&&grpStat){
             pPercent=grpStat->percent;pDone=grpStat->done;pTotal=grpStat->total;pReason="";
             switch(grpStat->state){
-                case verb::Engine::BakeState::Baking:pState="baking";pReason=bake.waitReason==14?"Waiting for poses to settle":bake.waitReason?"Waiting for settled rebuild":(pPercent<45?"Tracing stations":"Refining path")+juce::String(" - ")+juce::String(pDone)+"/"+juce::String(pTotal)+" stations";break;
+                case verb::Engine::BakeState::Baking:pState="baking";pReason=bakeProgressText(pPercent,pDone,pTotal);break;
                 case verb::Engine::BakeState::Baked:pState="baked";pReason=bakeHint;break;
                 case verb::Engine::BakeState::Approximate:pState="approximate";pReason=juce::String(grpStat->discontinuities)+" intervals above tolerance";if(bakeHint.isNotEmpty())pReason+="; "+bakeHint;break;
                 case verb::Engine::BakeState::Outdated:pState=webBakeTouched[(size_t)o]?"outdated":"notBaked";pReason=webBakeTouched[(size_t)o]?"Room, quality or path changed - bake again":"";break;
@@ -1822,6 +1901,41 @@ void VerbProcessor::publishWebDiagnostics() {
         for(auto& item:perPathArr)if(auto* o=item.getDynamicObject())o->setProperty("reason","Off recorded pass - motion estimator");
     }
     {juce::ScopedLock lock(webBakeLock);webBakeStatus=juce::var(status);}
+    if (bakeLogDispatchMs >= 0.) {
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (bake.state == verb::Engine::BakeState::Baking) {
+            if (bake.waitReason != bakeLogWaitReason) {
+                bakeLogWaitReason = bake.waitReason;
+                writeBakeLog(this, now, "wait reason=" + juce::String(bake.waitReason) + " stations="
+                    + juce::String((juce::uint64)bake.stations));
+            }
+        } else {
+            const auto trace = bundle->engine->bakeTrace();
+            double lastInitial = 0., lastStation = 0.;
+            for (const auto& station : trace.stations) {
+                if (station.kind == 0) lastInitial = std::max(lastInitial, station.doneMs);
+                lastStation = std::max(lastStation, station.doneMs);
+            }
+            juce::String message = juce::String("published state=") + bakeStateText
+                + " dispatchToPublishMs=" + juce::String(now - bakeLogDispatchMs, 1)
+                + " traceMs=" + juce::String(bake.percent == 100 ? bake.milliseconds : 0., 1)
+                + " lastInitialMs=" + juce::String(lastInitial, 1) + " lastStationMs=" + juce::String(lastStation, 1)
+                + " workers=" + juce::String(trace.workers) + " activeLimit=" + juce::String(trace.activeLimit)
+                + " stations=" + juce::String((juce::uint64)trace.stations.size())
+                + " maxStepGapMs=" + juce::String(trace.maxStepGapMs, 1)
+                + " callbacks=" + juce::String((juce::uint64)(webAudioBlockCount() - bakeLogStartBlocks))
+                + " editorOpen=" + juce::String(int(bakeLogEditors.load(std::memory_order_relaxed) > 0));
+            if (bake.percent == 100)
+                message += " hash=" + juce::String::toHexString((juce::uint64)bake.hash).paddedLeft('0', 16);
+            if (bake.percent == 100) for (const auto& table : bundle->engine->bakedTablesSnapshot())
+                message += " group=" + juce::String(table->path.group) + "/v" + juce::String(table->estimator)
+                    + "/" + juce::String(table->selectedRays) + "rays/" + juce::String((int)table->u.size()) + "nodes";
+            bakeLogDispatchMs = -1.;
+            const auto diagnostics = bundle->engine->bakeWorkerDiagnostics();
+            if (!diagnostics.empty()) message += "\n" + juce::String(diagnostics);
+            writeBakeLog(this, now, message);
+        }
+    }
     const auto modeled = bundle->engine->sceneSnapshot();
     if (std::atomic_load(&webModeledScene) != modeled) { std::atomic_store(&webModeledScene, modeled); ++webGeometrySerial; }
     std::atomic_store(&webTailDiagnostics, bundle->engine->tailDiagnostics());

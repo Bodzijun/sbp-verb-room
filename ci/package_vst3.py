@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -14,11 +15,12 @@ from binary_readme import write_binary_readme
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, required=True)
-    parser.add_argument("--platform", choices=("macos-universal", "linux-x86_64"), required=True)
+    parser.add_argument("--platform", choices=("win64", "macos-universal", "linux-x86_64"), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     source = Path(__file__).resolve().parent.parent
-    expected_os = "Darwin" if args.platform == "macos-universal" else "Linux"
+    expected_os = {"win64": "Windows", "macos-universal": "Darwin", "linux-x86_64": "Linux"}[args.platform]
+    windows = expected_os == "Windows"
     if platform.system() != expected_os:
         raise RuntimeError(f"Package {args.platform} on {expected_os}, not {platform.system()}")
     version = re.search(r"project\(verb VERSION ([\d.]+)", (source / "CMakeLists.txt").read_text()).group(1)
@@ -27,9 +29,13 @@ def main():
         raise FileNotFoundError(bundle)
     cache = (args.build_dir.resolve() / "CMakeCache.txt").read_text()
     avx2 = re.search(r"^VERB_AVX2:BOOL=(.+)$", cache, re.MULTILINE)
-    if not avx2 or avx2.group(1).strip().upper() not in ("OFF", "FALSE", "0", "NO"):
+    if windows and (not avx2 or avx2.group(1).strip().upper() not in ("ON", "TRUE", "1", "YES")):
+        raise RuntimeError("The Windows x64 package requires a build configured with VERB_AVX2=ON")
+    if not windows and (not avx2 or avx2.group(1).strip().upper() not in ("OFF", "FALSE", "0", "NO")):
         raise RuntimeError("These portable packages require a build configured with VERB_AVX2=OFF")
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    commit = os.environ.get("GITHUB_SHA")
+    if not windows and not commit:
+        raise RuntimeError("Set GITHUB_SHA to the source revision for BUILDINFO.json")
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     name = f"VerbRoom-{version}-{args.platform}"
@@ -39,8 +45,10 @@ def main():
     if stage.exists():
         raise FileExistsError(f"Package stage already exists: {stage}")
     stage.mkdir()
-    shutil.copytree(bundle, stage / bundle.name, symlinks=True)
+    shutil.copytree(bundle, stage / bundle.name, symlinks=True,
+                    ignore=shutil.ignore_patterns("*.map") if windows else None)
     shutil.copy2(source / "LICENSE", stage / "LICENSE")
+    shutil.copy2(source / "THIRD_PARTY_DIRECTIVITY.md", stage / "THIRD_PARTY_DIRECTIVITY.md")
     shutil.copytree(source / "docs", stage / "docs")
     shutil.copytree(source / "presets", stage / "Presets")
     web_on = re.search(r"^VERB_WEB_UI:BOOL=(.+)$", cache, re.MULTILINE)
@@ -50,8 +58,20 @@ def main():
     info = {"version": version, "platform": args.platform, "commit": commit, "web": web_backend,
             "avx2_required": False, "apple_notarized": False if expected_os == "Darwin" else None,
             "apple_signing": "ad-hoc" if expected_os == "Darwin" else None}
-    (stage / "BUILDINFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
-    if expected_os == "Darwin":
+    if not windows:
+        (stage / "BUILDINFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+    if windows:
+        instructions = (
+            f"Verb Room {version} - Windows x64 (AVX2/FMA)\n"
+            'Close your DAW and copy the whole "Verb Room.vst3" folder to\n'
+            "C:\\Program Files\\Common Files\\VST3\\.\n"
+            "Requirements: Windows 10/11 64-bit with AVX2/FMA.\n"
+            "The web interface requires the Microsoft WebView2 Runtime. Without it the classic interface opens.\n"
+            "To use the classic interface: open Theme -> Classic UI or set VERB_UI=classic.\n"
+            f"See docs/Release_{version}_en.md for changes and compatibility notes.\n"
+        )
+        archive = output / f"{name}.zip"
+    elif expected_os == "Darwin":
         instructions = (
             "macOS Universal (arm64 + x86_64), deployment target macOS 11.\n"
             "Close your DAW and copy the whole Verb Room.vst3 bundle to\n"
@@ -82,14 +102,16 @@ def main():
     )
     (stage / "INSTALL.txt").write_text(instructions, encoding="utf-8")
     write_binary_readme(stage, version, args.platform)
-    if expected_os == "Darwin":
+    if windows:
+        shutil.make_archive(str(output / name), "zip", root_dir=stage.parent, base_dir=name)
+    elif expected_os == "Darwin":
         subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(stage), str(archive)], check=True)
     else:
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(stage, arcname=name)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     (output / f"{archive.name}.sha256").write_text(f"{digest}  {archive.name}\n", encoding="ascii")
-    print(f"Packaged {archive.name} from {commit}")
+    print(f"Packaged {archive.name}" + (f" from {commit}" if commit else ""))
 
 
 if __name__ == "__main__":

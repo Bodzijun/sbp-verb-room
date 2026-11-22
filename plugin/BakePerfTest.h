@@ -5,7 +5,9 @@
 #include "E9bTest.h"
 #include <fstream>
 #include <algorithm>
+#include "P9cTestControls.h"
 static int testBakePerf() {
+    if (!configureP9cTest()) return 1;
     const char* variantEnv = std::getenv("VERB_BAKE_PERF_VARIANT");
     const std::string variant = variantEnv ? variantEnv : "asis";
     const char* fileEnv = std::getenv("VERB_BAKE_PERF_FILE");

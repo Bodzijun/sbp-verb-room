@@ -692,6 +692,7 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     setupNewUi();
 #endif
     startTimerHz(10);
+    proc.bakeDiagnosticEditorOpened(true);
 }
 
 // ---- N2: way back to the web editor. Nothing here is compiled without the web editor.
@@ -746,6 +747,7 @@ void VerbEditor::requestNewUi() {
 #endif
 
 VerbEditor::~VerbEditor() {
+    proc.bakeDiagnosticEditorOpened(false);
     stopTimer();
     setLookAndFeel(nullptr);
 }

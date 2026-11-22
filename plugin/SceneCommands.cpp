@@ -618,15 +618,50 @@ void clampBands(verb::Material& m) {
 std::string refsKey(const juce::var& p) { return juce::JSON::toString(p.getProperty("refs", {}), true).toStdString(); }
 
 // ============================================================================================ surface commands
+constexpr double wallCornerTolerance = 1e-4;
+bool linkableWall(const verb::Scene& scene, const verb::Wall& wall) {
+    return scene.layerModes[0] == 0 && !wall.editor.hidden && !wall.editor.locked;
+}
+
 Fail opTranslate(const juce::var& p, Model& m, const Ctx& c) {
     Args a(p);
     auto refs = parseRefs(a, "refs", m.scene, true);
     auto d = a.vecProp("deltaM", 2, 3, 1e5);
     const bool groups = a.optBool("includeGroups").value_or(true);
+    const bool autoLink = a.optBool("autoLink").value_or(false);
     if (a.bad()) return a.f;
     if (auto f = checkLocked(m.scene, refs, groups); f.bad()) return f;
     const auto expanded = groups ? expandSurfaceGroups(m.scene, refs) : refs;
-    translateSurfaces(m.scene, c.start.scene, expanded, d[0], d[1], d.size() > 2 ? d[2] : 0.0);
+    const auto& start = c.start.scene;
+    translateSurfaces(m.scene, start, expanded, d[0], d[1], d.size() > 2 ? d[2] : 0.0);
+    if (!autoLink || (d[0] == 0 && d[1] == 0)) return {};
+
+    std::vector<bool> moved(start.walls.size());
+    std::vector<std::pair<double, double>> corners;
+    for (auto r : expanded) {
+        if (r.kind != 1 || (size_t)r.index >= start.walls.size()) continue;
+        const auto& wall = start.walls[(size_t)r.index];
+        moved[(size_t)r.index] = true;
+        corners.emplace_back(wall.ax, wall.ay);
+        corners.emplace_back(wall.bx, wall.by);
+    }
+    if (corners.empty()) return {};
+    const auto linked = [&](double x, double y) {
+        return std::any_of(corners.begin(), corners.end(), [&](const auto& corner) {
+            return std::hypot(x - corner.first, y - corner.second) <= wallCornerTolerance;
+        });
+    };
+    for (size_t i = 0; i < start.walls.size() && i < m.scene.walls.size(); ++i) {
+        const auto& from = start.walls[i];
+        auto& wall = m.scene.walls[i];
+        if (moved[i] || !linkableWall(start, from) || !linkableWall(m.scene, wall)) continue;
+        const bool moveA = linked(from.ax, from.ay), moveB = linked(from.bx, from.by);
+        if (!moveA && !moveB) continue;
+        if (moveA) { wall.ax = from.ax + d[0]; wall.ay = from.ay + d[1]; }
+        if (moveB) { wall.bx = from.bx + d[0]; wall.by = from.by + d[1]; }
+        if (std::hypot(wall.bx - wall.ax, wall.by - wall.ay) < wallCornerTolerance)
+            return {"invalid", "the move would make a wall of zero length", "deltaM"};
+    }
     return {};
 }
 
@@ -651,14 +686,14 @@ Fail opMoveVertex(const juce::var& p, Model& m, const Ctx&) {
                 for (int e = 0; e < 2; ++e) {
                     if ((int)i == ref.index && e == vertex) continue;
                     const auto& w = s.walls[i];
-                    if (w.editor.hidden || w.editor.locked || s.layerModes[0] != 0) continue;
-                    if (std::hypot((e ? w.bx : w.ax) - cx, (e ? w.by : w.ay) - cy) < 1e-4) ends.push_back({(int)i, e});
+                    if (!linkableWall(s, w)) continue;
+                    if (std::hypot((e ? w.bx : w.ax) - cx, (e ? w.by : w.ay) - cy) < wallCornerTolerance) ends.push_back({(int)i, e});
                 }
         for (auto& pr : ends) {
             auto& w = s.walls[(size_t)pr.first];
             (pr.second ? w.bx : w.ax) = pos[0];
             (pr.second ? w.by : w.ay) = pos[1];
-            if (std::hypot(w.bx - w.ax, w.by - w.ay) < 1e-4) return {"invalid", "the move would make a wall of zero length", "positionM"};
+            if (std::hypot(w.bx - w.ax, w.by - w.ay) < wallCornerTolerance) return {"invalid", "the move would make a wall of zero length", "positionM"};
         }
     } else if (ref.kind == 4 || ref.kind == 5) {
         auto& z = (ref.kind == 4 ? s.floorZones : s.ceilZones)[(size_t)ref.index];

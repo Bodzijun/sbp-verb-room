@@ -1,4 +1,5 @@
 import { autoNumberSources } from '../viewport/t13.js';
+import { applySourceBatch, canSum, planSourceFormat, planSourceSum, sumState } from './source-actions.js';
 import { element, button, select, check, row, note, unavailable, scrollArea } from '../components/dom.js';
 import { tabs } from '../components/tabs.js';
 import { parameterToggle, outputParts, makeupControls, sourceParts, listenerParts, sceneFacts, parameterSwitch, heading } from '../components/inspector.js';
@@ -90,27 +91,70 @@ export function mainContext(ctx) {
   return root;
 }
 // ── Sources: DAW-style mixer strips -------------------------------------------------------
+const sourceBatchStatus = new WeakMap();
+const sumTitle = 'Sum channels to one point';
+const singleChannelSumTitle = 'Sum is unavailable for a single input channel.';
+
+function fitWarning({ skippedSources, missingChannels, excessPoints }) {
+  if (!skippedSources) return '';
+  const shortage = [missingChannels && `${missingChannels} inputs`, excessPoints && `${excessPoints} points`].filter(Boolean);
+  return [...shortage, `${skippedSources} sources did not fit (unchanged)`].join(' / ');
+}
+
 export function sourcesPanel(ctx) {
   const { store, param } = ctx, state = store.state, flags = state.document.editorFlags, usage = budget(state.document);
+  const sources = state.document.sources;
+  const available = Math.min(state.host.inputChannels, state.limits.maxInputs);
   const root = element('div', { className: 'sources-panel' });
+  const status = sourceBatchStatus.get(store) ?? { pending: false, message: '', update: null };
+  sourceBatchStatus.set(store, status);
+  const warning = element('span', { className: 'source-action-warning warning', role: 'status' });
+  const updateWarning = () => {
+    warning.hidden = !status.message;
+    warning.textContent = status.message;
+  };
+  status.update = updateWarning;
+  updateWarning();
+  async function run(label, plan) {
+    if (status.pending) return;
+    status.pending = true;
+    status.message = '';
+    status.update?.();
+    status.message = await applySourceBatch(store, label, plan.assignments) || fitWarning(plan);
+    status.pending = false;
+    status.update?.();
+  }
+  const sum = sumState(sources);
+  const allFormats = select('All formats…', FORMATS, '', format => {
+    allFormats.value = '';
+    const current = store.state;
+    run('All formats', planSourceFormat(current.document.sources, Number(format),
+      Math.min(current.host.inputChannels, current.limits.maxInputs), current.limits.maxPoints));
+  }, { className: 'dd source-all-formats', disabled: !sources.length || available < 1,
+    title: 'Set the format for all sources and renumber their inputs. Sources that do not fit stay unchanged.',
+    placeholder: 'All formats…', 'data-focus-key': 'source-all-formats' });
   root.append(element('div', { className: 'source-actions' }, [button('+ Source', () => store.command({ op: 'source.add' }), { disabled: state.document.sources.length >= state.limits.maxSources }),
     button('− Source', () => {
       const index = store.view.selection.find(r => r.kind === 'source')?.index ?? 0;
       if (window.confirm('Remove this source? Later source slots and index-based host automation shift down.')) store.command({ op: 'source.remove', index });
     }, { disabled: state.document.sources.length <= 1 }),
-    button('Auto-number channels', async () => {
-      const plan=autoNumberSources(store.state.document.sources,store.state.host.inputChannels),tx=`auto-inputs-${Date.now()}`;
-      const begin=await store.command({op:'transaction.begin',label:'Auto-number channels'},tx);
-      if(begin?.kind!=='ack')return;
-      for(const assignment of plan.assignments){const reply=await store.command({op:'source.setConfig',...assignment},tx);if(reply?.kind!=='ack')return;}
-      await store.command({op:'transaction.commit'},tx);
-      if(plan.skippedSources){const warning=document.querySelector('.source-budget');if(warning){warning.classList.add('warning');warning.textContent+=` · ${plan.missingChannels} inputs / ${plan.skippedSources} sources did not fit (unchanged)`;}}
+    button('Auto-number channels', () => {
+      const current = store.state;
+      run('Auto-number channels', autoNumberSources(current.document.sources, Math.min(current.host.inputChannels, current.limits.maxInputs)));
     }),
+    allFormats,
+    button(`Sum: ${{ on: 'all on', off: 'all off', mixed: 'mixed', none: 'all off' }[sum]}`, () => {
+      const current = store.state.document.sources;
+      const enable = sumState(current) !== 'on';
+      run(enable ? 'Sum all on' : 'Sum all off', { assignments: planSourceSum(current, enable) });
+    }, { className: 'source-sum-all', disabled: sum === 'none', 'aria-label': 'Sum for all sources',
+      'aria-pressed': sum === 'mixed' ? 'mixed' : String(sum === 'on'), 'data-focus-key': 'source-sum-all',
+      title: 'Turn Sum on or off for all sources. Sources with one input channel are skipped.' }),
     check('Keep I/O', flags.keepRouting, keepRouting => store.flags({ keepRouting }), { title: 'Full presets preserve local Sources / Output; room, poses and mix import by index.' }),
-    element('span', { className: `${usage.overlap || usage.inputs > state.host.inputChannels ? 'warning' : 'note'} source-budget`, text: `${state.document.sources.length}/${state.limits.maxSources} src · ${usage.inputs}/${state.host.inputChannels} inputs · ${usage.points}/${state.limits.maxPoints} pts${usage.overlap ? ' · overlapping routes' : ''}` })]));
-  const head = element('div', { className: 'mix-row mix-head', role: 'row' }, ['', 'Source', 'Format', 'In', 'Ch', 'Gain dB', 'Level', 'M', 'S'].map((t, i) => i === 6
+    element('span', { className: `${usage.overlap || usage.inputs > state.host.inputChannels ? 'warning' : 'note'} source-budget`, text: `${sources.length}/${state.limits.maxSources} src · ${usage.inputs}/${state.host.inputChannels} inputs · ${usage.points}/${state.limits.maxPoints} pts${usage.overlap ? ' · overlapping routes' : ''}` }), warning]));
+  const head = element('div', { className: 'mix-row mix-head', role: 'row' }, ['', 'Source', 'Format', 'In', 'Ch', 'Gain dB', 'Level', 'M', 'S', 'Σ'].map((t, i) => i === 6
     ? element('button', { type: 'button', className: 'c6 meter-mode', text: METER_MODES[getMeterMode()].label, title: 'Source meter ballistics: Peak (instant attack, fast fall) / Smooth (slow). Click to switch.', 'aria-label': 'Source meter mode', onclick: e => { const next = getMeterMode() === 'peak' ? 'smooth' : 'peak'; setMeterMode(next); e.currentTarget.textContent = METER_MODES[next].label; } })
-    : element('span', { text: t, className: `c${i}` })));
+    : element('span', { text: t, className: `c${i}`, ...(i === 9 ? { title: sumTitle, 'aria-label': 'Sum' } : {}) })));
   const list = element('div', { className: 'mix-list', role: 'rowgroup' });
   const meterSet = sourceMeters(store, state.document.sources.map(s => [s.firstIn, channels(s)]));
   state.document.sources.forEach((source, index) => {
@@ -138,15 +182,24 @@ export function sourcesPanel(ctx) {
     ]);
     list.append(element('div', { className: `mix-row${selected ? ' selected' : ''}${hasCustomColor ? ' has-custom-color' : ''}`, role: 'row', style: `--strip:${stripColour}` }, [
       idCell,
-      element('input', { type: 'text', className: 'c1 strip-name', value: source.name, 'aria-label': `Source ${index + 1} name`, maxLength: 128, 'data-focus-key': `source-table-${index}`, onchange: e => config({ name: e.target.value }) }),
+      element('input', { type: 'text', className: 'c1 strip-name', value: source.name, title: source.name, 'aria-label': `Source ${index + 1} name`, maxLength: 128, 'data-focus-key': `source-table-${index}`, onchange: e => config({ name: e.target.value }) }),
       select(`Source ${index + 1} format`, FORMATS, source.format, n => config({ format: Number(n) }), { className: 'dd c2' }),
       numericField(`Source ${index + 1} first input`, source.firstIn + 1, 1, 64, 1, n => config({ firstIn: n - 1 })),
       element('span', { className: 'c4 strip-ch', text: `${channels(source)}`, title: `In ${source.firstIn + 1}–${source.firstIn + channels(source)}` }),
       element('div', { className: 'c5 strip-gain' }, param(`s${index + 1}g`, { label: 'Gain' })),
       meterSet ? Object.assign(meterSet.nodes[index], { className: 'hmeter c6' }) : element('span', { className: 'c6' }),
-      parameterSwitch(ctx, `s${index + 1}mute`, 'M', 'mute', `Source ${index + 1} mute`), parameterSwitch(ctx, `s${index + 1}solo`, 'S', 'solo', `Source ${index + 1} solo`)]));
+      parameterSwitch(ctx, `s${index + 1}mute`, 'M', 'mute', `Source ${index + 1} mute`),
+      parameterSwitch(ctx, `s${index + 1}solo`, 'S', 'solo', `Source ${index + 1} solo`),
+      button('Σ', () => {
+        const current = store.state.document.sources[index];
+        if (current && canSum(current)) config({ sum: !current.sum });
+      }, { className: 'c9 strip-sum', disabled: !canSum(source), title: canSum(source) ? sumTitle : singleChannelSumTitle,
+        'aria-label': `Source ${index + 1} Sum`, 'aria-pressed': String(source.sum), 'data-focus-key': `source-sum-${index}` })]));
   });
-  if (meterSet) root.dispose = meterSet.dispose;
+  root.dispose = () => {
+    meterSet?.dispose();
+    if (status.update === updateWarning) status.update = null;
+  };
   const area = scrollArea(list, { className: 'mix-scroll' });
   root.append(element('div', { className: 'mixer' }, [head, area]));
   return root;

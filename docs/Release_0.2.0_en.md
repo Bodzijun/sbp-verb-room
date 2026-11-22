@@ -47,7 +47,7 @@ Macs and hosts. If something goes wrong, switch to the classic interface (see "S
 ### Directivity and profiles
 - Directivity profiles for sound sources and instruments. The **Profiles** folder is the default location and the
   last used folder is remembered; **Profile aim** controls where a profile points.
-- Experimental option to keep the directional relations of the tail (Settings).
+- Directivity profiles affect direct sound and early reflections. The late tail treats each source as omnidirectional.
 
 ### Engine
 - A sealed room is really sealed: no sound leaking through closed corners or through walls into the tail.

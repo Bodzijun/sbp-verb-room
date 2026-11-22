@@ -111,7 +111,8 @@ inline int run() {
     }
     const char* tagEnv = std::getenv("VERB_P5_TAG");
     const std::string tag = (tagEnv && *tagEnv) ? std::string("-") + tagEnv : std::string();
-    const fs::path outDir("E:/Claude/verb/out/P5");
+    const char* outEnv = std::getenv("VERB_P5_OUT");
+    const fs::path outDir(outEnv && *outEnv ? outEnv : "E:/Claude/verb/out/P5");
     fs::create_directories(outDir);
 
     const double sr = 48000.0;

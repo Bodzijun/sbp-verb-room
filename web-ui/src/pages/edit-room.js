@@ -24,7 +24,7 @@ export function snapControl(ctx) {
 // T6 B3: Outliner first, then the four layer filters; Snap and Auto-link on the right.
 export function layerBar(ctx) {
   const { store } = ctx, modes = store.state.document.editorFlags.layerModes || {};
-  const link=check('Auto-link corners', store.view.autoLink, autoLink => store.setView({ autoLink }),{'aria-label':'Auto-link corners',title:'Continue walls from the last corner; double-click closes the chain. Escape / right click ends it.'});
+  const link=check('Auto-link corners', store.view.autoLink, autoLink => store.setView({ autoLink }),{'aria-label':'Auto-link corners',title:'Move joined corners together when dragging a wall or corner. When drawing walls, continue from the last corner. Double-click closes the chain. Escape or right-click ends it.'});
   link.lastElementChild.className='link-label';link.append(element('span',{className:'link-short',text:'Link','aria-hidden':'true'}));
   return element('div', { className: 'layer-bar' }, [
     button('Outliner', () => store.flags({ outlinerVisible: !store.state.document.editorFlags.outlinerVisible }), { className: 'outliner-toggle', 'aria-pressed': String(store.state.document.editorFlags.outlinerVisible) }),

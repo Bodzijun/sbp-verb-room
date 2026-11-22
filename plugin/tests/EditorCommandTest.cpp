@@ -8,14 +8,17 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <random>
 #include <regex>
 #include <set>
 #include <sstream>
 
 #include "../EditorSession.h"
 #include "../PluginProcessor.h"
+#include "../RoomLibrary.h"
 #include "../SceneCommands.h"
 #include "../../src/scene.hpp"
+#include "EngineTestAccess.h"
 
 using verbp::CommandResult;
 using verbp::EditorSession;
@@ -228,8 +231,8 @@ struct Rig {
     double clockMs = 1e6;
     int reqCounter = 0;
     bool validateCommands = true;  // off for deliberately invalid commands (their ANSWERS are still validated)
-    Rig() {
-        p.setPlayConfigDetails(2, 2, 48000, 256);
+    explicit Rig(int inputs = 2) {
+        p.setPlayConfigDetails(inputs, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         p.setTailSettings({8000, false});
         session().setClock([this] { return clockMs; });
@@ -891,13 +894,331 @@ static void testC1SourceColors(Rig& r) {
     r.reset("C1");
 }
 
+static std::string translateWall(size_t index, double dx, double dy, const char* options = "") {
+    return R"({"op":"surface.translate","refs":[{"kind":"wall","index":)" + std::to_string(index)
+        + R"(}],"deltaM":[)" + std::to_string(dx) + "," + std::to_string(dy) + "]" + options + "}";
+}
+
+static int openCorners(const verb::Scene& scene) {
+    int open = 0;
+    for (size_t i = 0; i < scene.walls.size(); ++i) {
+        const auto& wall = scene.walls[i];
+        const auto& next = scene.walls[(i + 1) % scene.walls.size()];
+        if (std::hypot(wall.bx - next.ax, wall.by - next.ay) > 1e-4) ++open;
+    }
+    return open;
+}
+
+static void testWallTranslation(Rig& r) {
+    const auto box = boxText(5, 4, 3);
+    constexpr auto link = R"(,"autoLink":true)";
+    if (!r.load(box)) { check(false, "F1 closed test room loads"); return; }
+    const auto start = r.p.getDisplayScene();
+    const auto wallsText = [&] { return verb::serializeScene(r.p.getDisplayScene()); };
+    const auto initialText = wallsText();
+    check(openCorners(start) == 0, "F1 four-wall fixture starts closed");
+    for (auto option : {"", R"(,"autoLink":false)"}) {
+        const auto result = r.send(translateWall(0, 0, 0.5, option));
+        const auto moved = r.p.getDisplayScene();
+        check(result.ok && moved.walls[0].ay == start.walls[0].ay + 0.5 && openCorners(moved) == 2,
+              *option ? "F1 explicit false leaves two corners open" : "F1 omitted autoLink preserves the old move");
+        check(r.session().undo().ok && wallsText() == initialText, "F1 standalone move can be undone");
+    }
+    const uint64_t revision = r.p.getRevision();
+    auto rejected = r.send(translateWall(0, 0, 4, link));
+    check(!rejected.ok && rejected.code == "invalid" && r.p.getRevision() == revision && wallsText() == initialText,
+          "F1 zero-length neighbour rejects the entire move");
+
+    check(r.send(R"({"op":"transaction.begin","label":"Move linked corners"})", nullptr, "f1-wall").ok, "F1 start a drag");
+    check(r.send(translateWall(0, 0, 0.5, link), nullptr, "f1-wall").ok &&
+          openCorners(r.p.getDisplayScene()) == 0, "F1 first live delta moves both linked corners");
+    check(r.send(translateWall(0, 0, 0.75, R"(,"autoLink":false)"), nullptr, "f1-wall").ok &&
+          openCorners(r.p.getDisplayScene()) == 2, "F1 replacing the live command restores the neighbours when linking is disabled");
+    check(r.send(R"({"op":"surface.translate","refs":[{"kind":"wall","index":0}],"deltaM":[0,1,0.25],"autoLink":true})", nullptr, "f1-wall").ok,
+          "F1 final live delta includes Z on the selected wall");
+    const auto moved = r.p.getDisplayScene();
+    check(openCorners(moved) == 0 && moved.walls[0].ay == 1 && moved.walls[1].ay == 1 && moved.walls[3].by == 1 &&
+          moved.walls[0].z0 == 0.25 && moved.walls[1].z0 == start.walls[1].z0 && moved.walls[3].z1 == start.walls[3].z1,
+          "F1 live motion uses the start endpoints and preserves neighbours' heights");
+    const auto movedText = wallsText();
+    check(r.send(R"({"op":"transaction.commit"})", nullptr, "f1-wall").ok && r.session().undoDepth() == 1 &&
+          r.session().undo().ok && !r.session().canUndo() && wallsText() == initialText,
+          "F1 one undo restores the entire drag, including both neighbours");
+    check(r.session().redo().ok && wallsText() == movedText, "F1 redo restores the linked geometry");
+    r.session().undo();
+
+    check(r.send(R"({"op":"surface.setMetadata","refs":[{"kind":"wall","index":1}],"locked":true})").ok &&
+          r.send(R"({"op":"surface.setMetadata","refs":[{"kind":"wall","index":3}],"hidden":true})").ok &&
+          r.send(translateWall(0, 0, 1, link)).ok, "F1 moving a wall beside locked and hidden neighbours succeeds");
+    const auto skipped = r.p.getDisplayScene();
+    check(skipped.walls[0].ay == 1 && skipped.walls[1].ay == 0, "F1 locked neighbour stays put");
+    check(skipped.walls[3].by == 0, "F1 hidden neighbour stays put");
+    r.reset("F1 skip");
+
+    check(r.send(R"({"op":"surface.link","refs":[{"kind":"wall","index":0},{"kind":"wall","index":1}],"groupName":"Corner pair"})").ok &&
+          r.send(translateWall(0, 0.25, 0.5, link)).ok, "F1 includeGroups expands the selection");
+    const auto grouped = r.p.getDisplayScene();
+    check(openCorners(grouped) == 0 && grouped.walls[0].bx == 5.25 && grouped.walls[1].ax == 5.25 &&
+          grouped.walls[1].by == 4.5 && grouped.walls[2].ay == 4.5,
+          "F1 internal group joint and both exterior joints stay closed");
+    r.reset("F1 group");
+
+    const auto* descriptor = verbp::findDescriptor("surface.translate");
+    std::mt19937 rnd(117);
+    std::uniform_int_distribution<int> step(-5, 5);
+    for (const auto& text : {box, verbp::vslGrandHall(false).text}) {
+        Model before = r.model();
+        before.scene = parseText(text);
+        const auto n = before.scene.walls.size();
+        const int initialOpen = openCorners(before.scene);
+        int maxOpen = initialOpen;
+        std::uniform_int_distribution<size_t> wall(0, n - 1);
+        int validMoves = 0;
+        for (int i = 0; i < 24; ++i) {
+            Model candidate = before;
+            auto f = descriptor->mutate(J(translateWall(wall(rnd), step(rnd) * 0.01, step(rnd) * 0.01, link)),
+                                        candidate, {r.p, before});
+            if (f.bad() || verbp::normalizeAndValidate(candidate, before).bad()) break;
+            maxOpen = std::max(maxOpen, openCorners(candidate.scene));
+            before = std::move(candidate);
+            ++validMoves;
+        }
+        std::printf("    F1 closed contour: %zu walls, %d moves, open corners %d initially / %d maximum\n",
+                    n, validMoves, initialOpen, maxOpen);
+        check(n >= 4 && maxOpen == 0 && validMoves == 24, "F1 randomized wall translations preserve every consecutive joint");
+    }
+}
+
+struct ImpulseResult { bool finite = true; double energy = 0, peak = 0; };
+static ImpulseResult impulse(VerbProcessor& proc, int input = 0, std::vector<float>* captures = nullptr) {
+    juce::AudioBuffer<float> audio(std::max(2, proc.getTotalNumInputChannels()), 256);
+    juce::MidiBuffer midi;
+    ImpulseResult result;
+    for (int block = 0; block < 375; ++block) {
+        audio.clear();
+        if (!block) audio.setSample(input, 0, 1.0f);
+        proc.processBlock(audio, midi);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < audio.getNumSamples(); ++i) {
+                const double sample = audio.getSample(ch, i);
+                result.finite &= std::isfinite(sample);
+                result.energy += sample * sample;
+                result.peak = std::max(result.peak, std::abs(sample));
+                if (captures) captures->push_back((float)sample);
+            }
+    }
+    return result;
+}
+
+static bool waitForImpulseRoom(VerbProcessor& proc) {
+    juce::AudioBuffer<float> silence(std::max(2, proc.getTotalNumInputChannels()), 256);
+    juce::MidiBuffer midi;
+    int settled = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline) {
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(5);
+        silence.clear();
+        proc.processBlock(silence, midi);
+        const auto engine = E9bAccess::engine(proc);
+        if (proc.isWebSceneCurrent() && engine && engine->tailIsCurrent() && engine->motionStats().transState == 0) {
+            if (++settled == 110) return true;
+        } else settled = 0;
+    }
+    return false;
+}
+
+static void testReleasePresetImpulse(const char* name, const juce::String& presetPath, int inputs) {
+    VerbProcessor original, restored;
+    for (auto* proc : {&original, &restored}) {
+        proc->setPlayConfigDetails(inputs, 2, 48000, 256);
+        proc->prepareToPlay(48000, 256);
+        proc->setKeepRoutingEnabled(false);
+    }
+
+    const std::string label = name;
+    juce::String error;
+    if ((presetPath.isNotEmpty() && !original.loadRoomPresetText(juce::File(presetPath).loadFileAsString(), error)) ||
+        !waitForImpulseRoom(original)) {
+        check(false, label + " initial room settles: " + error.toStdString());
+        return;
+    }
+
+    const auto saved = juce::File(juce::String(name) + "-roundtrip.verbroom");
+    const auto preset = original.getRoomPresetText();
+    if (preset.isEmpty() || !saved.replaceWithText(preset) ||
+        !restored.loadRoomPresetText(saved.loadFileAsString(), error) || !waitForImpulseRoom(restored)) {
+        check(false, label + " saved room reloads and settles: " + error.toStdString());
+        return;
+    }
+    check(original.getRoomText() == restored.getRoomText() &&
+          original.numPoints() == restored.numPoints(), label + " geometry, materials and point count survive reload");
+
+    const auto sources = original.getSources();
+    const int lastInput = sources.back().firstIn + sources.back().channels - 1;
+    const auto testInputs = lastInput > 0 ? std::vector<int>{0, lastInput} : std::vector<int>{0};
+    for (const int input : testInputs) {
+        std::vector<float> before, after;
+        const auto a = impulse(original, input, &before);
+        const auto b = impulse(restored, input, &after);
+        double maxDelta = 0;
+        for (size_t i = 0; i < before.size(); ++i)
+            maxDelta = std::max(maxDelta, std::abs(double(before[i]) - after[i]));
+        const double deltaDb = 10.0 * std::log10(b.energy / a.energy);
+        std::printf("    %s input %d: energy %.12g -> %.12g, peak %.9g -> %.9g, delta %.9g dB, max sample delta %.9g\n",
+                    name, input + 1, a.energy, b.energy, a.peak, b.peak, deltaDb, maxDelta);
+        check(a.finite && b.finite && a.energy > 1e-8 && b.energy > 1e-8 &&
+              std::abs(deltaDb) <= 0.0001 && maxDelta <= 1e-6,
+              label + " finite, non-silent render survives reload on input " + std::to_string(input + 1));
+    }
+}
+
+static void testWallPresetImpulse(Rig& r) {
+    if (!r.load(boxText(5, 4, 3)) || !r.send(translateWall(0, 0, 0.25, R"(,"autoLink":true)")).ok ||
+        !waitForImpulseRoom(r.p)) {
+        check(false, "F1 the edited closed room builds in the real engine");
+        return;
+    }
+    const auto moved = r.p.getDisplayScene();
+    const auto preset = r.p.getRoomPresetText();
+    const auto original = impulse(r.p);
+    check(openCorners(moved) == 0 && original.finite && original.energy > 1e-6, "F1 edited closed room renders a finite, non-silent impulse");
+
+    Rig restored;
+    restored.p.setKeepRoutingEnabled(false);
+    juce::String error;
+    if (preset.isEmpty() || !restored.p.loadRoomPresetText(preset, error) || !waitForImpulseRoom(restored.p)) {
+        check(false, "F1 edited .verbroom reloads and builds: " + error.toStdString());
+        return;
+    }
+    const auto reloaded = restored.p.getDisplayScene();
+    bool sameWalls = reloaded.walls.size() == moved.walls.size();
+    for (size_t i = 0; sameWalls && i < moved.walls.size(); ++i) {
+        const auto& a = moved.walls[i];
+        const auto& b = reloaded.walls[i];
+        const auto& matA = moved.mats[(size_t)a.mat];
+        const auto& matB = reloaded.mats[(size_t)b.mat];
+        sameWalls = a.ax == b.ax && a.ay == b.ay && a.bx == b.bx && a.by == b.by && a.z0 == b.z0 && a.z1 == b.z1 &&
+                    matA.name == matB.name && matA.alpha == matB.alpha && matA.tau == matB.tau &&
+                    matA.scatter == matB.scatter && matA.scatterHf == matB.scatterHf && matA.cls == matB.cls;
+    }
+    check(sameWalls && openCorners(reloaded) == 0,
+          "F1 .verbroom round trip preserves wall endpoints, heights and materials");
+    const auto replay = impulse(restored.p);
+    const double differenceDb = 10.0 * std::log10(replay.energy / original.energy);
+    std::printf("    F1 impulse (2 s, 48 kHz): energy %.9g -> %.9g, peak %.9g -> %.9g, delta %.9g dB\n",
+                original.energy, replay.energy, original.peak, replay.peak, differenceDb);
+    check(replay.finite && replay.energy > 1e-6 && std::abs(differenceDb) <= 0.0001,
+          "F1 reloaded render is finite, non-silent and within 0.0001 dB of the original");
+}
+
+static void testSourceFormatImpulse() {
+    Rig r(64);
+    const auto room = verbp::vslGrandHall(false);
+    r.p.loadRoomWithSetup(juce::String(room.text), juce::String(room.name), room.setup, room.micPattern);
+    if (!waitReady(r.p, 90)) {
+        check(false, "F5 VSL Grand Hall loads");
+        return;
+    }
+    const auto before = r.p.getSources();
+    check(before.size() == 32 && before.back().firstIn == 62, "F5 VSL starts with 32 stereo pairs");
+    const auto commands = juce::JSON::parse(juce::File("f5-format-commands.json").loadFileAsString());
+    if (!commands.isArray() || commands.size() != 32) {
+        check(false, "F5 JavaScript format plan must supply 32 commands");
+        return;
+    }
+    bool applied = r.send(R"({"op":"transaction.begin","label":"All formats"})", nullptr, "f5-format").ok;
+    for (const auto& command : *commands.getArray())
+        applied &= r.send(juce::JSON::toString(command, true).toStdString(), nullptr, "f5-format").ok;
+    applied &= r.send(R"({"op":"transaction.commit"})", nullptr, "f5-format").ok;
+    const auto isPackedMono = [](const std::vector<verbp::SourceCfg>& sources) {
+        if (sources.size() != 32) return false;
+        for (size_t i = 0; i < sources.size(); ++i)
+            if (sources[i].format != 0 || sources[i].effectiveChannels() != 1 || sources[i].firstIn != (int)i) return false;
+        return true;
+    };
+    check(applied && isPackedMono(r.p.getSources()), "F5 one transaction packs 32 mono sources on inputs 1–32");
+    check(r.session().undoDepth() == 1 && r.session().undo().ok && r.p.getSources().back().firstIn == 62 &&
+          r.p.getSources().back().format == 1 && !r.session().canUndo(), "F5 one undo restores stereo routing");
+    check(r.session().redo().ok && isPackedMono(r.p.getSources()), "F5 redo restores mono routing");
+    check(r.send(R"({"op":"transaction.begin","label":"Overflow probe"})", nullptr, "f5-overflow").ok &&
+          r.send(R"({"op":"source.setConfig","index":0,"name":"Temporary"})", nullptr, "f5-overflow").ok &&
+          r.send(R"({"op":"source.setConfig","index":1,"format":1,"firstIn":63})", nullptr, "f5-overflow").code == "budgetExceeded" &&
+          r.send(R"({"op":"transaction.cancel"})", nullptr, "f5-overflow").ok &&
+          r.p.getSources()[0].name == before[0].name && isPackedMono(r.p.getSources()) &&
+          r.session().undoDepth() == 1, "F5 budgetExceeded followed by cancel restores the entire edit");
+
+    if (!waitForImpulseRoom(r.p)) {
+        check(false, "F5 edited hall settles");
+        return;
+    }
+    const auto preset = r.p.getRoomPresetText();
+    const auto file = juce::File("F5_VSL_Grand_Hall_Mono.verbroom");
+    check(file.replaceWithText(preset), "F5 exports the real processor preset");
+    Rig restored(64);
+    restored.p.setKeepRoutingEnabled(false);
+    juce::String error;
+    if (!restored.p.loadRoomPresetText(file.loadFileAsString(), error) || !waitForImpulseRoom(restored.p)) {
+        check(false, "F5 edited hall reloads and settles: " + error.toStdString());
+        return;
+    }
+    check(isPackedMono(restored.p.getSources()) && restored.p.numPoints() == 32, "F5 reload has 32 points and no overlapping routes");
+    for (int input : {0, 31}) {
+        std::vector<float> originalSamples, replaySamples;
+        const auto original = impulse(r.p, input, &originalSamples), replay = impulse(restored.p, input, &replaySamples);
+        const double deltaDb = 10.0 * std::log10(replay.energy / original.energy);
+        double maxDelta = 0;
+        for (size_t i = 0; i < originalSamples.size(); ++i)
+            maxDelta = std::max(maxDelta, std::abs((double)originalSamples[i] - replaySamples[i]));
+        std::printf("    F5 input %d: energy %.9g -> %.9g, peak %.9g -> %.9g, delta %.9g dB, max sample delta %.9g\n",
+                    input + 1, original.energy, replay.energy, original.peak, replay.peak, deltaDb, maxDelta);
+        check(original.finite && replay.finite && original.energy > 1e-8 && std::abs(deltaDb) <= 0.001 && maxDelta <= 1e-6,
+              "F5 finite non-silent impulse is consistent after reload on input " + std::to_string(input + 1));
+    }
+}
+
+static void testSourceSumAndFreePoints() {
+    Rig r;
+    if (!r.load(boxText(5, 4, 3))) {
+        check(false, "F5 Sum test room loads");
+        return;
+    }
+    check(r.send(R"({"op":"source.setConfig","index":0,"format":1,"freePoints":true})").ok &&
+          r.send(R"({"op":"source.setPointOffset","index":0,"channel":0,"offsetM":[0.25,0.5,0.1]})").ok,
+          "F5 set a free point on an unsummed stereo source");
+    const auto free = r.p.getSources()[0];
+    check(r.send(R"({"op":"source.setConfig","index":0,"sum":true})").ok, "F5 Sum accepts an existing free-point layout");
+    const auto summed = r.p.getSources();
+    check(summed[0].sum && summed[0].freePoints && summed[0].ox == free.ox && summed[0].oy == free.oy
+          && summed[0].oz == free.oz && verbp::buildPoints(summed)[0].channel == -1,
+          "F5 Sum uses one point and preserves the free offsets");
+    check(r.send(R"({"op":"source.setConfig","index":0,"freePoints":false})").ok &&
+          r.send(R"({"op":"source.setConfig","index":0,"freePoints":true})").ok &&
+          r.p.getSources()[0].sum && r.p.getSources()[0].freePoints && r.p.getSources()[0].ox.size() == 2,
+          "F5 enabling Free pts under Sum preserves Sum and prepares both offsets");
+    check(r.send(R"({"op":"source.setConfig","index":0,"sum":false})").ok &&
+          r.p.getSources()[0].freePoints && verbp::buildPoints(r.p.getSources())[0].channel == 0,
+          "F5 switching Sum off makes free points active again");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     juce::ScopedJuceInitialiser_GUI init;
     const auto t0 = std::chrono::steady_clock::now();
     try {
-        testA2MinDist();
+        if (std::getenv("VERB_ONLY_F6")) {
+            testReleasePresetImpulse("Default", {}, 2);
+            testReleasePresetImpulse("VSL-Grand-Hall", "presets/VSL_Grand_Hall_Audience.verbroom", 64);
+            std::printf("\nF6: %d PASS, %d FAIL\n", passes, fails);
+            return fails ? 1 : 0;
+        }
         schemas.load(juce::File("web-ui/schema"));
+        if (std::getenv("VERB_ONLY_F5")) {
+            testSourceFormatImpulse();
+            testSourceSumAndFreePoints();
+            std::printf("\nF5: %d PASS, %d FAIL\n", passes, fails);
+            return fails ? 1 : 0;
+        }
+        testA2MinDist();
         Rig r;
         const auto ta = std::chrono::steady_clock::now();
         testA1EditDuringLoad(r.p);
@@ -917,6 +1238,8 @@ int main() {
         timed("B8", testEditorLifetimeAndLoads);
         timed("B9", testSchemasAndFixtures);
         timed("C1", testC1SourceColors);
+        timed("F1 translation", testWallTranslation);
+        timed("F1 preset impulse", testWallPresetImpulse);
     } catch (const std::exception& e) { std::printf("  [FAIL] unexpected exception: %s\n", e.what()); ++fails; }
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("\neditor_commands: %d PASS, %d FAIL, %.1f s\n", passes, fails, sec);

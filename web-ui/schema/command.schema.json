@@ -63,6 +63,10 @@
         },
         "includeGroups": {
           "type": "boolean"
+        },
+        "autoLink": {
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -71,7 +75,7 @@
         "refs",
         "deltaM"
       ],
-      "description": "Delta is relative to the transaction start snapshot, never accumulated."
+      "description": "Delta is relative to the transaction start snapshot, never accumulated. With autoLink, eligible adjacent wall endpoints within 0.0001 m in that snapshot follow the XY delta."
     },
     "SurfaceMoveVertex": {
       "type": "object",

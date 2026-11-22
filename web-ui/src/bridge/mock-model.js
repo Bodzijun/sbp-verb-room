@@ -1,5 +1,5 @@
 import { clone } from './contract.js';
-import { budget, channels, surface, surfaceRefs, layerKey } from '../state/selectors.js';
+import { budget, channels, surface, surfaceRefs, layerKey, translatedWallLinks, WALL_CORNER_TOLERANCE } from '../state/selectors.js';
 import { layoutOffset } from '../viewport/transducers.js';
 import { normalizeSourceColor } from '../viewport/colour.js';
 export function reject(code, message) { throw Object.assign(new Error(message), { code }); }
@@ -74,16 +74,29 @@ export function applyMutation(state, command, original = state, presetMaterials 
   }
   const assignMaterial = (r, index) => { if (['floor', 'ceiling'].includes(r.kind)) s[`${r.kind}Material`] = index; else surface(s, r).material = index; };
   const objects = refs.map(r => surface(s, r));
-  if (op === 'surface.translate') refs.forEach(r => {
-    const obj = surface(s, r), initial = surface(original.document.scene, r), delta = command.deltaM;
-    if (!initial || !['wall', 'floorZone', 'ceilingZone'].includes(r.kind)) reject('invalid', 'Base floor / ceiling cannot move');
-    if (r.kind === 'wall') { obj.a = initial.a.map((v, i) => v + delta[i]); obj.b = initial.b.map((v, i) => v + delta[i]); }
-    else obj.vertices = initial.vertices.map(p => p.map((v, i) => v + delta[i]));
-    if (delta[2]) {
-      if (r.kind === 'wall') { obj.zBottomM = initial.zBottomM + delta[2]; obj.zTopM = (initial.zTopM ?? s.heightM) + delta[2]; }
-      else if (initial.heightM !== null) obj.heightM = initial.heightM + delta[2];
+  if (op === 'surface.translate') {
+    const start = original.document.scene, delta = command.deltaM;
+    const moveXY = point => point.map((v, i) => v + delta[i]);
+    refs.forEach(r => {
+      const obj = surface(s, r), initial = surface(start, r);
+      if (!initial || !['wall', 'floorZone', 'ceilingZone'].includes(r.kind)) reject('invalid', 'Base floor / ceiling cannot move');
+      if (r.kind === 'wall') { obj.a = moveXY(initial.a); obj.b = moveXY(initial.b); }
+      else obj.vertices = initial.vertices.map(moveXY);
+      if (delta[2]) {
+        if (r.kind === 'wall') { obj.zBottomM = initial.zBottomM + delta[2]; obj.zTopM = (initial.zTopM ?? s.heightM) + delta[2]; }
+        else if (initial.heightM !== null) obj.heightM = initial.heightM + delta[2];
+      }
+    });
+    if (command.autoLink === true && (delta[0] || delta[1])) {
+      const mode = original.document.editorFlags.layerModes?.walls || d.editorFlags.layerModes?.walls;
+      for (const [index, ends] of translatedWallLinks(start, refs, mode)) {
+        const wall = s.walls[index];
+        if (!wall || wall.editor.hidden || wall.editor.locked) continue;
+        for (const end of ends) wall[end] = moveXY(start.walls[index][end]);
+        if (distance(wall.a, wall.b) < WALL_CORNER_TOLERANCE) reject('invalid', 'the move would make a wall of zero length');
+      }
     }
-  });
+  }
   else if (op === 'surface.moveVertex') {
     const obj = surface(s, command.ref), points = obj.vertices || [obj.a, obj.b], old = points[command.vertex];
     if (!old) reject('invalid', 'Vertex does not exist');
@@ -171,7 +184,10 @@ export function applyMutation(state, command, original = state, presetMaterials 
         if (norm === '') delete source.color;
         else source.color = norm;
       }
-      if (freeze) source.offsetsM = Array.from({ length: channels(source) }, (_, channel) => layoutOffset(source, channel));
+      if (source.freePoints && (freeze || source.offsetsM.length !== channels(source))) {
+        const layout = { ...source, sum: false };
+        source.offsetsM = Array.from({ length: channels(source) }, (_, channel) => layoutOffset(layout, channel));
+      }
     }
     else if (op === 'source.setPattern') source.pattern = command.pattern;
     else if (op === 'source.setSpread') source.spreadM = command.spreadM;
