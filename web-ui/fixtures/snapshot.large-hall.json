@@ -1,0 +1,1862 @@
+{
+  "fixtureMeta": {
+    "title": "Large multi-source hall: built-in 'VSL Grand hall - audience (32 stereo groups)': 32 stereo Sum groups on 64 inputs, 16 walls, 8 plates (cap)",
+    "valueSources": {
+      "document.scene.walls/zones": "derived-by-hand",
+      "document.scene.materials": "derived-by-hand",
+      "document.sources": "derived-by-hand",
+      "parameters.values.s*/l*": "derived-by-hand",
+      "limits-related counts (32 sources, 32 points, 64 inputs, 8 plates)": "code",
+      "load.status": "derived-by-hand",
+      "host": "protocol-example",
+      "revision/sceneSerial/loadSerial": "protocol-example"
+    },
+    "notes": [
+      "Geometry from RoomLibrary.h:441-490 and orchestraRoom():277-346: outline + (17,34) because orchestraRoom shifts (+14,+34) and the final listenerUp shift adds +3 in x.",
+      "Material order follows compactMaterials() first-use order (walls, floor, ceiling, floor zones, ceiling zones); zone materials added by vslGrandHall() are separate copies (10 materials).",
+      "Source z = stageH + riserStep*riser + up; Sum=true, spread 0, pattern 0.3 (RoomLibrary.h:309-325,483-485).",
+      "Plates counted: 6 floor + 2 ceiling = 8 = kMaxPlates (scene.hpp:175): the 9th would silently become a patch."
+    ],
+    "unverified": [
+      "all coordinates/material copies: reconstructed by hand, builtinRooms() was not executed",
+      "host input/output channel counts assumed 64/2 (VSL setup needs 64 available inputs)",
+      "sanitizeScene()/serialize precision effects not applied"
+    ]
+  },
+  "messages": [
+    {
+      "schemaVersion": 1,
+      "sessionId": "editor-1",
+      "kind": "snapshot",
+      "payload": {
+        "revision": "1",
+        "loadSerial": "1",
+        "sceneSerial": "1",
+        "capabilities": {
+          "contractVersion": 1,
+          "pluginVersion": "0.2.2",
+          "engine": {
+            "erOrder": 1,
+            "maxWallsForOrder": 128
+          },
+          "features": {
+            "mode.physicalCreative": {
+              "available": true,
+              "status": "available"
+            },
+            "absorption.scale": {
+              "available": true,
+              "status": "available"
+            },
+            "decay.bandMultipliers": {
+              "available": true,
+              "status": "available"
+            },
+            "rt60.target": {
+              "available": true,
+              "status": "available"
+            },
+            "rt60.estimate": {
+              "available": true,
+              "status": "available"
+            },
+            "tail.quality": {
+              "available": true,
+              "status": "available"
+            },
+            "tail.diagnostics": {
+              "available": true,
+              "status": "available"
+            },
+            "energy.map": {
+              "available": true,
+              "status": "available"
+            },
+            "energy.components": {
+              "available": true,
+              "status": "available"
+            },
+            "energy.planSlice": {
+              "available": true,
+              "status": "available"
+            },
+            "energy.sliceFrontSide": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "needs-new-analysis-function"
+            },
+            "ir.export": {
+              "available": true,
+              "status": "available"
+            },
+            "ir.exportCancel": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-public-api"
+            },
+            "ir.exportProgressCounters": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "message-text-only"
+            },
+            "presets.verbroom": {
+              "available": true,
+              "status": "available"
+            },
+            "presets.txt": {
+              "available": true,
+              "status": "available"
+            },
+            "presets.keepIO": {
+              "available": true,
+              "status": "available"
+            },
+            "library.user": {
+              "available": true,
+              "status": "available"
+            },
+            "history.undo": {
+              "available": true,
+              "status": "partial",
+              "reasonCode": "scene-snapshot-only"
+            },
+            "history.redo": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-native-redo"
+            },
+            "surface.groups": {
+              "available": true,
+              "status": "available"
+            },
+            "surface.perSurfaceLockHide": {
+              "available": true,
+              "status": "available"
+            },
+            "editor.layerModesPersist": {
+              "available": false,
+              "status": "planned",
+              "reasonCode": "pending-implementation"
+            },
+            "editor.viewStateSession": {
+              "available": false,
+              "status": "planned",
+              "reasonCode": "pending-implementation"
+            },
+            "surface.classEdit": {
+              "available": false,
+              "status": "readOnly",
+              "reasonCode": "owner-decision-read-only"
+            },
+            "room.scaleOnce": {
+              "available": true,
+              "status": "partial",
+              "reasonCode": "zones-not-scaled"
+            },
+            "room.diffraction": {
+              "available": true,
+              "status": "available"
+            },
+            "room.clutter": {
+              "available": true,
+              "status": "available"
+            },
+            "room.clutterMinDist": {
+              "available": false,
+              "status": "readOnly",
+              "reasonCode": "not-persisted-in-text-format"
+            },
+            "room.roughness": {
+              "available": true,
+              "status": "available"
+            },
+            "sources.freePoints": {
+              "available": true,
+              "status": "available"
+            },
+            "output.layouts": {
+              "available": true,
+              "status": "available"
+            },
+            "output.micPatterns": {
+              "available": true,
+              "status": "available"
+            },
+            "output.ringIndependentCount": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "ring-count-follows-host"
+            },
+            "output.meters": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-output-meters-in-dsp"
+            },
+            "input.meters": {
+              "available": true,
+              "status": "available"
+            },
+            "reflections.paths": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-public-path-api"
+            },
+            "size.continuous": {
+              "available": true,
+              "status": "available"
+            },
+            "predelay": {
+              "available": true,
+              "status": "available"
+            },
+            "stereoWidth": {
+              "available": true,
+              "status": "available"
+            },
+            "freeze": {
+              "available": true,
+              "status": "available"
+            },
+            "duck": {
+              "available": true,
+              "status": "available"
+            },
+            "binaural": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "ambix": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "hybridFdn": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "lfRoomModes": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "velvetTransition": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "instrumentDirectivity": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "ab.compare": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "pending-implementation"
+            },
+            "ab.persistInProject": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "owner-decision-5"
+            },
+            "colours.material": {
+              "available": true,
+              "status": "partial",
+              "reasonCode": "local-preferences-only"
+            },
+            "colours.source": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-persistence-defined"
+            }
+          },
+          "contractMinor": 2
+        },
+        "limits": {
+          "maxWalls": 128,
+          "maxFloorZones": 32,
+          "maxCeilingZones": 32,
+          "maxZoneVertices": 64,
+          "minZoneVertices": 3,
+          "maxPlates": 8,
+          "maxSources": 32,
+          "maxPoints": 64,
+          "maxInputs": 64,
+          "maxOutputs": 16,
+          "maxSourceChannels": 16,
+          "maxNameLength": 128,
+          "maxControlPayloadBytes": 1048576,
+          "maxDragPayloadBytes": 16384,
+          "maxClutterUi": 80,
+          "maxViewStateBytes": 4096
+        },
+        "parameters": {
+          "descriptors": null,
+          "values": {
+            "s1x": 9.2,
+            "s1y": 36.3,
+            "s1z": 2.35,
+            "s1az": -90.0,
+            "s1g": 0.0,
+            "s2x": 13.2,
+            "s2y": 37.0,
+            "s2z": 2.35,
+            "s2az": -90.0,
+            "s2g": 0.0,
+            "s3x": 17.8,
+            "s3y": 37.2,
+            "s3z": 2.3,
+            "s3az": -90.0,
+            "s3g": 0.0,
+            "s4x": 22.2,
+            "s4y": 36.6,
+            "s4z": 1.9,
+            "s4az": -90.0,
+            "s4g": 0.0,
+            "s5x": 26.8,
+            "s5y": 39.4,
+            "s5z": 2.2,
+            "s5az": -90.0,
+            "s5g": 0.0,
+            "s6x": 17.0,
+            "s6y": 35.2,
+            "s6z": 2.4,
+            "s6az": -90.0,
+            "s6g": 0.0,
+            "s7x": 6.199999999999999,
+            "s7y": 38.1,
+            "s7z": 2.0,
+            "s7az": -90.0,
+            "s7g": 0.0,
+            "s8x": 5.5,
+            "s8y": 39.4,
+            "s8z": 2.0,
+            "s8az": -90.0,
+            "s8g": 0.0,
+            "s9x": 11.6,
+            "s9y": 42.0,
+            "s9z": 2.8,
+            "s9az": -90.0,
+            "s9g": 0.0,
+            "s10x": 11.5,
+            "s10y": 40.8,
+            "s10z": 2.8,
+            "s10az": -90.0,
+            "s10g": 0.0,
+            "s11x": 13.2,
+            "s11y": 40.8,
+            "s11z": 2.8,
+            "s11az": -90.0,
+            "s11g": 0.0,
+            "s12x": 15.0,
+            "s12y": 40.8,
+            "s12z": 2.7,
+            "s12az": -90.0,
+            "s12g": 0.0,
+            "s13x": 16.7,
+            "s13y": 40.8,
+            "s13z": 2.7,
+            "s13az": -90.0,
+            "s13g": 0.0,
+            "s14x": 18.4,
+            "s14y": 41.6,
+            "s14z": 2.65,
+            "s14az": -90.0,
+            "s14g": 0.0,
+            "s15x": 17.0,
+            "s15y": 42.2,
+            "s15z": 2.6,
+            "s15az": -90.0,
+            "s15g": 0.0,
+            "s16x": 18.7,
+            "s16y": 42.2,
+            "s16z": 2.6,
+            "s16az": -90.0,
+            "s16g": 0.0,
+            "s17x": 20.4,
+            "s17y": 42.2,
+            "s17z": 2.6,
+            "s17az": -90.0,
+            "s17g": 0.0,
+            "s18x": 20.2,
+            "s18y": 40.8,
+            "s18z": 2.65,
+            "s18az": -90.0,
+            "s18g": 0.0,
+            "s19x": 21.8,
+            "s19y": 40.8,
+            "s19z": 2.65,
+            "s19az": -90.0,
+            "s19g": 0.0,
+            "s20x": 22.2,
+            "s20y": 42.3,
+            "s20z": 2.65,
+            "s20az": -90.0,
+            "s20g": 0.0,
+            "s21x": 9.7,
+            "s21y": 43.4,
+            "s21z": 2.9,
+            "s21az": -90.0,
+            "s21g": 0.0,
+            "s22x": 12.1,
+            "s22y": 43.6,
+            "s22z": 2.9,
+            "s22az": -90.0,
+            "s22g": 0.0,
+            "s23x": 15.1,
+            "s23y": 43.7,
+            "s23z": 3.15,
+            "s23az": -90.0,
+            "s23g": 0.0,
+            "s24x": 17.2,
+            "s24y": 43.7,
+            "s24z": 3.15,
+            "s24az": -90.0,
+            "s24g": 0.0,
+            "s25x": 20.0,
+            "s25y": 43.9,
+            "s25z": 3.05,
+            "s25az": -90.0,
+            "s25g": 0.0,
+            "s26x": 22.5,
+            "s26y": 44.0,
+            "s26z": 3.05,
+            "s26az": -90.0,
+            "s26g": 0.0,
+            "s27x": 24.8,
+            "s27y": 44.1,
+            "s27z": 2.8,
+            "s27az": -90.0,
+            "s27g": 0.0,
+            "s28x": 13.0,
+            "s28y": 46.4,
+            "s28z": 3.0,
+            "s28az": -90.0,
+            "s28g": 0.0,
+            "s29x": 17.3,
+            "s29y": 46.6,
+            "s29z": 3.05,
+            "s29az": -90.0,
+            "s29g": 0.0,
+            "s30x": 21.5,
+            "s30y": 46.5,
+            "s30z": 3.35,
+            "s30az": -90.0,
+            "s30g": 0.0,
+            "s31x": 25.2,
+            "s31y": 46.3,
+            "s31z": 3.05,
+            "s31az": -90.0,
+            "s31g": 0.0,
+            "s32x": 6.5,
+            "s32y": 36.3,
+            "s32z": 2.1,
+            "s32az": -90.0,
+            "s32g": 0.0,
+            "lx": 17.0,
+            "ly": 20.0,
+            "lz": 1.2,
+            "laz": 90.0,
+            "gain": 0.0,
+            "early": 0.0,
+            "diffusion": 0.5,
+            "doppler": 1.0,
+            "tail": 0.0,
+            "mix": 100.0,
+            "spatialDry": 1,
+            "soloDirect": 0,
+            "soloEarly": 0,
+            "soloTail": 0,
+            "s1mute": 0,
+            "s1solo": 0,
+            "s2mute": 0,
+            "s2solo": 0,
+            "s3mute": 0,
+            "s3solo": 0,
+            "s4mute": 0,
+            "s4solo": 0,
+            "s5mute": 0,
+            "s5solo": 0,
+            "s6mute": 0,
+            "s6solo": 0,
+            "s7mute": 0,
+            "s7solo": 0,
+            "s8mute": 0,
+            "s8solo": 0,
+            "s9mute": 0,
+            "s9solo": 0,
+            "s10mute": 0,
+            "s10solo": 0,
+            "s11mute": 0,
+            "s11solo": 0,
+            "s12mute": 0,
+            "s12solo": 0,
+            "s13mute": 0,
+            "s13solo": 0,
+            "s14mute": 0,
+            "s14solo": 0,
+            "s15mute": 0,
+            "s15solo": 0,
+            "s16mute": 0,
+            "s16solo": 0,
+            "s17mute": 0,
+            "s17solo": 0,
+            "s18mute": 0,
+            "s18solo": 0,
+            "s19mute": 0,
+            "s19solo": 0,
+            "s20mute": 0,
+            "s20solo": 0,
+            "s21mute": 0,
+            "s21solo": 0,
+            "s22mute": 0,
+            "s22solo": 0,
+            "s23mute": 0,
+            "s23solo": 0,
+            "s24mute": 0,
+            "s24solo": 0,
+            "s25mute": 0,
+            "s25solo": 0,
+            "s26mute": 0,
+            "s26solo": 0,
+            "s27mute": 0,
+            "s27solo": 0,
+            "s28mute": 0,
+            "s28solo": 0,
+            "s29mute": 0,
+            "s29solo": 0,
+            "s30mute": 0,
+            "s30solo": 0,
+            "s31mute": 0,
+            "s31solo": 0,
+            "s32mute": 0,
+            "s32solo": 0,
+            "mode": 0,
+            "absorption": 1.0,
+            "decayLow": 1.0,
+            "decayMid": 1.0,
+            "decayHigh": 1.0,
+            "size": 100,
+            "predelay": 0,
+            "stereoWidth": 100,
+            "freeze": 0,
+            "duck": 0,
+            "duckRelease": 300,
+            "makeup": 0
+          },
+          "effective": {
+            "mode": "physical",
+            "earlyDb": 0.0,
+            "tailDb": 0.0,
+            "doppler": 1.0,
+            "decay": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "diffusion": 0.5,
+            "absorption": {
+              "requested": 1.0,
+              "tailCurrent": true
+            },
+            "mixEffective": {
+              "ignored": false,
+              "reason": "none"
+            },
+            "sizePercent": 100,
+            "sizeRequested": 100,
+            "predelayMs": 0,
+            "stereoWidthPercent": 100,
+            "freeze": false,
+            "duckDb": 0,
+            "duckReleaseMs": 300,
+            "duckReductionDb": 0,
+            "widthAvailable": true,
+            "lockReason": "Locked in Physical: switch to Creative; stored values are preserved"
+          },
+          "texts": {
+            "makeup": "0.000"
+          }
+        },
+        "document": {
+          "sceneName": "VSL Grand hall - audience (32 stereo groups).txt",
+          "scene": {
+            "heightM": 18.5,
+            "tempC": 20.0,
+            "humidityPct": 50.0,
+            "floorMaterial": 2,
+            "ceilingMaterial": 3,
+            "materials": [
+              {
+                "name": "Rear_absorbing_wall",
+                "classId": 4,
+                "alpha": [
+                  0.14,
+                  0.35,
+                  0.55,
+                  0.72,
+                  0.7,
+                  0.65,
+                  0.6
+                ],
+                "tau": [
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scatterLF": 0.2,
+                "scatterHF": 0.6
+              },
+              {
+                "name": "Faceted_oak_wall",
+                "classId": 2,
+                "alpha": [
+                  0.15,
+                  0.11,
+                  0.1,
+                  0.07,
+                  0.06,
+                  0.07,
+                  0.07
+                ],
+                "tau": [
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scatterLF": 0.3,
+                "scatterHF": 0.75
+              },
+              {
+                "name": "Parquet_floor",
+                "classId": 2,
+                "alpha": [
+                  0.15,
+                  0.11,
+                  0.1,
+                  0.07,
+                  0.06,
+                  0.07,
+                  0.07
+                ],
+                "tau": [
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scatterLF": 0.05,
+                "scatterHF": 0.3
+              },
+              {
+                "name": "Plaster",
+                "classId": 0,
+                "alpha": [
+                  0.02,
+                  0.03,
+                  0.04,
+                  0.05,
+                  0.06,
+                  0.07,
+                  0.08
+                ],
+                "tau": [
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scatterLF": 0.05,
+                "scatterHF": 0.4
+              },
+              {
+                "name": "Audience_seated",
+                "classId": 4,
+                "alpha": [
+                  0.3,
+                  0.45,
+                  0.6,
+                  0.748811356849042,
+                  0.800473768503112,
+                  0.800473768503112,
+                  0.8
+                ],
+                "tau": [
+                  0.5011872336272722,
+                  0.3981071705534972,
+                  0.31622776601683794,
+                  0.251188643150958,
+                  0.19952623149688797,
+                  0.19952623149688797,
+                  0.19952623149688797
+                ],
+                "scatterLF": 0.5,
+                "scatterHF": 0.8
+              },
+              {
+                "name": "Audience_seated",
+                "classId": 4,
+                "alpha": [
+                  0.3,
+                  0.45,
+                  0.6,
+                  0.748811356849042,
+                  0.800473768503112,
+                  0.800473768503112,
+                  0.8
+                ],
+                "tau": [
+                  0.5011872336272722,
+                  0.3981071705534972,
+                  0.31622776601683794,
+                  0.251188643150958,
+                  0.19952623149688797,
+                  0.19952623149688797,
+                  0.19952623149688797
+                ],
+                "scatterLF": 0.5,
+                "scatterHF": 0.8
+              },
+              {
+                "name": "Audience_seated",
+                "classId": 4,
+                "alpha": [
+                  0.3,
+                  0.45,
+                  0.6,
+                  0.748811356849042,
+                  0.800473768503112,
+                  0.800473768503112,
+                  0.8
+                ],
+                "tau": [
+                  0.5011872336272722,
+                  0.3981071705534972,
+                  0.31622776601683794,
+                  0.251188643150958,
+                  0.19952623149688797,
+                  0.19952623149688797,
+                  0.19952623149688797
+                ],
+                "scatterLF": 0.5,
+                "scatterHF": 0.8
+              },
+              {
+                "name": "Audience_seated",
+                "classId": 4,
+                "alpha": [
+                  0.3,
+                  0.45,
+                  0.6,
+                  0.748811356849042,
+                  0.800473768503112,
+                  0.800473768503112,
+                  0.8
+                ],
+                "tau": [
+                  0.5011872336272722,
+                  0.3981071705534972,
+                  0.31622776601683794,
+                  0.251188643150958,
+                  0.19952623149688797,
+                  0.19952623149688797,
+                  0.19952623149688797
+                ],
+                "scatterLF": 0.5,
+                "scatterHF": 0.8
+              },
+              {
+                "name": "Wood_panel",
+                "classId": 2,
+                "alpha": [
+                  0.15,
+                  0.11,
+                  0.1,
+                  0.07,
+                  0.06,
+                  0.07,
+                  0.07
+                ],
+                "tau": [
+                  0.039810717055349734,
+                  0.0199526231496888,
+                  0.01,
+                  0.005011872336272725,
+                  0.0025118864315095794,
+                  0.001584893192461114,
+                  0.001
+                ],
+                "scatterLF": 0.1,
+                "scatterHF": 0.4
+              },
+              {
+                "name": "Wood_panel",
+                "classId": 2,
+                "alpha": [
+                  0.15,
+                  0.11,
+                  0.1,
+                  0.07,
+                  0.06,
+                  0.07,
+                  0.07
+                ],
+                "tau": [
+                  0.039810717055349734,
+                  0.0199526231496888,
+                  0.01,
+                  0.005011872336272725,
+                  0.0025118864315095794,
+                  0.001584893192461114,
+                  0.001
+                ],
+                "scatterLF": 0.1,
+                "scatterHF": 0.4
+              }
+            ],
+            "walls": [
+              {
+                "a": [
+                  9.0,
+                  0.0
+                ],
+                "b": [
+                  24.2,
+                  0.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 0,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  24.2,
+                  0.0
+                ],
+                "b": [
+                  30.4,
+                  5.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 0,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  30.4,
+                  5.0
+                ],
+                "b": [
+                  33.0,
+                  13.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  33.0,
+                  13.0
+                ],
+                "b": [
+                  32.2,
+                  22.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  32.2,
+                  22.0
+                ],
+                "b": [
+                  30.8,
+                  30.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  30.8,
+                  30.0
+                ],
+                "b": [
+                  31.0,
+                  34.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  31.0,
+                  34.0
+                ],
+                "b": [
+                  31.0,
+                  48.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  31.0,
+                  48.0
+                ],
+                "b": [
+                  26.0,
+                  51.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  26.0,
+                  51.0
+                ],
+                "b": [
+                  7.0,
+                  51.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  7.0,
+                  51.0
+                ],
+                "b": [
+                  3.0,
+                  48.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  3.0,
+                  48.0
+                ],
+                "b": [
+                  3.0,
+                  34.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  3.0,
+                  34.0
+                ],
+                "b": [
+                  2.0,
+                  28.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  2.0,
+                  28.0
+                ],
+                "b": [
+                  0.0,
+                  19.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  0.0,
+                  19.0
+                ],
+                "b": [
+                  1.0,
+                  10.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  1.0,
+                  10.0
+                ],
+                "b": [
+                  4.5,
+                  4.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 1,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  4.5,
+                  4.0
+                ],
+                "b": [
+                  9.0,
+                  0.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 0,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              }
+            ],
+            "floorZones": [
+              {
+                "vertices": [
+                  [
+                    7.0,
+                    6.5
+                  ],
+                  [
+                    27.0,
+                    6.5
+                  ],
+                  [
+                    27.0,
+                    32.0
+                  ],
+                  [
+                    7.0,
+                    32.0
+                  ]
+                ],
+                "heightM": null,
+                "material": 4,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "vertices": [
+                  [
+                    3.0,
+                    34.0
+                  ],
+                  [
+                    31.0,
+                    34.0
+                  ],
+                  [
+                    31.0,
+                    48.0
+                  ],
+                  [
+                    3.0,
+                    48.0
+                  ]
+                ],
+                "heightM": 1.0,
+                "material": 2,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "vertices": [
+                  [
+                    4.0,
+                    40.3
+                  ],
+                  [
+                    30.0,
+                    40.3
+                  ],
+                  [
+                    30.0,
+                    47.8
+                  ],
+                  [
+                    4.0,
+                    47.8
+                  ]
+                ],
+                "heightM": 1.35,
+                "material": 2,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "vertices": [
+                  [
+                    4.0,
+                    42.9
+                  ],
+                  [
+                    30.0,
+                    42.9
+                  ],
+                  [
+                    30.0,
+                    47.8
+                  ],
+                  [
+                    4.0,
+                    47.8
+                  ]
+                ],
+                "heightM": 1.7,
+                "material": 2,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "vertices": [
+                  [
+                    4.0,
+                    45.7
+                  ],
+                  [
+                    30.0,
+                    45.7
+                  ],
+                  [
+                    30.0,
+                    47.8
+                  ],
+                  [
+                    4.0,
+                    47.8
+                  ]
+                ],
+                "heightM": 2.05,
+                "material": 2,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "vertices": [
+                  [
+                    9.0,
+                    1.2000000000000028
+                  ],
+                  [
+                    23.8,
+                    1.2000000000000028
+                  ],
+                  [
+                    27.0,
+                    6.0
+                  ],
+                  [
+                    7.0,
+                    6.0
+                  ]
+                ],
+                "heightM": null,
+                "material": 5,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "vertices": [
+                  [
+                    2.8000000000000007,
+                    12.0
+                  ],
+                  [
+                    5.5,
+                    10.0
+                  ],
+                  [
+                    6.199999999999999,
+                    25.0
+                  ],
+                  [
+                    2.5,
+                    24.0
+                  ]
+                ],
+                "heightM": 3.6,
+                "material": 6,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "vertices": [
+                  [
+                    28.2,
+                    11.0
+                  ],
+                  [
+                    31.3,
+                    13.0
+                  ],
+                  [
+                    30.4,
+                    27.0
+                  ],
+                  [
+                    27.8,
+                    25.0
+                  ]
+                ],
+                "heightM": 4.2,
+                "material": 7,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              }
+            ],
+            "ceilingZones": [
+              {
+                "vertices": [
+                  [
+                    4.5,
+                    34.5
+                  ],
+                  [
+                    29.5,
+                    34.5
+                  ],
+                  [
+                    29.5,
+                    47.7
+                  ],
+                  [
+                    4.5,
+                    47.7
+                  ]
+                ],
+                "heightM": 11.5,
+                "material": 8,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "vertices": [
+                  [
+                    9.0,
+                    25.0
+                  ],
+                  [
+                    25.0,
+                    26.0
+                  ],
+                  [
+                    24.0,
+                    32.0
+                  ],
+                  [
+                    10.0,
+                    32.0
+                  ]
+                ],
+                "heightM": 10.6,
+                "material": 9,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              }
+            ],
+            "floorEditor": {
+              "name": "",
+              "group": "",
+              "hidden": false,
+              "locked": false
+            },
+            "ceilingEditor": {
+              "name": "",
+              "group": "",
+              "hidden": false,
+              "locked": false
+            },
+            "clutter": {
+              "count": 0,
+              "minLenM": 0.4,
+              "maxLenM": 1.6,
+              "minHeightM": 0.5,
+              "maxHeightM": 1.8,
+              "tlMinDb": 2.0,
+              "tlMaxDb": 10.0,
+              "minDistM": 0.5,
+              "seed": 1
+            },
+            "roughness": 0.0,
+            "roughSeed": 1,
+            "diffraction": true,
+            "preserved": {
+              "sr": 48000.0,
+              "lengthS": 3.2,
+              "order": 2,
+              "rays": 50000,
+              "seed": 1,
+              "detectRadiusM": 0.5
+            },
+            "home": {
+              "x": 17.0,
+              "y": 20.0,
+              "z": 1.2,
+              "yawDeg": 90.0
+            }
+          },
+          "sources": [
+            {
+              "name": "Violins I",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 0,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Violins II",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 2,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Violas",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 4,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Cellos",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 6,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Double basses",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 8,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Solo violin",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 10,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Harp I",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 12,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Harp II",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 14,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Piccolo",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 16,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Flute I",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 18,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Flute II",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 20,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Oboe I",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 22,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Oboe II",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 24,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "English horn",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 26,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Clarinet I",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 28,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Clarinet II",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 30,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Bass clarinet",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 32,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Bassoon I",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 34,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Bassoon II",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 36,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Contrabassoon",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 38,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Horns I-II",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 40,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Horns III-IV",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 42,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Trumpets I-II",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 44,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Trumpet III",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 46,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Tenor trombones",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 48,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Bass trombone",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 50,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Tuba",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 52,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Timpani",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 54,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Percussion - drums",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 56,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Percussion - metals",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 58,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Mallets",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 60,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Piano / celesta",
+              "format": 1,
+              "channels": 2,
+              "firstIn": 62,
+              "sum": true,
+              "spreadM": 0.0,
+              "pattern": 0.3,
+              "freePoints": false,
+              "offsetsM": []
+            }
+          ],
+          "output": {
+            "layout": 1,
+            "radiusM": 0.1,
+            "micPattern": 0
+          },
+          "tail": {
+            "baseRays": 48000,
+            "adaptive": true
+          },
+          "editorFlags": {
+            "navLocked": false,
+            "outlinerVisible": false,
+            "mixerCompact": true,
+            "inputMeters": true,
+            "keepRouting": false
+          }
+        },
+        "host": {
+          "inputChannels": 64,
+          "outputChannels": 2,
+          "renderedChannels": 2,
+          "effectiveLayout": 1,
+          "numPoints": 32,
+          "sampleRate": 48000.0
+        },
+        "load": {
+          "state": 2,
+          "status": "VSL Grand hall - audience (32 stereo groups).txt: 16 walls, 32 source(s) = 32 point(s), output Stereo (ORTF) (2 ch), shared late field",
+          "tailCurrent": true
+        },
+        "jobs": {
+          "export": {
+            "state": 0,
+            "message": ""
+          },
+          "rt60": {
+            "state": 0,
+            "achievedS": null,
+            "requestedS": null
+          }
+        }
+      }
+    }
+  ]
+}

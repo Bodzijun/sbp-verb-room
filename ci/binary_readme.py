@@ -9,12 +9,16 @@ def write_binary_readme(stage: Path, version: str, target: str) -> None:
             "Windows x64",
             "Copy the entire `Verb Room.vst3` folder to "
             "`C:\\Program Files\\Common Files\\VST3\\`.\n\n"
-            "The Windows build requires an AVX2/FMA-capable CPU.",
+            "The Windows build requires an AVX2/FMA-capable CPU. The new web interface uses the Microsoft WebView2 "
+            "Runtime (normally present on Windows 10/11); without it the classic interface opens.",
         ),
         "macos-universal": (
             "macOS Universal (Apple Silicon and Intel)",
             "Copy the entire `Verb Room.vst3` bundle to "
             "`~/Library/Audio/Plug-Ins/VST3/` or `/Library/Audio/Plug-Ins/VST3/`.\n\n"
+            "The package is ad-hoc signed, not notarized. If macOS blocks it, right-click the plug-in and choose "
+            "Open, or run `xattr -dr com.apple.quarantine \"Verb Room.vst3\"`. The new web interface uses the system "
+            "WKWebView; to use the classic interface, press `Classic UI` in the Theme menu or set `VERB_UI=classic`.\n\n"
             "See INSTALL.txt for this build's macOS requirements and signing status.",
         ),
         "linux-x86_64": (
@@ -56,6 +60,8 @@ def write_binary_readme(stage: Path, version: str, target: str) -> None:
         text += "\nFiles ending in `_uk.md` are optional Ukrainian versions of the documentation.\n"
     license_name = "LICENSE.txt" if (stage / "LICENSE.txt").is_file() else "LICENSE"
     text += f"\n## License\n\nGNU Affero General Public License v3.0. See {license_name}.\n"
+    if (stage / "THIRD_PARTY_DIRECTIVITY.md").is_file():
+        text += "\n[THIRD_PARTY_DIRECTIVITY.md](THIRD_PARTY_DIRECTIVITY.md) lists the CC BY third-party directivity data and attribution.\n"
     (stage / "README.md").write_text(text, encoding="utf-8")
 
 

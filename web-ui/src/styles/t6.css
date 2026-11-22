@@ -1,0 +1,56 @@
+/* T6 owner-review layout fixes. Loaded last; only adds rules for B1–B7. */
+/* B1/B2: perspectives left, overlays/options separated at the right end. */
+.viewport-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-start; gap:6px 8px; }
+.viewport-toolbar .room-label { flex:1 1 100%; width:100%; }
+.viewport-toolbar .persp-buttons { flex:0 0 auto; }
+.viewport-toolbar .overlay-buttons { flex:0 0 auto; margin-left:auto; padding-left:10px; border-left:1px solid var(--border); }
+/* B3/B4: Outliner first, layer filters next, Snap and Auto-link on the right. */
+.layer-bar { justify-content:flex-start; gap:6px 8px; }
+.layer-bar .layer-filters, .layer-bar .layer-options { display:flex; align-items:center; gap:5px; flex-wrap:wrap; }
+.layer-bar .layer-options { margin-left:auto; padding-left:10px; border-left:1px solid var(--border); }
+.layer-bar .outliner-toggle { padding-right:10px; margin-right:2px; }
+.layer-bar .snap-dd { min-width:132px; height:24px; }
+@media (max-width:1100px) {
+  .viewport-toolbar { gap:4px 6px; }
+  .viewport-toolbar .view-buttons button, .viewport-toolbar .nav-tools>summary { padding:0 4px; }
+  .viewport-toolbar .view-buttons { gap:2px!important; }   /* N1: Plan/Front/Side/3D + Energy/Rays/Clutter/⌖ must still fit one row at 900 px */
+  .viewport-toolbar .overlay-buttons { padding-left:6px; }
+}
+
+/* ── B7 tone: darker ground, vivid emerald accent, calmer body text (values / readouts stay bright) ── */
+:root {
+  --bg:#0b1013; --panel:#12191d; --border:#2d3a41; --line:#2a363d; --line2:#3a4850;
+  --text:#b7c8cf; --muted:#8fa8b4; --text-strong:#e3eef2;
+  --accent:hsl(165 82% 46%); --on-line:#2f9179; --field:#0a1013;
+}
+html, body { background:var(--bg); }
+.panel { background:linear-gradient(130deg,#151d22,#11181c); border-color:var(--border); }
+.active { background:#145040!important; border-color:#2fd1a8!important; color:#e6fbf4; box-shadow:inset 0 0 0 1px #15d5a522; }
+.tabs button.active, .mode-switch button.active { background:linear-gradient(#17594a,#103f35)!important; color:#e6fbf4; box-shadow:inset 0 -2px var(--accent); }
+.check.is-on { border-color:var(--on-line); background:linear-gradient(#17493c,#10372d); color:#dcf6ec; }
+.check.is-on .led { box-shadow:0 0 6px hsla(165,82%,52%,.7); }
+.primary { background:linear-gradient(#18705b,#0f4f40); border-color:#27b08f; color:#effcf7; }
+/* Readouts, numbers and headings stay brighter than the labels around them. */
+input[type=text], input[type=search], .rt-large, .knob b, .knob .value, .value-field input, .strip-gain input, .mix-row input, .dd-text { color:var(--text-strong); }
+h3, .card-title { color:#a9bec8; }
+.note, small, .footer, .footer span { color:var(--muted); }
+
+/* ── B6 Main, right column: three clearly separate sections ── */
+.rack { gap:10px; }
+.rack > .panel { border-top:2px solid color-mix(in srgb, var(--accent) 42%, var(--border)); box-shadow:0 3px 10px #0007; }
+.main-context { background:linear-gradient(130deg,#1b262c,#172025); border-color:#364850; }
+.main-context .card-title { background:#203038; border-bottom-color:#3b4e57; }
+.macro-row { position:relative; padding:6px 0 4px 24px; background:linear-gradient(130deg,#161f24,#12191d); }
+.macro-row::before { content:'Macros'; position:absolute; left:0; top:0; bottom:0; width:22px; display:flex; align-items:center; justify-content:center; writing-mode:vertical-rl; transform:rotate(180deg); background:#1c2830; border-right:1px solid var(--border); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:#a9bec8; pointer-events:none; }
+.bottom { background:linear-gradient(130deg,#10171b,#0d1316); }
+.bottom .tabs { background:#182229; border-bottom:1px solid var(--border); }
+.bottom-content { padding:8px 12px; }
+.card-title, .tabs { box-sizing:border-box; }
+@media (max-height:700px) {
+  .rack { gap:8px; }
+  .bottom-content { padding:5px 10px; }
+}
+
+/* N1: the Clutter toggle is dimmed (not disabled) while the clutter count is 0 — it only has an effect with count > 0. */
+.viewport-toolbar .overlay-buttons button.idle { opacity:.55; }
+.viewport-toolbar .overlay-buttons button.idle.active { opacity:.7; }

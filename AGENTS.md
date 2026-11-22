@@ -1,12 +1,9 @@
-# Verb Room scene and preset work
+# Правила роботи з Verb Room
 
-Before creating or modifying scenes, acoustic materials, source placement or preset formats, read
-[the scene-authoring guide](docs/Scene_authoring_agents_en.md) and
-[the preset exchange and Keep I/O guide](docs/Presets_0.1.10_en.md).
-Ukrainian versions are linked from both documents.
+Кожне повідомлення користувачу починай зверненням «Бодя». Спілкуйся українською.
 
-Validate geometry, heights, material groups, input ranges and spatial-point budgets. Check impulse responses
-and preset round-trips; successful parsing alone is not sufficient. Keep legacy scenes and project states compatible.
+Перед створенням або зміною сцен, акустичних матеріалів, розміщення джерел чи формату пресетів прочитай [інструкцію побудови сцен](docs/Scene_authoring_agents_uk.md). Формат обміну й семантику Keep I/O описано в [інструкції пресетів](docs/Presets_0.1.10_uk.md).
 
-Use `.verbroom` for complete shareable presets; `.txt` describes a geometric scene. Presets do not configure
-host sends or include instruments. Do not replace a VST3 binary while a host is using it, or close unsaved user projects.
+Перевіряй сцену за геометрією, висотами, матеріалами та бюджетами каналів/точок. Для повного обміну використовуй `.verbroom`; `.txt` описує геометричну сцену. Зміни формату мають зберігати завантаження старих сцен і станів проєктів.
+
+Будь-які зміни залу перевіряй імпульсом і повторним завантаженням пресета. Не вважай відсутність помилки parser достатнім підтвердженням правильності сцени. Не встановлюй VST3 поверх файлу, який використовує хост, і не закривай незбережені проєкти користувача.

@@ -8,6 +8,15 @@
 
 namespace verb {
 
+class BakePool;
+// Explicit off-audio execution context; absent for legacy offline callers.
+struct TailTraceStats { double prepareMs=0,waitMs=0,mergeMs=0,workMs=0;size_t chunks=0,peakHistBytes=0; };
+struct TailExecution {
+    BakePool* pool=nullptr;
+    unsigned workers=1;
+    std::function<bool()> cancelled;
+    TailTraceStats* stats=nullptr;
+};
 using BandBuf = std::vector<std::array<std::vector<double>, NB>>;  // [receiver][band][sample]
 
 struct TailHist {
@@ -25,14 +34,32 @@ struct TailHist {
 // (lower orders are covered by the deterministic image-source part).
 // finalize=false retains raw first/second moments so independent traces can be
 // pooled before estimating confidence and decay. Finalize a histogram only once.
-TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize = true, const std::function<bool()>& cancelled = {});
+// minDetectRadius > 0 raises the receiver detection sphere to at least that radius (P3 bake-only override;
+// 0 keeps the production radius, bit-identical).
+TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize = true, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, double minDetectRadius = 0.);
 // Integrated late energy for offline spatial analysis. No time histogram or
 // extrapolation is allocated; callbacks run only on the caller's worker thread.
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene&, const Transducer&,
     const std::vector<Transducer>&, int order, int rays, int seed,
-    const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {});
-// Length probes use the legacy envelope so scene duration remains compatible.
-// Production tails additionally regularize the diffuse transition using raw h2.
+    const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {},
+    double minDetectRadius = 0.);
+// Analysis coordinator only: bounded ray-segment batches, exact ordered per-cell replay.
+std::vector<std::array<double,NB>> traceTailEnergyAnalysis(const Scene&,const Transducer&,const std::vector<Transducer>&,int,int,int,const std::function<bool()>&,const std::function<void(double)>&,const TailExecution&);
+// E4a: the cheap late-energy estimate that lets the late field follow a moving listener/source. Same physics as traceTail
+// (transmission, occlusion, detection-sphere clipping), integrated over time, but ray i uses its own random generator seeded
+// from (seed, i): the same ray set traced from two nearby poses gives strongly correlated results (common random numbers), so
+// the RATIO of two such estimates is far less noisy than either. stopDb < 0 ends a ray once its energy is that far below a
+// full-sphere start (what it would still add is below that fraction of its total). `work` returns deterministic work units.
+std::vector<std::array<double, NB>> traceTailEnergyCRN(const Scene&, const Transducer&, const std::vector<Transducer>&,
+    int order, int rays, int seed, double stopDb, const std::function<bool()>& cancelled = {}, long long* work = nullptr,
+    std::vector<std::array<double, NB>>* sumSq = nullptr);  // sumSq: per receiver/band sum of squared per-ray totals (variance)
+// E4a: the same late transfer, traced backwards from the listener (head centre `origin`) to every source at once; see
+// tail.cpp. Result [s * ears.size() + r][band]. The motion estimate is the ratio of two such traces (now / reference).
+std::vector<std::array<double, NB>> traceLateReciprocal(const Scene&, Vec3 origin, const std::vector<Transducer>& ears,
+    const std::vector<Transducer>& sources, int order, int rays, int seed, double stopDb, const std::function<bool()>& cancelled = {}, long long* work = nullptr,
+    std::vector<std::array<double, NB>>* sumSq = nullptr);
+// Production tails regularize the diffuse transition using raw h2.
+// Length probes use raw Schroeder EDC, without this extrapolation.
 void finalizeTail(TailHist& hist, bool smoothTransition = true);
 
 // Immutable UI snapshot, generated off the audio thread from the modeled tail.
@@ -57,7 +84,9 @@ struct TailDiagnostics {
 // Is a significant part of the energy already relying on a sparse population?
 bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized);
 TailHist traceTailAdaptive(const Scene&, const Transducer&, const std::vector<Transducer>&,
-                           int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore = nullptr, const std::function<bool()>& cancelled = {});
+                           int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore = nullptr, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, TailHist* retainedRaw = nullptr, double minDetectRadius = 0.);
+// Pooled-band raw Schroeder EDC: max over receivers of -60 dB crossing + 0.8 s.
+double tailSecondsFromTrace(const TailHist&, double minimum);
 TailDiagnostics analyzeTail(const TailHist& finalized);
 // Worker/offline only. Unity is an exact no-op; extends the finalized histogram up to 20 seconds.
 void reshapeTailDecay(TailHist&, const std::array<double, 3>& multipliers);
@@ -65,18 +94,18 @@ void reshapeTailDecay(TailHist&, const std::array<double, 3>& multipliers);
 Scene withAbsorptionScale(const Scene&, double scale);
 std::array<double, NB> estimateRoomRT60(const Scene&);
 
-// How long the late tail has to be so that nothing audible is cut off: the time (a quick trace of the room, mid bands) at
-// which the remaining energy has fallen 80 dB, plus a margin for the final fade. The scene's own length is the minimum; at most 20 s.
-double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled = {});
+// Full-budget parallel raw probe over all receivers; -60 dB remaining energy,
+// plus 0.8 s fade margin. Authored length is the minimum; capped at 20 s.
+double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, int probeRays = 48000);
 
 // Fades the last part of every channel of a tail IR to silence (a raised cosine), so that a tail that is still audible at the
 // end of its length ends smoothly instead of being cut.
 void fadeTailEnd(std::vector<std::vector<float>>& ir, size_t n, double sr);
 
 // Adds independent Gaussian noise shaped by the histogram to every receiver/band buffer.
-void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf);
+void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf, const TailExecution& execution = {});
 
 // Sums the bands through a linear-phase complementary filterbank (delay-compensated). Output length = buffer length.
-std::vector<std::vector<float>> combineBands(const BandBuf& buf, double sr);
+std::vector<std::vector<float>> combineBands(const BandBuf& buf, double sr, const TailExecution& execution = {});
 
 }  // namespace verb

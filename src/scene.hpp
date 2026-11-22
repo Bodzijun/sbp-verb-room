@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "directivity.hpp"
 
 namespace verb {
 
@@ -182,6 +183,13 @@ struct Transducer {  // source or receiver
     double pattern = 0;     // 0 omni, 0.5 cardioid, 1 figure-8 (at 125 Hz when patternHf is set)
     double patternHf = -1;  // pattern at 8 kHz, interpolated over the octave bands; < 0: the same at all frequencies (head shadow grows with frequency)
     double gainDb = 0;
+    int shIndex = -1;       // >= 0: Ambisonic receiver, real SN3D spherical harmonic with this ACN index (0..15); replaces pattern/axis (azimuthDeg only rotates it)
+    std::string instrument;  // empty or "none" => scalar pattern; otherwise built-in id or "custom"
+    double instrumentAmount = 1.0;  // 0 = omnidirectional, 1 = full directivity profile (power-preserving blend)
+    double aimAzDeg = 0.0, aimElDeg = 0.0, aimRollDeg = 0.0;  // per-source profile orientation correction (profile frame)
+    const DirectivityProfile* directivityView = nullptr; // borrowed only during an audio control period
+    const DirectivityProfile* profile() const noexcept { return directivityView ? directivityView : directivity.get(); }
+    std::shared_ptr<const DirectivityProfile> directivity;  // resolved multi-band SH profile (nullptr => scalar pattern)
 };
 
 // "Fullness" of the space: seeded random short wall segments (furniture, objects) that are only half obstacles:
@@ -213,6 +221,7 @@ struct Scene {
     Vec3 listenerPos;
     double listenerYaw = 0;           // degrees, counter-clockwise from +x
     int floorMat = -1, ceilMat = -1;  // ceilMat<0 => open sky
+    bool ceilingInfinite = false; // absent in old scenes: new within-walls default
     std::vector<Material> mats;
     std::vector<Wall> walls;
     std::vector<Zone> floorZones, ceilZones;
@@ -245,9 +254,14 @@ inline int floorMatAt(const Scene& s, double x, double y) {
     const int z = zoneAt(s.floorZones, x, y);
     return z >= 0 ? s.floorZones[(size_t)z].mat : s.floorMat;
 }
-inline int ceilMatAt(const Scene& s, double x, double y) {  // < 0: open
+#include "ceiling_plan.inc"
+inline int ceilMatAt(const Scene& s, double x, double y, const CeilingPlan* plan = nullptr) {  // < 0: open
     const int z = zoneAt(s.ceilZones, x, y);
-    return z >= 0 ? s.ceilZones[(size_t)z].mat : s.ceilMat;
+    if(z >= 0) return s.ceilZones[(size_t)z].mat;
+    if(s.ceilingInfinite || s.ceilMat < 0) return s.ceilMat;
+    if(plan) return plan->polygons.empty() || plan->contains(x,y) ? s.ceilMat : -1;
+    const CeilingPlan local(s);
+    return local.polygons.empty() || local.contains(x,y) ? s.ceilMat : -1;
 }
 
 inline double speedOfSound(double tempC) { return 343.2 * std::sqrt((tempC + 273.15) / 293.15); }
@@ -345,6 +359,22 @@ inline void sanitizeScene(Scene& s) {
             t.pattern = clampTo(t.pattern, 0.0, 1.0, 0.0);
             t.patternHf = (std::isfinite(t.patternHf) && t.patternHf >= 0) ? std::min(t.patternHf, 1.0) : -1.0;
             t.gainDb = clampTo(t.gainDb, -120.0, 60.0, 0.0);
+            if (t.shIndex < -1 || t.shIndex > 15) t.shIndex = -1;
+            t.instrumentAmount = clampTo(t.instrumentAmount, 0.0, 1.0, 1.0);
+            if (t.instrument == "none") t.instrument.clear();
+            if (t.instrument.empty()) {
+                t.aimAzDeg = 0.0;
+                t.aimElDeg = 0.0;
+                t.aimRollDeg = 0.0;
+                if (t.directivity && t.directivity->id != "custom") t.directivity.reset();
+            } else {
+                t.aimAzDeg = clampTo(t.aimAzDeg, -180.0, 180.0, 0.0);
+                t.aimElDeg = clampTo(t.aimElDeg, -90.0, 90.0, 0.0);
+                t.aimRollDeg = clampTo(t.aimRollDeg, -180.0, 180.0, 0.0);
+                if (!t.directivity || (t.instrument != "custom" && t.directivity->id != t.instrument)) {
+                    t.directivity = findBuiltinDirectivity(t.instrument);
+                }
+            }
         }
 }
 
@@ -368,7 +398,9 @@ inline Scene parseScene(std::istream& in, const std::string& path) {
         if (line.rfind(editorPrefix2, 0) == 0) {  // forward-compatible: unknown or damaged v2 records are ignored, never fatal
             std::istringstream meta(line.substr(editorPrefix2.size()));
             std::string kind;
-            if ((meta >> kind) && kind == "layers") {
+            meta >> kind;
+            if(kind == "ceilingExtent") { std::string extent; if(meta >> extent) s.ceilingInfinite = extent == "infinite"; }
+            if (kind == "layers") {
                 std::array<int, 4> modes{};
                 bool ok = true;
                 for (int& m : modes) {
@@ -444,6 +476,7 @@ inline Scene parseScene(std::istream& in, const std::string& path) {
             if (ss >> v) s.clutter.seed = (int)v;
             if (ss >> v) s.clutter.hMin = v;
             if (ss >> v) s.clutter.hMax = v;
+            if (ss >> v) s.clutter.minDist = v;  // optional 9th token (T3): the 0.1.15 parser stops reading after hMax and ignores it
         } else if (cmd == "zone") {  // zone floor|ceiling <material|open> x1 y1 x2 y2 x3 y3 ...
             std::string kind, mn;
             ss >> kind >> mn;
@@ -486,10 +519,51 @@ inline Scene parseScene(std::istream& in, const std::string& path) {
             ss >> t.name;
             t.pos.x = num(); t.pos.y = num(); t.pos.z = num();
             double v;
-            if (ss >> v) t.azimuthDeg = v;
-            if (ss >> v) t.pattern = v;
-            if (ss >> v) t.gainDb = v;
-            if (ss >> v) t.elevationDeg = v;
+            auto readOptNum = [&](double& dst) {
+                const std::streampos pos = ss.tellg();
+                if (ss >> v) { dst = v; return true; }
+                ss.clear();
+                if (pos != std::streampos(-1)) ss.seekg(pos);
+                return false;
+            };
+            if (readOptNum(t.azimuthDeg))
+                if (readOptNum(t.pattern))
+                    if (readOptNum(t.gainDb))
+                        readOptNum(t.elevationDeg);
+            std::string kv;
+            while (ss >> kv) {
+                if (kv.rfind("instrument=", 0) == 0) {
+                    t.instrument = kv.substr(11);
+                    if (t.instrument == "none") t.instrument.clear();
+                } else if (kv.rfind("instrumentAmount=", 0) == 0) {
+                    try {
+                        t.instrumentAmount = std::stod(kv.substr(17));
+                    } catch (...) {
+                        fail("invalid instrumentAmount in '" + kv + "'");
+                    }
+                } else if (kv.rfind("aimAzDeg=", 0) == 0) {
+                    try {
+                        t.aimAzDeg = std::stod(kv.substr(9));
+                    } catch (...) {
+                        fail("invalid aimAzDeg in '" + kv + "'");
+                    }
+                } else if (kv.rfind("aimElDeg=", 0) == 0) {
+                    try {
+                        t.aimElDeg = std::stod(kv.substr(9));
+                    } catch (...) {
+                        fail("invalid aimElDeg in '" + kv + "'");
+                    }
+                } else if (kv.rfind("aimRollDeg=", 0) == 0) {
+                    try {
+                        t.aimRollDeg = std::stod(kv.substr(11));
+                    } catch (...) {
+                        fail("invalid aimRollDeg in '" + kv + "'");
+                    }
+                }
+            }
+            if (!t.instrument.empty() && t.instrument != "custom") {
+                t.directivity = findBuiltinDirectivity(t.instrument);
+            }
             (cmd == "source" ? s.sources : s.receivers).push_back(t);
         } else fail("unknown command '" + cmd + "'");
     }
@@ -629,9 +703,9 @@ inline void compactMaterials(Scene& s) {
 }
 
 // Text form of a scene that parseScene() reads back (every referenced material is written once; names are tokens).
-inline std::string serializeScene(const Scene& s) {
+inline std::string serializeScene(const Scene& s,int significantDigits=6) {
     std::ostringstream o;
-    o.precision(6);
+    o.precision(significantDigits);
     auto tok = [](std::string n) {
         for (char& c : n) if (c == ' ' || c == '\t' || c == '#') c = '_';
         return n.empty() ? std::string("mat") : n;
@@ -665,12 +739,15 @@ inline std::string serializeScene(const Scene& s) {
             o << "\n";
         }
     }
-    if (s.clutter.count > 0)
+    // The line is also written for count 0 when minDist is not the default, so the setting is not lost. minDist is the 9th
+    // token; the 0.1.15 parser reads the line token by token and ignores what follows hMax.
+    if (s.clutter.count > 0 || s.clutter.minDist != ClutterCfg{}.minDist)
         o << "clutter " << s.clutter.count << ' ' << s.clutter.minLen << ' ' << s.clutter.maxLen << ' ' << s.clutter.tlMin << ' ' << s.clutter.tlMax << ' ' << s.clutter.seed << ' '
-          << s.clutter.hMin << ' ' << s.clutter.hMax << "\n";
+          << s.clutter.hMin << ' ' << s.clutter.hMax << ' ' << s.clutter.minDist << "\n";
     if (!s.diffraction) o << "diffraction 0\n";
     if (s.roughness > 0) o << "roughness " << s.roughness << ' ' << s.roughSeed << "\n";
     o << "floor " << name[s.floorMat] << "\nceiling " << (s.ceilMat < 0 ? std::string("open") : name[s.ceilMat]) << "\n";
+    o << "#@verbroom-editor-v2 ceilingExtent " << (s.ceilingInfinite ? "infinite" : "walls") << "\n";
     for (int ceiling = 0; ceiling < 2; ++ceiling)
         for (auto& z : ceiling ? s.ceilZones : s.floorZones) {
             o << "zone " << (ceiling ? "ceiling " : "floor ") << (z.mat < 0 ? std::string("open") : name[z.mat]);
@@ -684,7 +761,16 @@ inline std::string serializeScene(const Scene& s) {
         o << "\n";
     }
     if (s.hasListener) o << "listener " << s.listenerPos.x << ' ' << s.listenerPos.y << ' ' << s.listenerPos.z << ' ' << s.listenerYaw << "\n";
-    for (auto& t : s.sources) o << "source " << tok(t.name) << ' ' << t.pos.x << ' ' << t.pos.y << ' ' << t.pos.z << ' ' << t.azimuthDeg << ' ' << t.pattern << ' ' << t.gainDb << ' ' << t.elevationDeg << "\n";
+    for (auto& t : s.sources) {
+        o << "source " << tok(t.name) << ' ' << t.pos.x << ' ' << t.pos.y << ' ' << t.pos.z << ' ' << t.azimuthDeg << ' ' << t.pattern << ' ' << t.gainDb << ' ' << t.elevationDeg;
+        if (!t.instrument.empty() && t.instrument != "none") {
+            o << " instrument=" << tok(t.instrument) << " instrumentAmount=" << t.instrumentAmount;
+            if (t.aimAzDeg != 0.0) o << " aimAzDeg=" << t.aimAzDeg;
+            if (t.aimElDeg != 0.0) o << " aimElDeg=" << t.aimElDeg;
+            if (t.aimRollDeg != 0.0) o << " aimRollDeg=" << t.aimRollDeg;
+        }
+        o << "\n";
+    }
     for (auto& t : s.receivers) o << "receiver " << tok(t.name) << ' ' << t.pos.x << ' ' << t.pos.y << ' ' << t.pos.z << ' ' << t.azimuthDeg << ' ' << t.pattern << ' ' << t.gainDb << ' ' << t.elevationDeg << "\n";
     auto editorTag = [&](const char* kind, int index, SurfaceTag tag) {
         for (auto* text : {&tag.name, &tag.group})
@@ -711,4 +797,19 @@ inline Scene loadScene(const std::string& path) {
     return parseScene(in, path);
 }
 
+// Uniform authoring/effective geometry scale. Caller selects origin and legacy height limits.
+// Furniture dimensions, physical microphone spacing, materials and air are unchanged.
+inline void scaleRoomGeometry(Scene& s, double f, double cx=0, double cy=0, bool heights=true) {
+    if(f==1.)return;
+    for(auto& w:s.walls) {
+        w.ax=cx+(w.ax-cx)*f;w.ay=cy+(w.ay-cy)*f;
+        w.bx=cx+(w.bx-cx)*f;w.by=cy+(w.by-cy)*f;
+        if(heights){w.z0*=f;if(w.z1<1e8)w.z1*=f;}
+    }
+    for(auto* zones:{&s.floorZones,&s.ceilZones})for(auto& z:*zones) {
+        for(auto& p:z.poly){p.first=cx+(p.first-cx)*f;p.second=cy+(p.second-cy)*f;}
+        if(heights&&z.z>=0)z.z*=f;
+    }
+    if(heights)s.height*=f;
+}
 }  // namespace verb

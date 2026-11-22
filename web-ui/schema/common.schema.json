@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verbroom.invalid/web-ui/schema/common.schema.json",
+  "title": "Verb Room WebView contract v1: common types",
+  "$defs": {
+    "Uint64String": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$",
+      "description": "Decimal uint64 as string (JS safe)."
+    },
+    "Band7": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "minItems": 7,
+      "maxItems": 7
+    },
+    "Vec2": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "Vec3": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "Vec2or3": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 2,
+      "maxItems": 3
+    },
+    "Name": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Protocol limit (SceneOutliner input restriction 128)."
+    },
+    "SurfaceKind": {
+      "enum": [
+        "wall",
+        "floor",
+        "ceiling",
+        "floorZone",
+        "ceilingZone"
+      ]
+    },
+    "SurfaceRef": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "wall",
+            "floor",
+            "ceiling",
+            "floorZone",
+            "ceilingZone"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "index"
+      ],
+      "description": "index from 0; base floor/ceiling use 0 (native adapter maps to -1)."
+    },
+    "ErrorCode": {
+      "enum": [
+        "invalid",
+        "unsupported",
+        "staleRevision",
+        "locked",
+        "budgetExceeded",
+        "notReady",
+        "cancelled",
+        "ioError",
+        "internal"
+      ]
+    },
+    "LoadState": {
+      "enum": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "description": "VerbProcessor::getLoadState: 0 idle, 1 loading, 2 ready, 3 error."
+    },
+    "ValueSource": {
+      "enum": [
+        "code",
+        "legacy-file",
+        "derived-by-hand",
+        "protocol-example",
+        "requires-run"
+      ]
+    },
+    "FixtureMeta": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "valueSources": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/ValueSource"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unverified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "valueSources"
+      ],
+      "description": "Test-only annotation; receivers ignore it."
+    }
+  }
+}

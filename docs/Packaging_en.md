@@ -7,7 +7,7 @@ The primary README and installation instructions inside downloadable VST3 archiv
 When preparing a Windows package manually, generate its README after copying the plug-in, license, presets and documentation into the staging directory:
 
 ```powershell
-python ci/binary_readme.py publish/release/VerbRoom-0.1.15-win64 --version 0.1.15 --platform win64
+python ci/binary_readme.py publish/release/VerbRoom-0.2.2-win64 --version 0.2.2 --platform win64
 ```
 
 Use the version and staging path for the build being packaged. Write `INSTALL.txt` in English, then create the ZIP from that staging directory. Keep the entire VST3 bundle intact.

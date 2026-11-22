@@ -16,7 +16,7 @@ These targets need actual DAW testing on their respective operating systems. Suc
 3. Download `VerbRoom-macos-universal` or `VerbRoom-linux-x86_64` from **Artifacts**. GitHub may require you to sign in.
 4. Extract the artifact, then extract the enclosed platform archive. Keep the whole `Verb Room.vst3` bundle/directory intact.
 
-Each archive contains the plug-in, presets, documentation, license, `INSTALL.txt`, and `BUILDINFO.json` identifying the source commit. A SHA-256 checksum accompanies the archive. The macOS ZIP and Linux tar.gz preserve bundle permissions; do not distribute a bare executable copied out of the bundle.
+Each archive contains the plug-in, presets, documentation, license, `THIRD_PARTY_DIRECTIVITY.md`, `INSTALL.txt`, and `BUILDINFO.json` identifying the source commit. A SHA-256 checksum accompanies the archive. The macOS ZIP and Linux tar.gz preserve bundle permissions; do not distribute a bare executable copied out of the bundle.
 
 The workflow runs for code/build changes pushed to main, version tags, relevant pull requests, and **Run workflow** requests. It uploads build artifacts; it does not publish a GitHub Release automatically. Artifacts expire after 30 days, so download release candidates before they expire.
 
@@ -28,6 +28,13 @@ Close the DAW before replacing any installed plug-in.
 - **Linux:** copy `Verb Room.vst3` to `~/.vst3/`. The Ubuntu 24.04 build requires compatible system libraries, including glibc 2.39 or newer; older distributions are not targeted.
 
 Reopen the host and rescan plug-ins if needed. Existing project states and `.verbroom` format 1 presets are unchanged.
+
+### Web interface (0.2.0)
+
+The macOS build compiles the new web interface into the plug-in; it uses the system WKWebView (no extra dependency,
+no WebView2 SDK). It opens by default on macOS; `VERB_UI=classic` or the **Classic UI** button in the Theme menu
+selects the classic interface. Linux is built without the web interface. `BUILDINFO.json` records `"web"`
+(`WKWebView` or `none`). The headless `VerbWebBridgeTest` is built on macOS as a separate non-blocking CI step.
 
 ### macOS signing
 
@@ -56,11 +63,11 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DVERB_BUILD_PLUGIN=ON -DVERB_AVX2=OFF \
   '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
-cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test stage2_test tail_transition_test --parallel 2
-# Linux headless tests (the 15-minute stage2_fixes regression is not built here):
-xvfb-run -a ctest --test-dir build --output-on-failure -E '^stage2_fixes$'
+cmake --build build --target VerbPlugin_VST3 VerbPluginTest tail_regression quality_test energy_test --parallel 2
+# Linux headless tests:
+xvfb-run -a ctest --test-dir build --output-on-failure
 # macOS tests:
-ctest --test-dir build --output-on-failure -E '^stage2_fixes$'
+ctest --test-dir build --output-on-failure
 ```
 
 Use separate build directories when changing platform or architecture. `VERB_AVX2` defaults on for x86-only builds and off for ARM/universal builds. A build configured with it on still requires AVX2/FMA at runtime. The runtime CPU check is conditional on that build option; portable builds do not reject Apple Silicon. No AVX2 flag is passed to an ARM slice. The core static library uses position-independent code so it can link into Linux VST3 shared objects.

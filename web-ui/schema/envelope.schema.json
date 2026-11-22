@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verbroom.invalid/web-ui/schema/envelope.schema.json",
+  "title": "Verb Room WebView contract v1: message envelope",
+  "$ref": "https://verbroom.invalid/web-ui/schema/envelope.schema.json#/$defs/Envelope",
+  "$defs": {
+    "Hello": {
+      "type": "object",
+      "properties": {
+        "supportedVersions": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1
+        },
+        "client": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "supportedVersions",
+        "ready"
+      ]
+    },
+    "Envelope": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "hello",
+            "snapshot",
+            "command",
+            "ack",
+            "error",
+            "patch",
+            "event"
+          ]
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "baseRevision": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Uint64String"
+        },
+        "transactionId": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "object"
+        },
+        "x-fixture": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/FixtureMeta"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "sessionId",
+        "kind",
+        "payload"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "hello"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "https://verbroom.invalid/web-ui/schema/envelope.schema.json#/$defs/Hello"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "snapshot"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/SnapshotPayload"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "command"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/Command"
+              }
+            },
+            "required": [
+              "requestId"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "ack"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "https://verbroom.invalid/web-ui/schema/event.schema.json#/$defs/Ack"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "error"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "https://verbroom.invalid/web-ui/schema/event.schema.json#/$defs/Error"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "patch"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "https://verbroom.invalid/web-ui/schema/event.schema.json#/$defs/Patch"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "event"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "$ref": "https://verbroom.invalid/web-ui/schema/event.schema.json#/$defs/Event"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "command"
+              },
+              "payload": {
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "surface.translate",
+                      "surface.moveVertex",
+                      "surface.create",
+                      "surface.delete",
+                      "surface.applyPreset",
+                      "surface.setAbsorption",
+                      "surface.setTransmission",
+                      "surface.setScatter",
+                      "surface.setHeights",
+                      "surface.setMetadata",
+                      "surface.link",
+                      "surface.unlink",
+                      "room.scale",
+                      "room.setHeight",
+                      "room.setOpening",
+                      "room.setAir",
+                      "room.setClutter",
+                      "room.setRoughness",
+                      "room.setDiffraction",
+                      "room.clear",
+                      "source.add",
+                      "source.remove",
+                      "source.setConfig",
+                      "source.setPattern",
+                      "source.setSpread",
+                      "source.setPointOffset",
+                      "output.set",
+                      "tail.setQuality",
+                      "history.undo",
+                      "history.redo"
+                    ]
+                  }
+                }
+              }
+            },
+            "required": [
+              "kind",
+              "payload"
+            ]
+          },
+          "then": {
+            "required": [
+              "baseRevision"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

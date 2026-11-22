@@ -7,9 +7,12 @@
 //  - process() never allocates or locks. Setters are thread-safe (atomics, last value wins).
 #pragma once
 #include <memory>
+#include <limits>
 
 #include "scene.hpp"
 #include "tail.hpp"
+#include "baked_path.hpp"
+#include "baked_persist.hpp"
 
 namespace verb {
 
@@ -33,10 +36,37 @@ struct EngineConfig {
     // single dominant reflection) and costs spatialTaps x early-field CPU, so it is off by default.
     double absorptionScale = 1.; // applied after seeded geometry generation, never to authored materials
     std::array<double, 3> decayMultipliers{{1, 1, 1}}; // initial creative decay, worker updates below
+    // E3d: work units per control period for the multi-end diffraction search on the audio thread (0 = the default,
+    // Engine::kDefaultDiffractionUnits). One-end answers are always immediate; see DiffMemo in rt_engine.cpp.
+    long long diffractionUnits = 0;
     int spatialTaps = 1;
     double spatialRadius = 0.3;  // initial spread in metres, can be automated with setReceiverSpread
+    // E4a: shared late field (sharedTail) while the listener or a source moves.
+    //  0 = as before E4a: a full re-trace and a 10 ms IR swap every tailRefreshMs while the pose keeps moving.
+    //  1 = no re-trace while moving (late gains held); one full re-trace after the pose has settled, crossfaded in.
+    //  2 = as 1, and the late gains follow the move from a cheap estimate on the worker (default).
+    // A pose has settled when it stayed within the dead-band of one point for motionSettleSec. The re-trace is then
+    // crossfaded over motionFadeSec (equal power, corrected for the correlation of the two IRs) and ends exactly in
+    // the state a static engine computes for that pose. Geometry, material, quality, decay and directivity changes
+    // keep the immediate re-trace and the short swap. Static scenes are not affected (bit-identical output).
+    int motionMode = 2;
+    double motionSettleSec = 0.4;
+    double motionDeadbandM = 0.008, motionDeadbandDeg = 1.0;  // held-mouse jitter of +-2 mm per axis spans up to 6.9 mm
+    double motionFadeSec = 0.75;
+    double motionSlewDbPerSec = 24;  // largest change of any late gain while following a move
+    double motionHoldDb = 3;         // an estimate whose own standard deviation exceeds this keeps the previous gain
+    int motionForwardRays = 128, motionReciprocalRays = 2048;
+    int motionIntervalMs = 50;       // shortest time between two estimates
+    // Tests: no worker thread even with tailThread; the caller runs the worker with Engine::runWorkerStep().
+    bool manualWorker = false;
+    unsigned rebuildWorkers = 0; // internal/test override;0=hardware concurrency-1,1=serial
 };
 
+// Last complete worker result, unit source excitation, omni listener energy.
+struct AutoLevelEnergy {
+    struct Point { std::array<double, NB> direct{}, early{}, late{}; };
+    std::vector<Point> points;
+};
 class Engine {
 public:
     Engine(const Scene& scene, const EngineConfig& cfg);
@@ -54,17 +84,22 @@ public:
     // background and crossfaded in. Returns false (and changes nothing) if the scene does not fit the engine.
     // Any thread, lock-free for the audio thread.
     bool setScene(const Scene& scene); // retains the current absorption
-    bool setScene(const Scene& scene, double absorptionScale, const std::function<bool()>& cancelled = {});
+    bool setScene(const Scene& scene, double absorptionScale, const std::function<bool()>& cancelled = {}, double constructionPoseScale = 1.);
 
     // Thread-safe; positions in metres, angles in degrees.
     void setSourcePosition(int src, double x, double y, double z);
     void setSourceAzimuth(int src, double deg);
     void setListener(double x, double y, double z, double yawDeg);
+    void notifyJump();
     void setReceiverSpread(double metres);  // radius of the pickup cloud (no effect when spatialTaps == 1)
     // Level of the discrete early reflections relative to the direct sound, dB (-60..+6). Lowering it reduces the
     // depth of the comb filtering that direct sound + a strong reflection produce (the "flanger" colour).
     void setEarlyLevel(double dB);
     void setSourcePattern(int s, double p);  // directivity 0 omni .. 0.5 cardioid .. 1 figure-8, live
+    // Control thread only (allocations/ownership retirement); process only reads the mailbox.
+    void setSourceDirectivity(int s, std::shared_ptr<const DirectivityProfile> profile, double amount = 1.0,
+                              double effectivePattern = std::numeric_limits<double>::quiet_NaN(),
+                              double aimAzDeg = 0.0, double aimElDeg = 0.0, double aimRollDeg = 0.0);
     void setTailLevel(double dB);  // level of the late field (the reverberant tail) alone, -60..+12 dB, live
     // 0 = all components; bits 1 direct, 2 early, 4 tail. Changes ramp over 10 ms.
     void setSoloMask(int mask);
@@ -74,6 +109,12 @@ public:
     // With tailThread=false, later quality requests are not applied.
     void setTailQuality(int baseRays, bool adaptive);
     void setDecayMultipliers(double low, double mid, double high); // atomics only; worker rebuild + crossfade
+    void acknowledgePoseScale(double constructionRelativeScale); // after publishing every scaled pose, before process()
+    void setCreativeWet(double predelayMs, double widthPercent, bool freeze, double duckDb, double duckReleaseMs);
+    float duckReductionDb() const;
+    // Creative mode: Freeze can be engaged, so a short tail history (one store per output sample) is kept.
+    // Physical mode: false -> the Freeze component does no work at all. Default true.
+    void setFreezeAvailable(bool available);
     void setDopplerStrength(double k);  // 0 = none, 1 = physical, up to 2 = exaggerated; live
     // 0..1: smears every early reflection (not the direct sound) in time with energy-preserving all-pass
     // diffusers, like rough real surfaces do. Turns the regular comb ("flanger/phaser") of mirror-like
@@ -84,23 +125,141 @@ public:
     // should sum such inputs into ONE source before calling process().
 
     // Audio thread. in[numSources()], out[numReceivers()], any n >= 0.
-    void process(const float* const* in, float* const* out, int n);
+    void process(const float* const* in, float* const* out, int n, const float* dryDetector = nullptr);
 
     // Diagnostics (audio thread safe).
     int activeTaps() const;
     int tailRefreshCount() const;
     uint64_t diffractionCapacityMisses() const; // published by process(); zero with a correctly prepared wall budget
+    // E3d: the bounded diffraction search. Plain audio-thread counters: read them only while process() is not running.
+    static constexpr long long kDefaultDiffractionUnits = 12000;  // ~60 us per period here (~5 ns per unit)
+    struct DiffractionStats {
+        long long budget = 0;                   // work units per control period for the multi-end search
+        unsigned long long periods = 0;         // control periods so far
+        long long unitsLast = 0, unitsMax = 0;  // all diffraction work in one period (one-end + follow + search)
+        long long softActualUnitsLast=0,softActualUnitsMax=0;
+        unsigned long long softEvaluations=0,softCacheHits=0;
+        long long softEdgeUnitsLast = 0, softEdgeUnitsMax = 0; // E5 conservative linear-work bound, separate from resumable search
+        long long searchUnitsMax = 0;           // multi-end search work in one period, largest (<= budget + one loop step)
+        unsigned long long unitsTotal = 0;
+        unsigned long long quick = 0, follows = 0, jobsStarted = 0, jobsFinished = 0, holdPeriods = 0;
+        unsigned long long maxLatencyPeriods = 0;  // longest wait from a request to its finished search (control periods)
+        unsigned long long latencySumPeriods = 0;  // sum over finished searches (mean = latencySumPeriods / jobsFinished)
+        long long jobUnitsMax = 0;            // the largest single search, work units
+    };
+    DiffractionStats diffractionStats() const;
     bool tailIsCurrent() const; // all audio convolvers have consumed the latest geometry/decay/quality revision
     // Message/control threads only. Immutable snapshot; never called by process().
     std::shared_ptr<const TailDiagnostics> tailDiagnostics() const;
     // Actual immutable modeled geometry, including the seeded roughness/clutter.
     // Control threads only; retaining it never involves the audio callback.
     std::shared_ptr<const Scene> sceneSnapshot() const;
+    std::shared_ptr<BakePool> analysisPool() const;
     // Control/offline only: destination must have tailThread=false and no concurrent
     // process(). Copies the reference's audible IR and immutable modeled geometry,
     // never its audio history.
     // Only the reference worker is locked; its process() does not acquire this mutex.
     bool copyTailForOffline(const Engine& reference);
+
+    // Control thread only. Empty or conflicting moving listener + uncoupled sources select the legacy estimator.
+    void armRecordedPass(); // control; actual capture happens after setters on audio thread
+    void stopRecordedPass();
+    void recordPassAudio(bool playing) noexcept;
+    struct RecordedPassStats { int state=0,samples=0;bool offPass=false; };
+    RecordedPassStats recordedPassStats() const noexcept;
+    struct RecordedPassData {
+        int objects=0,samples=0;
+        std::vector<double> poses; // row-major: samples * objects * 4
+    };
+    RecordedPassData exportRecordedPass() const;
+    bool importRecordedPass(const RecordedPassData& data);
+    // Optional recorded-pass matching policy in pose order (listener, then source points).
+    void setBakedPaths(const std::vector<BakedPath>& paths, const std::vector<BakedYawMatch>& recordedYawMatch = {});
+    // E19: true when an object's orientation depends on an independently moving target. Behaves like an uncoupled moving listener:
+    // Blocked unless a recorded pass is available. Control thread only.
+    void setBakeForcedBlock(bool blocked);
+    enum class BakeState { NotBaked, Baking, Baked, Outdated, Cancelled, Blocked, Approximate, Failed };
+    // Control thread requests only. workers=0 selects hardware concurrency minus one.
+    void requestPathBake(unsigned workers=0);
+    void cancelPathBake();
+    // Drops every baked table (and any running bake); declared paths stay, state returns to NotBaked. Control thread only.
+    // P4: also clears the undo cache, so an explicit clear is never silently undone by a cache restore.
+    void clearPathBake();
+    // P4: install tables restored from a saved project/preset. Control thread only. Every table must carry a
+    // content signature equal to the freshly computed one of its group (and the current estimator); matching
+    // tables are re-stamped with the live session counters and published exactly like a finished bake
+    // (lock-free for the audio thread). Returns false and changes nothing when any table does not match.
+    bool installBakedTables(const std::vector<BakedTable>& tables);
+    // P4: current content signature of every bake group (control thread; same order as bakeStats().groups).
+    std::vector<uint64_t> bakeContentSignatures() const;
+    // P4: number of tables held in the bounded undo cache (<= kBakeCacheCap).
+    int bakedCacheEntries() const;
+    struct PathGroupStats {
+        int group=-1;
+        bool movesListener=false;
+        std::vector<int> objects;
+        BakeState state=BakeState::NotBaked;
+        int percent=0,discontinuities=0,done=0,total=0;
+    };
+    struct BakeStats {
+        BakeState state=BakeState::NotBaked;
+        int percent=0, discontinuities=0,waitReason=0,workers=0,done=0,total=0;
+        int restored=0; // P4: 0 = traced this session, 1 = restored from saved state, 2 = restored from the undo cache
+        uint64_t hash=0,lookups=0,stations=0,resets=0,cancelled=0;
+        double milliseconds=0;
+        std::vector<PathGroupStats> groups;
+    };
+    // P1 diagnostics: worker-side timing of bake stations (steady_clock on the bake worker only; never the audio thread).
+    struct BakeTraceStation { int group=0; double u=0; int kind=0; /*0 initial,1 validation*/ int rays=0; double queuedMs=0,doneMs=0; int activeAtQueue=0; bool retry=false; };
+    struct BakeTraceDecision { int group=0; double a=0,b=0,error=0; int decision=0; /*0 accept,1 split,2 approximate*/ size_t nodes=0; double ms=0; };
+    struct BakeTrace { std::vector<BakeTraceStation> stations; std::vector<BakeTraceDecision> decisions; double maxStepGapMs=0; uint64_t stepCalls=0,waitSteps=0; int activeLimit=0,workers=0; };
+    BakeTrace bakeTrace() const;
+    std::string bakeWorkerDiagnostics() const; // opt-in Windows station counters, control thread only
+    BakeStats bakeStats() const;
+    std::shared_ptr<const BakedTable> bakedTableSnapshot() const;
+    std::vector<std::shared_ptr<const BakedTable>> bakedTablesSnapshot() const;
+    // E4a. Tests with EngineConfig::manualWorker: one pass of the late-field worker, synchronously (control thread,
+    // never while process() runs).
+    void runWorkerStep();
+    std::shared_ptr<const AutoLevelEnergy> autoLevelEnergy() const;
+    bool autoLevelMoving() const;
+    struct MotionStats {
+        unsigned long long legacySwaps = 0;       // short (one block) IR swaps: geometry, quality, decay, directivity, mode 0
+        unsigned long long transitionsStarted = 0, transitionsDone = 0;  // settle re-traces crossfaded in
+        unsigned long long estimates = 0, held = 0, published = 0, accepted = 0;  // motion gain cycles; held (r,s,band) values
+        unsigned long long retraceCancelled = 0;
+        int transState = 0;                       // 0 idle, 1 published, 2 crossfading, 3 normalization handover
+        uint64_t audioEpoch = 0;
+        double lastEstimateMs = 0, maxEstimateMs = 0, lastRetraceMs = 0, maxRetraceMs = 0;
+        long long lastEstimateWork = 0;
+        double refListener[4] = {0, 0, 0, 0};    // listener pose of the newest late-field build
+    };
+    MotionStats motionStats() const;
+    // Late energy actually applied per receiver/source/band: (applied gain)^2 x (band energy of the IR it feeds),
+    // [(r*S + s)*7 + b]. Control thread, only while process() is not running.
+    std::vector<double> lateAppliedEnergy() const;
+    // Hash of the late-field state that decides the sound from now on: the IR spectra each shared convolver uses and
+    // the gains applied. Equal hashes = the same late field for the same input. Control thread, process() not running.
+    uint64_t lateStateHash() const;
+
+    // P7 Step 2 profiler (zero cost when VERB_P7_PROFILE != 1).
+    struct P7ProfileStats {
+        uint64_t processCalls = 0, processTotalNs = 0;
+        uint64_t startPeriodCalls = 0, startPeriodTotalNs = 0;
+        uint64_t spSetupNs = 0, spPoseNs = 0, spBuildImagesNs = 0;
+        uint64_t spSolveDirectNs = 0, spSolveValidateNs = 0, spSolveTapsNs = 0, spDiffJobsNs = 0;
+        uint64_t spSourceSkips = 0, spSourceSolves = 0;
+        uint64_t validateCalls = 0, validateSupportEvals = 0, validateSoftLegEvals = 0;
+        uint64_t validateAmpMemoHit = 0, validateAmpMemoEval = 0, validateAmpMemoDeferred = 0;
+        uint64_t bandSplitNs = 0, lateFeedNs = 0, renderTapsNs = 0, diffuseNs = 0;
+        uint64_t creativeWetNs = 0, endPeriodNs = 0, tailBlockNs = 0;
+        uint64_t tapsSkipped = 0, tapsStat = 0, tapsMoving = 0;
+        uint64_t workerStepCalls = 0, workerRebuilds = 0, workerRebuildsCancelled = 0;
+        uint64_t workerMotionEsts = 0, workerRebuildNs = 0, workerMotionEstNs = 0, workerBakeStepNs = 0;
+        uint64_t workerSettleTriggers = 0, workerLegacyTriggers = 0, workerJumpTriggers = 0;
+    };
+    P7ProfileStats p7ProfileStats() const;
+    void resetP7ProfileStats();
 
 private:
     struct Impl;

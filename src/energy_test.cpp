@@ -1,6 +1,8 @@
 #include "energy.hpp"
 #include "tail.hpp"
 #include "rt_engine.hpp"
+#include "../plugin/RoomLibrary.h"
+#include "bake_pool.hpp"
 #include <chrono>
 #include <cstdio>
 #include <stdexcept>
@@ -78,5 +80,39 @@ int main() {
     const auto started = std::chrono::steady_clock::now();
     try { verb::analyzeEnergyMap(room, options, [&] { return ++polls > 20; }); } catch (const std::exception& e) { cancelled = std::string(e.what()) == "Analysis cancelled"; }
     check(cancelled && std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < 1., "analysis supports prompt cancellation during tracing");
+    // Audience floor changes specular reflection at the MIRROR point, not at
+    // the receiver. Its projected rectangle is a genuine energy discontinuity.
+    auto pool = std::make_shared<verb::BakePool>(3);
+    for (const auto& builtin : verbp::builtinRooms()) {
+        if (builtin.name != "Cathedral (long tail)" && builtin.name != "Concert hall (audience zone)") continue;
+        std::istringstream input(builtin.text); auto s = verb::parseScene(input, builtin.name);
+        verb::EnergyMapOptions o; o.components = 3; o.earlyDb = 0;
+        auto serial = verb::analyzeEnergyMap(s, o);
+        auto parallel = verb::analyzeEnergyMap(s, o, {}, {}, {pool,3});
+        auto plain = s; plain.floorZones.clear();
+        auto floor = s; floor.walls.clear(); floor.ceilMat = -1; floor.diffraction = false;
+        auto plainFloor = floor; plainFloor.floorZones.clear();
+        bool exact = true, geometry = true; int zoneCells = 0, bareCells = 0;
+        for (int y=0;y<serial.ny;++y) for(int x=0;x<serial.nx;++x) {
+            auto i=(size_t)y*serial.nx+x; auto rc=serial.position(x,y); auto src=s.sources[0];
+            const auto fp=src.pos+(rc-src.pos)*(src.pos.z/(src.pos.z+rc.z));
+            const bool audience=verb::pointInZone(s.floorZones[0],fp.x,fp.y);
+            audience ? ++zoneCells : ++bareCells;
+            const auto a=verb::earlyFieldEnergy(plain,src,rc,o.earlyDb);
+            const auto f=verb::earlyFieldEnergy(floor,src,rc,o.earlyDb);
+            const auto p=verb::earlyFieldEnergy(plainFloor,src,rc,o.earlyDb);
+            const auto& mat=s.mats[(size_t)(audience?s.floorZones[0].mat:s.floorMat)];
+            const auto& base=s.mats[(size_t)s.floorMat];
+            for(int b=0;b<verb::NB;++b) {
+                exact &= serial.cells[i].early[b]==parallel.cells[i].early[b] && serial.cells[i].direct[b]==parallel.cells[i].direct[b];
+                const double expected=verb::reflEnergy(mat,b)*(1-verb::scatterAt(mat,b))/(verb::reflEnergy(base,b)*(1-verb::scatterAt(base,b)));
+                geometry &= std::abs(f.early[b]/p.early[b]-expected)<1e-6;
+                geometry &= std::abs((serial.cells[i].early[b]-a.early[b])-(f.early[b]-p.early[b]))<1e-12;
+            }
+        }
+        std::printf("Audience projection %s zone_cells%d bare_cells%d\n",builtin.name.c_str(),zoneCells,bareCells);
+        check(exact,"large-room early map is identical across worker chunks");
+        check(geometry && zoneCells>0 && bareCells>0,"every large-room early material step equals the analytic floor mirror-point projection in all7 bands");
+    }
     return failures ? 1 : 0;
 }

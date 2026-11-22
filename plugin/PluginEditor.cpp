@@ -1,5 +1,9 @@
 #include "PluginEditor.h"
 
+#if VERB_WEB_UI_ENABLED
+#include "VerbWebEditor.h"
+#endif
+
 #include <algorithm>
 #include <cmath>
 
@@ -684,10 +688,66 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     showTab(0);
     refreshOutputs();
     refreshSpace();
+#if VERB_WEB_UI_ENABLED
+    setupNewUi();
+#endif
     startTimerHz(10);
+    proc.bakeDiagnosticEditorOpened(true);
 }
 
+// ---- N2: way back to the web editor. Nothing here is compiled without the web editor.
+bool VerbEditor::newUiButtonShown() const {
+#if VERB_WEB_UI_ENABLED
+    return newUiBtn.isVisible();
+#else
+    return false;
+#endif
+}
+void VerbEditor::testClickNewUi() {
+#if VERB_WEB_UI_ENABLED
+    if (newUiBtn.isVisible()) newUiBtn.triggerClick();
+#endif
+}
+juce::String VerbEditor::newUiNoteText() const {
+#if VERB_WEB_UI_ENABLED
+    return newUiNote.isVisible() ? newUiNote.getText() : juce::String();
+#else
+    return {};
+#endif
+}
+#if VERB_WEB_UI_ENABLED
+void VerbEditor::setupNewUi() {
+    juce::String why;
+    if (!verbweb::webEditorAvailable(why)) { verbweb::recordDiagnostics("New UI button hidden: " + why); return; }
+    addAndMakeVisible(newUiBtn);
+    newUiBtn.getProperties().set("style", "ghost");
+    newUiBtn.setTooltip("Switch to the new (web) editor. It is remembered for the next time the window is opened.");
+    newUiBtn.onClick = [this] { requestNewUi(); };
+    addChildComponent(newUiNote);
+    newUiNote.setJustificationType(juce::Justification::centredLeft);
+    newUiNote.setColour(juce::Label::textColourId, juce::Colours::khaki);
+    newUiNote.setInterceptsMouseClicks(false, false);
+}
+void VerbEditor::requestNewUi() {
+    verbweb::setPreferredUi(verbweb::UiChoice::web);  // remembered in every case
+    // Inside the web shell (after "Classic UI") the swap happens in place; the classic editor must not be destroyed from
+    // its own button handler, so the shell does it asynchronously.
+    if (auto* shell = findParentComponentOfClass<verbweb::VerbWebEditor>()) {
+        juce::Component::SafePointer<verbweb::VerbWebEditor> target(shell);
+        juce::MessageManager::callAsync([target] { if (target != nullptr) target->switchToWeb("the classic UI asked for the new UI"); });
+        return;
+    }
+    // A plain classic editor is the host's top-level editor: it cannot be replaced inside the host window, so say so.
+    const auto env = juce::SystemStats::getEnvironmentVariable("VERB_UI", {}).trim().toLowerCase();
+    newUiNote.setText(env.isNotEmpty() && env != "web" ? "Saved, but VERB_UI forces the classic UI - remove it, then close and reopen the plugin window."
+                                                         : "New UI saved - close and reopen the plugin window.", juce::dontSendNotification);
+    newUiNote.setVisible(true);
+    newUiBtn.setEnabled(false);
+}
+#endif
+
 VerbEditor::~VerbEditor() {
+    proc.bakeDiagnosticEditorOpened(false);
     stopTimer();
     setLookAndFeel(nullptr);
 }
@@ -874,6 +934,9 @@ void VerbEditor::refreshOutputs() {
     if (o.layout >= 0 && verb::layoutDefs()[(size_t)std::min((size_t)o.layout, verb::layoutDefs().size() - 1)].channels > trackOut)
         info += "\nThe layout has more channels than the track can carry: only the first " + juce::String(trackOut) + " are rendered.";
     outInfoLabel.setText(info, juce::dontSendNotification);
+    const bool am = verb::isAmbisonicLayout((verb::Layout)proc.effectiveLayout());
+    micBox.setEnabled(!am);
+    radiusRow.slider.setEnabled(!am);
     updatingUI = false;
 }
 
@@ -1632,7 +1695,8 @@ void VerbEditor::paint(juce::Graphics& g) {
             g.drawEllipse(cp.x - rpx, cp.y - rpx, 2 * rpx, 2 * rpx, 1.f);
         }
         auto arr = verb::makeReceiverArray((verb::Layout)proc.effectiveLayout(), {0, 0, 0}, micR, std::max(1, proc.numOutputChannels()));
-        verb::applyMicPattern(arr, (verb::MicPattern)proc.getOutputCfg().micPattern, proc.getOutputCfg().radius);  // human ears: the capsules move to the ears
+        if (!verb::isAmbisonicLayout((verb::Layout)proc.effectiveLayout()))
+            verb::applyMicPattern(arr, (verb::MicPattern)proc.getOutputCfg().micPattern, proc.getOutputCfg().radius);  // human ears: the capsules move to the ears
         for (auto& r : arr) {
             if (r.gainDb < -100) continue;  // LFE placeholder
             const auto p = view.toScreen(lis[0] + r.pos.x * c2 - r.pos.y * s2, lis[1] + r.pos.x * s2 + r.pos.y * c2);
@@ -1643,6 +1707,9 @@ void VerbEditor::paint(juce::Graphics& g) {
             g.fillEllipse(p.x - 2.5f, p.y - 2.5f, 5.f, 5.f);
         }
     }
+    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);if(p.points.size()<2)continue;verbp::CompiledPath t;t.build(p);g.setColour(o==verbp::kListener?kLis:srcColour(o));
+        for(size_t i=1;i<t.points.size();++i)g.drawLine({view.toScreen(t.points[i-1][0],t.points[i-1][1]),view.toScreen(t.points[i][0],t.points[i][1])},1.4f);
+        auto q=t.evaluate(proc.apvts.getRawParameterValue(VerbProcessor::pathParamId(o))->load());auto v=view.toScreen(q[0],q[1]);g.drawEllipse(v.x-5,v.y-5,10,10,2.f);}
     auto drawObj = [&](int obj, juce::Colour c, const juce::String& label, double az) {
         const auto p = view.toScreen(paramValue(obj, 0), paramValue(obj, 1));
         const bool sel = selKind == SelKind::Object && obj == selected;
@@ -1766,6 +1833,10 @@ void VerbEditor::resized() {
     viewBar.removeFromRight(8);
     outlinerBtn.setBounds(viewBar.removeFromRight(74));
     for (auto* t : {&viewTop, &viewFront, &viewSide, &viewIso}) { t->setBounds(viewBar.removeFromLeft(54)); viewBar.removeFromLeft(2); }
+#if VERB_WEB_UI_ENABLED
+    newUiBtn.setBounds(2, getHeight() - 32, 50, 22);  // bottom of the tool strip: below every tool at every window size
+    newUiNote.setBounds(viewBar.reduced(6, 0));        // the free middle of the view bar; never moves another control
+#endif
 
     {
         auto row = panel.removeFromTop(28);
@@ -2657,6 +2728,9 @@ void VerbEditor::paint3D(juce::Graphics& g, const verb::Scene& sc, const double*
     const auto classColour = [&](int mat) {
         return mat >= 0 && mat < (int)sc.mats.size() ? juce::Colour(verb::surfaceClasses()[(size_t)std::min(std::max(sc.mats[(size_t)mat].cls, 0), (int)verb::SC_Custom)].argb) : skin::textMid;
     };
+    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);if(p.points.size()<2)continue;verbp::CompiledPath t;t.build(p);g.setColour(o==verbp::kListener?kLis:srcColour(o));
+        for(size_t i=1;i<t.points.size();++i){auto a=proj(t.points[i-1][0],t.points[i-1][1],t.points[i-1][2]),b=proj(t.points[i][0],t.points[i][1],t.points[i][2]);g.drawLine(a.x,a.y,b.x,b.y,1.4f);}
+        auto q=t.evaluate(proc.apvts.getRawParameterValue(VerbProcessor::pathParamId(o))->load());auto v=proj(q[0],q[1],q[2]);g.drawEllipse(v.x-5,v.y-5,10,10,2.f);}
     // floor: a faint slab with a 1 m grid, then the zones
     {
         const double gx0 = std::floor(x0) - 1, gx1 = std::ceil(x1) + 1, gy0 = std::floor(y0) - 1, gy1 = std::ceil(y1) + 1;

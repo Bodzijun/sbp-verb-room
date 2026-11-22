@@ -77,8 +77,10 @@ zone ceiling open x1 y1 x2 y2 x3 y3
 # Other settings.
 roughness 0.1 123
 diffraction 1
-clutter 12 0.4 1.6 2 10 123 0.5 1.8
+clutter 12 0.4 1.6 2 10 123 0.5 1.8 0.5
 ```
+
+The `clutter` line is `count minLen maxLen tlMin tlMax seed hMin hMax [minDist]`. The last token, `minDist` (minimum distance from sources and receivers, metres, default 0.5), is optional: older files without it load exactly as before, and the 0.1.15 parser reads the line token by token and simply ignores the extra one. The plug-in also writes the line for `count 0` when `minDist` is not 0.5.
 
 `source` and `receiver` take `NAME x y z azimuth pattern gainDb elevationDeg`; the final four numbers are optional. `pattern`: 0 = omni, 0.5 = cardioid, 1 = figure-8. `listener` takes `x y z yaw`. In the plug-in, output receivers are generated from the Output layout and listener position. The file's `receiver` coordinates are also used by the CLI and do not replace the plug-in's Output configuration.
 
@@ -138,8 +140,6 @@ See the [editor guide](Spatial_editor_0.1.12_en.md). Surface names, flat groups,
 ```
 
 Fields: type (`wall`, `floor-zone`, `ceiling-zone`, `floor`, `ceiling`), zero-based index, quoted name, quoted group name, hidden (0/1), locked (0/1). The main floor/ceiling use index 0 and cannot be members of movable constructions. An empty group means unlinked. Escape quotes and backslashes inside strings; prefer the built-in serializer.
-
-The state of the plan layers (Walls / Floors / Ceilings / Plates: 0 shown, 1 locked, 2 hidden) is stored on its own line in a new namespace: `#@verbroom-editor-v2 layers 1 0 2 0` (written only when not all zeros). Older builds (0.1.15) read it as a plain comment. The current build ignores unknown or damaged `v2` records without an error. Add any new kind of metadata under `v2` only, because an unknown `kind` inside `v1` makes the older parser reject the whole scene. A scene without this line (a library room, a geometry-only `.txt`) resets the layers to "shown".
 
 These flags do not change acoustics: hidden does not mean an absent wall, and locked does not replace absorption. Do not remove geometry when hiding it. Surfaces retain their individual materials; Link only organizes them and enables joint movement. Use unique group names for independent constructions.
 

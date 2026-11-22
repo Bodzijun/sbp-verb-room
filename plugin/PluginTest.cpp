@@ -7,6 +7,7 @@
 #include <random>
 
 #include "InputOrder.h"
+#include "TestRoomSelection.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 #include "../src/tail.hpp"
@@ -132,18 +133,101 @@ static void testTailControls() {
           "LFE is excluded from Tail Solo and included at unity in Direct Solo");
 }
 
+// Repo-relative test data: look in the current directory and its parents, so a test started from the build folder finds the same files as ctest.
+static juce::File repoFile(const juce::String& relative) {
+    auto dir = juce::File::getCurrentWorkingDirectory();
+    for (int up = 0; up < 8; ++up, dir = dir.getParentDirectory()) {
+        const auto f = dir.getChildFile(relative);
+        if (f.exists()) return f;
+    }
+    return juce::File::getCurrentWorkingDirectory().getChildFile(relative);
+}
+
 #include "Stage2Test.h"
+#include "E1Test.h"
+#include "E7Test.h"
+#include "E8Test.h"
+#include "P1Test.h"
+#include "E9Test.h"
+#include "E16Test.h"
+#include "E17Test.h"
+#include "E18Test.h"
+#include "E19Test.h"
+#include "E28Test.h"
+#include "BakePerfTest.h"
+#include "BakeClickTest.h"
+#include "BakeImpulseTest.h"
+#include "P4Test.h"
+#include "F3Test.h"
+#include "F4Test.h"
+#include "P5Test.h"
+#include "P6Test.h"
+#include "P7Test.h"
+#include "P8Test.h"
+#include "P9Test.h"
+#include "C1Test.h"
+#include "E23Test.h"
+#include "E21Test.h"
+#include "E11Test.h"
+#include "E12StressTest.h"
+#include "E12MetersTest.h"
+
+static int runRemainingSuites();
+static int testEnergySuite();
+static int testSpatialEditorSuite();
+static int testPresetsSuite();
+static int testVslHallSuite();
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
-    if (std::getenv("VERB_STAGE2_ONLY")) return testStage2Processor();
-    if(std::getenv("VERB_EXPORT_LIVE_ONLY")) {
-        VerbProcessor p;p.setPlayConfigDetails(2,2,48000,256);p.prepareToPlay(48000,256);
-        check(waitReady(p,90),"export test processor loads");stage2ExportAndLoader(p);return fails?1:0;
-    }
-    if (std::getenv("VERB_STAGE2_CAPTURE")) return captureStage2Legacy();
-    if (std::getenv("VERB_ENERGY_ONLY")) {
+    struct EnvSuite { const char* name; int (*fn)(); };
+    static const EnvSuite suites[] = {
+        {"VERB_ONLY_E12_METERS", testE12Meters},
+        {"VERB_ONLY_E12_STRESS", testE12Stress},
+        {"VERB_ONLY_E11", testE11Processor},
+        {"VERB_ONLY_E9", testE9Plugin},
+        {"VERB_ONLY_E16", testE16Plugin},
+        {"VERB_ONLY_E17", testE17Plugin},
+        {"VERB_ONLY_E18", testE18Plugin},
+        {"VERB_ONLY_E23", testE23Plugin},
+        {"VERB_ONLY_E21", testE21Plugin},
+        {"VERB_E21_MEASURE", testE21Measure},
+        {"VERB_ONLY_E19", +[]() { return testE19Plugin() | testE19Audio() | testE19Bake() | testE19Blocked() | testE19Commands(); }},
+        {"VERB_ONLY_E28", +[]() { return testE28Stations() | testE28Bake(); }},
+        {"VERB_ONLY_E28_GATE", testE28Gate},
+        {"VERB_ONLY_P1", testP1},
+        {"VERB_ONLY_BAKE_PERF", testBakePerf},
+        {"VERB_ONLY_BAKE_CLICK", testBakeClick},
+        {"VERB_ONLY_BAKE_IMPULSE", testBakeImpulse},
+        {"VERB_ONLY_P4", +[]() { return testP4Persist() | testP4Undo() | testP4MultiGroup(); }},
+        {"VERB_ONLY_F3", testF3},
+        {"VERB_ONLY_F4", testF4},
+        {"VERB_ONLY_P5", testP5},
+        {"VERB_ONLY_P6", testP6},
+        {"VERB_ONLY_P7", testP7},
+        {"VERB_ONLY_P8", testP8},
+        {"VERB_ONLY_P9", testP9},
+        {"VERB_ONLY_C1", testC1},
+        {"VERB_ONLY_E8", testE8Plugin},
+        {"VERB_ONLY_E7_MAKEUP", testE7Makeup},
+        {"VERB_E1_PERF", e1Performance},
+        {"VERB_E1_ONLY", e1Processor},
+        {"VERB_E1_CAPTURE", +[]() { return e1Null(true); }},
+        {"VERB_E1_NULL", +[]() { return e1Null(false); }},
+        {"VERB_STAGE2_ONLY", testStage2Processor},
+        {"VERB_ENERGY_ONLY", testEnergySuite},
+        {"VERB_SPATIAL_EDITOR_ONLY", testSpatialEditorSuite},
+        {"VERB_PRESETS_ONLY", testPresetsSuite},
+        {"VERB_VSL_HALL_ONLY", testVslHallSuite},
+    };
+    for (const auto& s : suites)
+        if (std::getenv(s.name)) return s.fn();
+    int (* volatile runRest)() = runRemainingSuites;
+    return runRest();
+}
+
+static int testEnergySuite() {
         VerbProcessor p; p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
         check(waitReady(p, 90), "energy test processor starts");
         auto cfg = p.getSources(); cfg.resize(1); cfg[0].format = 1; cfg[0].sum = false; cfg[0].freePoints = true;
@@ -240,8 +324,9 @@ int main() {
             check(true, "closing the editor safely cancels its background analysis");
         }
         return fails ? 1 : 0;
-    }
-    if (std::getenv("VERB_SPATIAL_EDITOR_ONLY")) {
+}
+
+static int testSpatialEditorSuite() {
         VerbProcessor p; p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
         check(waitReady(p, 90), "positioned dry test processor starts");        const auto originalRoom = p.getDisplayScene();
         auto freeField = originalRoom;
@@ -777,8 +862,9 @@ int main() {
             }
         }
         return fails ? 1 : 0;
-    }
-    if (std::getenv("VERB_PRESETS_ONLY")) {
+}
+
+static int testPresetsSuite() {
         VerbProcessor p;
         p.setPlayConfigDetails(64, 2, 48000, 256); p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "portable preset processor starts");
@@ -851,8 +937,9 @@ int main() {
         q.loadSceneText(p.getRoomText(), "legacy.txt", true);
         check(waitReady(q, 90) && q.getSources().size() == 2, "legacy plain-text scenes still load");
         return fails ? 1 : 0;
-    }
-    if (std::getenv("VERB_VSL_HALL_ONLY")) {
+}
+
+static int testVslHallSuite() {
         for (bool conductor : {false, true}) {
             const auto room = verbp::vslGrandHall(conductor);
             std::istringstream input(room.text);
@@ -925,7 +1012,14 @@ int main() {
             }
         }
         return fails ? 1 : 0;
+}
+
+static int runRemainingSuites() {
+    if(std::getenv("VERB_EXPORT_LIVE_ONLY")) {
+        VerbProcessor p;p.setPlayConfigDetails(2,2,48000,256);p.prepareToPlay(48000,256);
+        check(waitReady(p,90),"export test processor loads");stage2ExportAndLoader(p);return fails?1:0;
     }
+    if (std::getenv("VERB_STAGE2_CAPTURE")) return captureStage2Legacy();
     if (std::getenv("VERB_SOURCE_SWITCHES_ONLY")) {
         VerbProcessor p;
         p.setPlayConfigDetails(2, 2, 48000, 256); p.prepareToPlay(48000, 256);
@@ -2307,6 +2401,7 @@ receiver R 0 0 1.5 0 0
         juce::AudioBuffer<float> buf(4, 256);
         juce::MidiBuffer midi;
         for (auto& r : rooms) {
+            if(!verbp::selectedTestRoom(r))continue;
             p.loadSceneText(juce::String(r.text), juce::String(r.name), true);
             if (!waitReady(p, 60)) { allLoad = false; std::printf("    %s did not load: %s\n", r.name.c_str(), p.getStatus().toRawUTF8()); continue; }
             double en = 0;
@@ -2415,3 +2510,6 @@ receiver R 0 0 1.5 0 0
     std::printf(fails ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", fails);
     return fails ? 1 : 0;
 }
+
+
+

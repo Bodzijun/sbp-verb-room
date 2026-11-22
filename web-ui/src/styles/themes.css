@@ -1,0 +1,10 @@
+/* Chrome stays emerald by default;
+viewport roles never modify acoustic materials. */
+:root[data-theme='Ice blue']{
+--selection:#91c9eb}
+:root[data-theme='Violet']{
+--selection:#c4a0ed}
+:root[data-theme='Ember red']{
+--selection:#f48b70}
+:root[data-theme='Monochrome']{
+--selection:#d5d9da}

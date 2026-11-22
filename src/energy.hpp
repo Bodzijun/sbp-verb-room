@@ -1,8 +1,11 @@
 #pragma once
 #include "scene.hpp"
 #include <functional>
+#include <memory>
 
 namespace verb {
+class BakePool;
+struct EnergyExecution { std::shared_ptr<BakePool> pool; unsigned workers=1; };
 using BandEnergy = std::array<double, NB>;
 struct FieldEnergy { BandEnergy direct{}, early{}, tail{}; };
 struct EnergyMapOptions {
@@ -25,5 +28,5 @@ struct EnergyMap {
 // transmission/diffraction rules apply. Not a waveform/SPL/modal simulation.
 FieldEnergy earlyFieldEnergy(const Scene&, const Transducer&, Vec3 receiver, double earlyDb = -9);
 EnergyMap analyzeEnergyMap(const Scene&, EnergyMapOptions,
-    const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {});
+    const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, const EnergyExecution& execution = {});
 }

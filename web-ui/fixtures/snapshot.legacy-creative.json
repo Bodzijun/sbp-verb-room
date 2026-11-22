@@ -1,0 +1,831 @@
+{
+  "fixtureMeta": {
+    "title": "Legacy project state (pre-stage-2 .verbroom) loaded => Creative; real data from plugin/fixtures/stage2/legacy.verbroom",
+    "valueSources": {
+      "parameters.values (all except migrated)": "legacy-file",
+      "parameters.values.mode/absorption/decayLow/decayMid/decayHigh": "derived-by-hand",
+      "document.scene": "legacy-file",
+      "document.sources": "legacy-file",
+      "document.output": "legacy-file",
+      "document.tail": "legacy-file",
+      "document.editorFlags": "legacy-file",
+      "load.status": "derived-by-hand",
+      "host": "protocol-example",
+      "revision/sceneSerial/loadSerial": "protocol-example"
+    },
+    "notes": [
+      "The file has no mode/absorption/decay* PARAMs; PluginProcessor.cpp:489-498 migrates them to 1 (mode=1 => Creative, others unity).",
+      "The file has early=-8.999996 so the legacy -9 dB default is NOT re-added (cpp:489-491 only when both mode and early are missing).",
+      "Values such as s3x=1.52587890625e-05 are copied verbatim from the file (APVTS float32 round trip noise).",
+      "No 'layerModes' / per-surface tags exist in the file: loads as everything unlocked and visible."
+    ],
+    "unverified": [
+      "load.status text built from the cpp:1118-1120 formula, not captured from a run",
+      "host channel counts assumed 2/2"
+    ]
+  },
+  "messages": [
+    {
+      "schemaVersion": 1,
+      "sessionId": "editor-1",
+      "kind": "snapshot",
+      "payload": {
+        "revision": "1",
+        "loadSerial": "1",
+        "sceneSerial": "1",
+        "capabilities": {
+          "contractVersion": 1,
+          "pluginVersion": "0.2.2",
+          "engine": {
+            "erOrder": 1,
+            "maxWallsForOrder": 128
+          },
+          "features": {
+            "mode.physicalCreative": {
+              "available": true,
+              "status": "available"
+            },
+            "absorption.scale": {
+              "available": true,
+              "status": "available"
+            },
+            "decay.bandMultipliers": {
+              "available": true,
+              "status": "available"
+            },
+            "rt60.target": {
+              "available": true,
+              "status": "available"
+            },
+            "rt60.estimate": {
+              "available": true,
+              "status": "available"
+            },
+            "tail.quality": {
+              "available": true,
+              "status": "available"
+            },
+            "tail.diagnostics": {
+              "available": true,
+              "status": "available"
+            },
+            "energy.map": {
+              "available": true,
+              "status": "available"
+            },
+            "energy.components": {
+              "available": true,
+              "status": "available"
+            },
+            "energy.planSlice": {
+              "available": true,
+              "status": "available"
+            },
+            "energy.sliceFrontSide": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "needs-new-analysis-function"
+            },
+            "ir.export": {
+              "available": true,
+              "status": "available"
+            },
+            "ir.exportCancel": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-public-api"
+            },
+            "ir.exportProgressCounters": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "message-text-only"
+            },
+            "presets.verbroom": {
+              "available": true,
+              "status": "available"
+            },
+            "presets.txt": {
+              "available": true,
+              "status": "available"
+            },
+            "presets.keepIO": {
+              "available": true,
+              "status": "available"
+            },
+            "library.user": {
+              "available": true,
+              "status": "available"
+            },
+            "history.undo": {
+              "available": true,
+              "status": "partial",
+              "reasonCode": "scene-snapshot-only"
+            },
+            "history.redo": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-native-redo"
+            },
+            "surface.groups": {
+              "available": true,
+              "status": "available"
+            },
+            "surface.perSurfaceLockHide": {
+              "available": true,
+              "status": "available"
+            },
+            "editor.layerModesPersist": {
+              "available": false,
+              "status": "planned",
+              "reasonCode": "pending-implementation"
+            },
+            "editor.viewStateSession": {
+              "available": false,
+              "status": "planned",
+              "reasonCode": "pending-implementation"
+            },
+            "surface.classEdit": {
+              "available": false,
+              "status": "readOnly",
+              "reasonCode": "owner-decision-read-only"
+            },
+            "room.scaleOnce": {
+              "available": true,
+              "status": "partial",
+              "reasonCode": "zones-not-scaled"
+            },
+            "room.diffraction": {
+              "available": true,
+              "status": "available"
+            },
+            "room.clutter": {
+              "available": true,
+              "status": "available"
+            },
+            "room.clutterMinDist": {
+              "available": false,
+              "status": "readOnly",
+              "reasonCode": "not-persisted-in-text-format"
+            },
+            "room.roughness": {
+              "available": true,
+              "status": "available"
+            },
+            "sources.freePoints": {
+              "available": true,
+              "status": "available"
+            },
+            "output.layouts": {
+              "available": true,
+              "status": "available"
+            },
+            "output.micPatterns": {
+              "available": true,
+              "status": "available"
+            },
+            "output.ringIndependentCount": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "ring-count-follows-host"
+            },
+            "output.meters": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-output-meters-in-dsp"
+            },
+            "input.meters": {
+              "available": true,
+              "status": "available"
+            },
+            "reflections.paths": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-public-path-api"
+            },
+            "size.continuous": {
+              "available": true,
+              "status": "available"
+            },
+            "predelay": {
+              "available": true,
+              "status": "available"
+            },
+            "stereoWidth": {
+              "available": true,
+              "status": "available"
+            },
+            "freeze": {
+              "available": true,
+              "status": "available"
+            },
+            "duck": {
+              "available": true,
+              "status": "available"
+            },
+            "binaural": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "ambix": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "hybridFdn": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "lfRoomModes": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "velvetTransition": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "instrumentDirectivity": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "engine-not-implemented"
+            },
+            "ab.compare": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "pending-implementation"
+            },
+            "ab.persistInProject": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "owner-decision-5"
+            },
+            "colours.material": {
+              "available": true,
+              "status": "partial",
+              "reasonCode": "local-preferences-only"
+            },
+            "colours.source": {
+              "available": false,
+              "status": "unavailable",
+              "reasonCode": "no-persistence-defined"
+            }
+          },
+          "contractMinor": 2
+        },
+        "limits": {
+          "maxWalls": 128,
+          "maxFloorZones": 32,
+          "maxCeilingZones": 32,
+          "maxZoneVertices": 64,
+          "minZoneVertices": 3,
+          "maxPlates": 8,
+          "maxSources": 32,
+          "maxPoints": 64,
+          "maxInputs": 64,
+          "maxOutputs": 16,
+          "maxSourceChannels": 16,
+          "maxNameLength": 128,
+          "maxControlPayloadBytes": 1048576,
+          "maxDragPayloadBytes": 16384,
+          "maxClutterUi": 80,
+          "maxViewStateBytes": 4096
+        },
+        "parameters": {
+          "descriptors": null,
+          "values": {
+            "s1x": 2.000015258789062,
+            "s1y": 3.000015258789062,
+            "s1z": 1.50000011920929,
+            "s1az": 1.52587890625e-05,
+            "s1g": 3.814697265625e-06,
+            "s2x": 2.000015258789062,
+            "s2y": 5.000015258789062,
+            "s2z": 1.50000011920929,
+            "s2az": 1.52587890625e-05,
+            "s2g": 3.814697265625e-06,
+            "s3x": 1.52587890625e-05,
+            "s3y": 1.52587890625e-05,
+            "s3z": 1.50000011920929,
+            "s3az": 1.52587890625e-05,
+            "s3g": 3.814697265625e-06,
+            "s4x": 1.52587890625e-05,
+            "s4y": 1.52587890625e-05,
+            "s4z": 1.50000011920929,
+            "s4az": 1.52587890625e-05,
+            "s4g": 3.814697265625e-06,
+            "s5x": 1.52587890625e-05,
+            "s5y": 1.52587890625e-05,
+            "s5z": 1.50000011920929,
+            "s5az": 1.52587890625e-05,
+            "s5g": 3.814697265625e-06,
+            "s6x": 1.52587890625e-05,
+            "s6y": 1.52587890625e-05,
+            "s6z": 1.50000011920929,
+            "s6az": 1.52587890625e-05,
+            "s6g": 3.814697265625e-06,
+            "s7x": 1.52587890625e-05,
+            "s7y": 1.52587890625e-05,
+            "s7z": 1.50000011920929,
+            "s7az": 1.52587890625e-05,
+            "s7g": 3.814697265625e-06,
+            "s8x": 1.52587890625e-05,
+            "s8y": 1.52587890625e-05,
+            "s8z": 1.50000011920929,
+            "s8az": 1.52587890625e-05,
+            "s8g": 3.814697265625e-06,
+            "s9x": 1.52587890625e-05,
+            "s9y": 1.52587890625e-05,
+            "s9z": 1.50000011920929,
+            "s9az": 1.52587890625e-05,
+            "s9g": 3.814697265625e-06,
+            "s10x": 1.52587890625e-05,
+            "s10y": 1.52587890625e-05,
+            "s10z": 1.50000011920929,
+            "s10az": 1.52587890625e-05,
+            "s10g": 3.814697265625e-06,
+            "s11x": 1.52587890625e-05,
+            "s11y": 1.52587890625e-05,
+            "s11z": 1.50000011920929,
+            "s11az": 1.52587890625e-05,
+            "s11g": 3.814697265625e-06,
+            "s12x": 1.52587890625e-05,
+            "s12y": 1.52587890625e-05,
+            "s12z": 1.50000011920929,
+            "s12az": 1.52587890625e-05,
+            "s12g": 3.814697265625e-06,
+            "s13x": 1.52587890625e-05,
+            "s13y": 1.52587890625e-05,
+            "s13z": 1.50000011920929,
+            "s13az": 1.52587890625e-05,
+            "s13g": 3.814697265625e-06,
+            "s14x": 1.52587890625e-05,
+            "s14y": 1.52587890625e-05,
+            "s14z": 1.50000011920929,
+            "s14az": 1.52587890625e-05,
+            "s14g": 3.814697265625e-06,
+            "s15x": 1.52587890625e-05,
+            "s15y": 1.52587890625e-05,
+            "s15z": 1.50000011920929,
+            "s15az": 1.52587890625e-05,
+            "s15g": 3.814697265625e-06,
+            "s16x": 1.52587890625e-05,
+            "s16y": 1.52587890625e-05,
+            "s16z": 1.50000011920929,
+            "s16az": 1.52587890625e-05,
+            "s16g": 3.814697265625e-06,
+            "s17x": 1.52587890625e-05,
+            "s17y": 1.52587890625e-05,
+            "s17z": 1.50000011920929,
+            "s17az": 1.52587890625e-05,
+            "s17g": 3.814697265625e-06,
+            "s18x": 1.52587890625e-05,
+            "s18y": 1.52587890625e-05,
+            "s18z": 1.50000011920929,
+            "s18az": 1.52587890625e-05,
+            "s18g": 3.814697265625e-06,
+            "s19x": 1.52587890625e-05,
+            "s19y": 1.52587890625e-05,
+            "s19z": 1.50000011920929,
+            "s19az": 1.52587890625e-05,
+            "s19g": 3.814697265625e-06,
+            "s20x": 1.52587890625e-05,
+            "s20y": 1.52587890625e-05,
+            "s20z": 1.50000011920929,
+            "s20az": 1.52587890625e-05,
+            "s20g": 3.814697265625e-06,
+            "s21x": 1.52587890625e-05,
+            "s21y": 1.52587890625e-05,
+            "s21z": 1.50000011920929,
+            "s21az": 1.52587890625e-05,
+            "s21g": 3.814697265625e-06,
+            "s22x": 1.52587890625e-05,
+            "s22y": 1.52587890625e-05,
+            "s22z": 1.50000011920929,
+            "s22az": 1.52587890625e-05,
+            "s22g": 3.814697265625e-06,
+            "s23x": 1.52587890625e-05,
+            "s23y": 1.52587890625e-05,
+            "s23z": 1.50000011920929,
+            "s23az": 1.52587890625e-05,
+            "s23g": 3.814697265625e-06,
+            "s24x": 1.52587890625e-05,
+            "s24y": 1.52587890625e-05,
+            "s24z": 1.50000011920929,
+            "s24az": 1.52587890625e-05,
+            "s24g": 3.814697265625e-06,
+            "s25x": 1.52587890625e-05,
+            "s25y": 1.52587890625e-05,
+            "s25z": 1.50000011920929,
+            "s25az": 1.52587890625e-05,
+            "s25g": 3.814697265625e-06,
+            "s26x": 1.52587890625e-05,
+            "s26y": 1.52587890625e-05,
+            "s26z": 1.50000011920929,
+            "s26az": 1.52587890625e-05,
+            "s26g": 3.814697265625e-06,
+            "s27x": 1.52587890625e-05,
+            "s27y": 1.52587890625e-05,
+            "s27z": 1.50000011920929,
+            "s27az": 1.52587890625e-05,
+            "s27g": 3.814697265625e-06,
+            "s28x": 1.52587890625e-05,
+            "s28y": 1.52587890625e-05,
+            "s28z": 1.50000011920929,
+            "s28az": 1.52587890625e-05,
+            "s28g": 3.814697265625e-06,
+            "s29x": 1.52587890625e-05,
+            "s29y": 1.52587890625e-05,
+            "s29z": 1.50000011920929,
+            "s29az": 1.52587890625e-05,
+            "s29g": 3.814697265625e-06,
+            "s30x": 1.52587890625e-05,
+            "s30y": 1.52587890625e-05,
+            "s30z": 1.50000011920929,
+            "s30az": 1.52587890625e-05,
+            "s30g": 3.814697265625e-06,
+            "s31x": 1.52587890625e-05,
+            "s31y": 1.52587890625e-05,
+            "s31z": 1.50000011920929,
+            "s31az": 1.52587890625e-05,
+            "s31g": 3.814697265625e-06,
+            "s32x": 1.52587890625e-05,
+            "s32y": 1.52587890625e-05,
+            "s32z": 1.50000011920929,
+            "s32az": 1.52587890625e-05,
+            "s32g": 3.814697265625e-06,
+            "lx": 6.000015258789062,
+            "ly": 3.000015258789062,
+            "lz": 1.50000011920929,
+            "laz": 1.52587890625e-05,
+            "gain": 0.0,
+            "early": -8.999996185302734,
+            "diffusion": 0.5,
+            "doppler": 0.7000000476837158,
+            "tail": -2.999996185302734,
+            "mix": 100.0,
+            "spatialDry": 1.0,
+            "soloDirect": 0.0,
+            "soloEarly": 0.0,
+            "soloTail": 0.0,
+            "s1mute": 0.0,
+            "s1solo": 0.0,
+            "s2mute": 0.0,
+            "s2solo": 0.0,
+            "s3mute": 0.0,
+            "s3solo": 0.0,
+            "s4mute": 0.0,
+            "s4solo": 0.0,
+            "s5mute": 0.0,
+            "s5solo": 0.0,
+            "s6mute": 0.0,
+            "s6solo": 0.0,
+            "s7mute": 0.0,
+            "s7solo": 0.0,
+            "s8mute": 0.0,
+            "s8solo": 0.0,
+            "s9mute": 0.0,
+            "s9solo": 0.0,
+            "s10mute": 0.0,
+            "s10solo": 0.0,
+            "s11mute": 0.0,
+            "s11solo": 0.0,
+            "s12mute": 0.0,
+            "s12solo": 0.0,
+            "s13mute": 0.0,
+            "s13solo": 0.0,
+            "s14mute": 0.0,
+            "s14solo": 0.0,
+            "s15mute": 0.0,
+            "s15solo": 0.0,
+            "s16mute": 0.0,
+            "s16solo": 0.0,
+            "s17mute": 0.0,
+            "s17solo": 0.0,
+            "s18mute": 0.0,
+            "s18solo": 0.0,
+            "s19mute": 0.0,
+            "s19solo": 0.0,
+            "s20mute": 0.0,
+            "s20solo": 0.0,
+            "s21mute": 0.0,
+            "s21solo": 0.0,
+            "s22mute": 0.0,
+            "s22solo": 0.0,
+            "s23mute": 0.0,
+            "s23solo": 0.0,
+            "s24mute": 0.0,
+            "s24solo": 0.0,
+            "s25mute": 0.0,
+            "s25solo": 0.0,
+            "s26mute": 0.0,
+            "s26solo": 0.0,
+            "s27mute": 0.0,
+            "s27solo": 0.0,
+            "s28mute": 0.0,
+            "s28solo": 0.0,
+            "s29mute": 0.0,
+            "s29solo": 0.0,
+            "s30mute": 0.0,
+            "s30solo": 0.0,
+            "s31mute": 0.0,
+            "s31solo": 0.0,
+            "s32mute": 0.0,
+            "s32solo": 0.0,
+            "mode": 1.0,
+            "absorption": 1.0,
+            "decayLow": 1.0,
+            "decayMid": 1.0,
+            "decayHigh": 1.0,
+            "size": 100,
+            "predelay": 0,
+            "stereoWidth": 100,
+            "freeze": 0,
+            "duck": 0,
+            "duckRelease": 300,
+            "makeup": 0
+          },
+          "effective": {
+            "mode": "creative",
+            "earlyDb": -8.999996185302734,
+            "tailDb": -2.999996185302734,
+            "doppler": 0.7000000476837158,
+            "decay": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "diffusion": 0.5,
+            "absorption": {
+              "requested": 1.0,
+              "tailCurrent": true
+            },
+            "mixEffective": {
+              "ignored": false,
+              "reason": "none"
+            },
+            "sizePercent": 100,
+            "sizeRequested": 100,
+            "predelayMs": 0,
+            "stereoWidthPercent": 100,
+            "freeze": false,
+            "duckDb": 0,
+            "duckReleaseMs": 300,
+            "duckReductionDb": 0,
+            "widthAvailable": true,
+            "lockReason": ""
+          },
+          "texts": {
+            "makeup": "0.000"
+          }
+        },
+        "document": {
+          "sceneName": "legacy stage2 box",
+          "scene": {
+            "heightM": 3.0,
+            "tempC": 20.0,
+            "humidityPct": 50.0,
+            "floorMaterial": 1,
+            "ceilingMaterial": 0,
+            "materials": [
+              {
+                "name": "wall",
+                "classId": 10,
+                "alpha": [
+                  0.15,
+                  0.15,
+                  0.12,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.12
+                ],
+                "tau": [
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scatterLF": 0.05,
+                "scatterHF": 0.05
+              },
+              {
+                "name": "carpet",
+                "classId": 10,
+                "alpha": [
+                  0.05,
+                  0.1,
+                  0.25,
+                  0.45,
+                  0.65,
+                  0.7,
+                  0.7
+                ],
+                "tau": [
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "scatterLF": 0.15,
+                "scatterHF": 0.15
+              }
+            ],
+            "walls": [
+              {
+                "a": [
+                  0.0,
+                  0.0
+                ],
+                "b": [
+                  8.0,
+                  0.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 0,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  8.0,
+                  0.0
+                ],
+                "b": [
+                  8.0,
+                  6.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 0,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  0.0,
+                  6.0
+                ],
+                "b": [
+                  0.0,
+                  0.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 0,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              },
+              {
+                "a": [
+                  8.0,
+                  6.0
+                ],
+                "b": [
+                  0.0,
+                  6.0
+                ],
+                "zBottomM": 0.0,
+                "zTopM": null,
+                "material": 0,
+                "editor": {
+                  "name": "",
+                  "group": "",
+                  "hidden": false,
+                  "locked": false
+                }
+              }
+            ],
+            "floorZones": [],
+            "ceilingZones": [],
+            "floorEditor": {
+              "name": "",
+              "group": "",
+              "hidden": false,
+              "locked": false
+            },
+            "ceilingEditor": {
+              "name": "",
+              "group": "",
+              "hidden": false,
+              "locked": false
+            },
+            "clutter": {
+              "count": 0,
+              "minLenM": 0.4,
+              "maxLenM": 1.6,
+              "minHeightM": 0.5,
+              "maxHeightM": 1.8,
+              "tlMinDb": 2.0,
+              "tlMaxDb": 10.0,
+              "minDistM": 0.5,
+              "seed": 1
+            },
+            "roughness": 0.0,
+            "roughSeed": 1,
+            "diffraction": true,
+            "preserved": {
+              "sr": 48000.0,
+              "lengthS": 2.0,
+              "order": 2,
+              "rays": 20000,
+              "seed": 1,
+              "detectRadiusM": 0.5
+            },
+            "home": {
+              "x": 6.00002,
+              "y": 3.00002,
+              "z": 1.5,
+              "yawDeg": 1.52588e-05
+            }
+          },
+          "sources": [
+            {
+              "name": "Source1",
+              "format": 0,
+              "channels": 1,
+              "firstIn": 0,
+              "sum": false,
+              "spreadM": 0.5,
+              "pattern": 0.0,
+              "freePoints": false,
+              "offsetsM": []
+            },
+            {
+              "name": "Source2",
+              "format": 0,
+              "channels": 1,
+              "firstIn": 1,
+              "sum": false,
+              "spreadM": 0.5,
+              "pattern": 0.0,
+              "freePoints": false,
+              "offsetsM": []
+            }
+          ],
+          "output": {
+            "layout": 1,
+            "radiusM": 0.1,
+            "micPattern": 0
+          },
+          "tail": {
+            "baseRays": 48000,
+            "adaptive": false
+          },
+          "editorFlags": {
+            "navLocked": false,
+            "outlinerVisible": false,
+            "mixerCompact": true,
+            "inputMeters": true,
+            "keepRouting": false
+          }
+        },
+        "host": {
+          "inputChannels": 2,
+          "outputChannels": 2,
+          "renderedChannels": 2,
+          "effectiveLayout": 1,
+          "numPoints": 2,
+          "sampleRate": 48000.0
+        },
+        "load": {
+          "state": 2,
+          "status": "legacy stage2 box: 4 walls, 2 source(s) = 2 point(s), output Stereo (ORTF) (2 ch)",
+          "tailCurrent": true
+        },
+        "jobs": {
+          "export": {
+            "state": 0,
+            "message": ""
+          },
+          "rt60": {
+            "state": 0,
+            "achievedS": null,
+            "requestedS": null
+          }
+        }
+      }
+    }
+  ]
+}

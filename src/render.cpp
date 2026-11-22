@@ -77,6 +77,8 @@ Wav renderIR(const Scene& scIn, int srcIdx, bool verbose) {
                 cur = P;
             }
             if (!transmitLeg(g, cur, src.pos, chain[0], -1, tr)) return;
+            for (int j = 1; j <= k; ++j)  // a reflection exactly on another wall's plane (wall foot, corner) is a crossing
+                if (!touchCross(g, j < k ? pts[(size_t)j + 1] : rc.pos, pts[(size_t)j], j > 1 ? pts[(size_t)j - 1] : src.pos, tr)) return;
             double len = 0;
             Vec3 prev = rc.pos;
             for (int j = k; j >= 1; --j) { len += norm(pts[j] - prev); prev = pts[j]; }

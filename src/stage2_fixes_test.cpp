@@ -1,6 +1,8 @@
 #include "rt_engine.hpp"
 #include "geometry.hpp"
+#include "../plugin/TestRoomSelection.h"
 #include "../plugin/RoomLibrary.h"
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -67,6 +69,8 @@ static void extremes() {
     csv<<"room,points,probes,group,multiplier,unity_peak,peak,worst_peak_ratio,finite,band,physical_rt60,result_rt60,effective_multiplier,status,error\n";
     double worst=0;
     for(const auto& room:verbp::builtinRooms()) {
+        if(!verbp::selectedTestRoom(room))continue;
+        std::printf("Stage2 room: %s\n",room.name.c_str());
         auto s=scene(room,true);const auto unity=render(s,{{1,1,1}});
         bool normal=room.name=="Bedroom"||room.name=="Living room"||room.name.find("Bathroom")!=std::string::npos
             ||room.name.find("Studio")!=std::string::npos||room.name=="Corridor"||room.name.find("hall")!=std::string::npos||room.name.find("VSL")!=std::string::npos;
@@ -111,8 +115,8 @@ static void lengthAndCancellation() {
         const double cached=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
         check(cached<.5,"repeated scene/absorption length probe is cached (<0.5 s, excluding unrelated IR synthesis)");
         auto edited=s;edited.humidity+=.314159;
-        const auto begin=std::chrono::steady_clock::now();bool cancelled=false;
-        try {e.setScene(edited,.973,[&]{return std::chrono::steady_clock::now()-begin>std::chrono::milliseconds(30);});}
+        const auto begin=std::chrono::steady_clock::now();bool cancelled=false;std::atomic<int> cancelPolls{0};
+        try {e.setScene(edited,.973,[&]{return ++cancelPolls>8||std::chrono::steady_clock::now()-begin>std::chrono::milliseconds(30);});}
         catch(const std::runtime_error&){cancelled=true;}
         const double elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
         std::printf("Probe cancellation %.6f s; cached construction %.6f s\n",elapsed,cached);

@@ -1,6 +1,8 @@
 #include "tail.hpp"
+#include "bake_pool.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <random>
@@ -38,17 +40,145 @@ std::vector<std::vector<double>> makeBandFilters(double sr, int taps) {
     return bands;
 }
 
+
+// ---- the receiver's detection sphere (E3 part B) ----
+// The late field is estimated as the ray path length inside a sphere around the receiver divided by the sphere's volume.
+// That is only right where the whole sphere is reachable by the sound. Where it sticks out through a wall (a small
+// booth, a listener near a wall or a partition) or through the floor / ceiling, the part behind the boundary is another
+// space: rays travelling there must not be counted, and the volume to divide by is the reachable part of the sphere.
+// `clean` spheres (nothing within the radius) keep the original arithmetic exactly.
+struct SphereClip {
+    struct WallBlock { double ax, ay, ex, ey, z0, z1, sideC; };  // sideC: which side of the wall's line the centre is on
+    bool clean = true;
+    std::vector<WallBlock> walls;
+    std::vector<int> plates;         // plates within the radius (indices into Geo::plates)
+    bool floorNear = false, ceilNear = false;
+    double reach = 1.0;              // reachable fraction of the sphere volume (1 for a clean sphere)
+};
+
+// Can the sound at q reach the centre c without leaving the space it is in (straight line, no wall / floor / ceiling /
+// plate in between)? Only the blockers recorded in `sc` are tested.
+static bool reachable(const Geo& g, const SphereClip& sc, Vec3 c, Vec3 q) {
+    if (sc.floorNear && q.z < 0.0) return false;
+    if (sc.ceilNear && q.z > g.H) {
+        const double t = (g.H - c.z) / (q.z - c.z);
+        const Vec3 P = c + (q - c) * t;
+        if (g.matAt(g.ceilId(), P.x, P.y)) return false;  // nullptr = an opening in the ceiling: the sound passes
+    }
+    const double rx = q.x - c.x, ry = q.y - c.y, dz = q.z - c.z;
+    for (int k : sc.plates) {
+        const Zone& pl = *g.plates[(size_t)k];
+        if (std::fabs(dz) < 1e-12) continue;
+        const double t = (pl.z - c.z) / dz;
+        if (t > 0.0 && t < 1.0 && pointInZone(pl, c.x + t * rx, c.y + t * ry)) return false;
+    }
+    for (const auto& w : sc.walls) {
+        if (cross2(w.ex, w.ey, q.x - w.ax, q.y - w.ay) * w.sideC > 0.0) continue;  // same side as the centre: not crossed
+        const double den = cross2(rx, ry, w.ex, w.ey);
+        if (std::fabs(den) < 1e-12) continue;
+        const double t = cross2(w.ax - c.x, w.ay - c.y, w.ex, w.ey) / den;
+        const double u = cross2(w.ax - c.x, w.ay - c.y, rx, ry) / den;
+        if (t <= 0.0 || t >= 1.0 || u < 0.0 || u > 1.0) continue;
+        const double z = c.z + t * dz;
+        if (z < w.z0 || z > w.z1) continue;
+        return false;
+    }
+    return true;
+}
+
+static double halton(int i, int base) {
+    double f = 1.0, r = 0.0;
+    for (; i > 0; i /= base) { f /= base; r += f * (double)(i % base); }
+    return r;
+}
+
+static SphereClip makeSphereClip(const Geo& g, Vec3 c, double rd) {
+    SphereClip sc;
+    for (int i = 0; i < g.W; ++i) {
+        const Wall& w = g.s.walls[(size_t)i];
+        if (!wallBlocks(g, w)) continue;
+        if (w.z1 <= c.z - rd || w.z0 >= c.z + rd) continue;  // entirely below / above the sphere
+        const double ex = w.bx - w.ax, ey = w.by - w.ay, l2 = ex * ex + ey * ey;
+        double t = l2 > 1e-18 ? ((c.x - w.ax) * ex + (c.y - w.ay) * ey) / l2 : 0.0;
+        t = std::min(1.0, std::max(0.0, t));
+        if (std::hypot(c.x - (w.ax + t * ex), c.y - (w.ay + t * ey)) < rd) {
+            const double side = cross2(ex, ey, c.x - w.ax, c.y - w.ay);
+            sc.walls.push_back({w.ax, w.ay, ex, ey, std::max(0.0, w.z0), std::min(w.z1, g.H), side > 0 ? 1.0 : side < 0 ? -1.0 : 0.0});
+        }
+    }
+    for (int k = 0; k < (int)g.plates.size(); ++k)
+        if (g.plates[(size_t)k]->z > c.z - rd && g.plates[(size_t)k]->z < c.z + rd) sc.plates.push_back(k);
+    sc.floorNear = c.z - rd < 0.0;
+    sc.ceilNear = g.hasCeil && c.z + rd > g.H;
+    sc.clean = sc.walls.empty() && sc.plates.empty() && !sc.floorNear && !sc.ceilNear;
+    if (sc.clean) return sc;
+    // reachable fraction of the sphere: a fixed (deterministic, independent of the ray generator) Halton point set
+    int n = 0, hit = 0;
+    for (int i = 1; n < 6000 && i < 40000; ++i) {
+        const Vec3 u{2.0 * halton(i, 2) - 1.0, 2.0 * halton(i, 3) - 1.0, 2.0 * halton(i, 5) - 1.0};
+        if (dot(u, u) > 1.0) continue;
+        ++n;
+        if (reachable(g, sc, c, c + u * rd)) ++hit;
+    }
+    sc.reach = std::max(0.02, n > 0 ? (double)hit / n : 1.0);
+    return sc;
+}
+
 }  // namespace
 
-static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize,
-    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}) {
-    const Geo g(sc);
-    const int R = (int)rcv.size();
-    const double c = speedOfSound(sc.tempC);
-    std::array<double, NB> airDb;
-    for (int b = 0; b < NB; ++b) airDb[b] = airAbsDbPerM(kBandHz[b], sc.tempC, sc.humidity);
+// E4a: options of the cheap motion estimate. Default-constructed = the production trace, unchanged.
+struct TraceCRN {
+    bool perRay = false;   // ray i draws from its own generator seeded from (seed, i): common random numbers between poses
+    double stopRel = 0;    // > 0: a ray ends once its band-maximum energy has fallen below stopRel of a full-sphere start
+    std::vector<double> rayAcc, sumSq;  // per-ray totals [r*NB+b] and the sum of their squares (variance of the estimate)
+    long long work = 0;    // out: deterministic work units (ray segments + receiver records)
+};
 
-    TailHist out;
+// Fixed-width arithmetic and explicit uniform conversion keep ray streams portable.
+static uint64_t tailRaySeed(int seed,uint64_t index){
+    uint64_t x=(uint64_t)(uint32_t)seed*7919ull+13+0x9e3779b97f4a7c15ull*(index+1);
+    x=(x^(x>>30))*0xbf58476d1ce4e5b9ull;x=(x^(x>>27))*0x94d049bb133111ebull;
+    return x^(x>>31);
+}
+struct TailCounter {
+    uint64_t state=0;
+    explicit TailCounter(uint64_t initial=0):state(initial){}
+    void seed(uint64_t initial){state=initial;}
+    uint64_t operator()(){uint64_t x=(state+=0x9e3779b97f4a7c15ull);x=(x^(x>>30))*0xbf58476d1ce4e5b9ull;x=(x^(x>>27))*0x94d049bb133111ebull;return x^(x>>31);}
+};
+struct TailUniform { double operator()(TailCounter& rng)const{return (rng()>>11)*(1.0/9007199254740992.0);} };
+
+struct TailTracePrepared {
+    Geo g;int R;double c,rd=0,Vs=0;std::array<double,NB> airDb;std::vector<SphereClip> clip;
+    TailTracePrepared(const Scene& sc,const std::vector<Transducer>&rcv,double minRd=0.):g(sc),R((int)rcv.size()),c(speedOfSound(sc.tempC)){
+        for(int b=0;b<NB;++b)airDb[b]=airAbsDbPerM(kBandHz[b],sc.tempC,sc.humidity);
+    rd = sc.detectRadius;
+    {
+        double x0 = 1e18, x1 = -1e18, y0 = 1e18, y1 = -1e18;
+        for (const auto& w : sc.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
+        if (x1 > x0 && y1 > y0) {
+            const double vol = (x1 - x0) * (y1 - y0) * std::max(1.0, std::min(sc.height, 40.0));
+            rd = std::min(3.0, std::max(rd, 0.05 * std::cbrt(vol)));
+        }
+    }
+    // P3: bake-only floor on the detection radius (0 = unchanged production arithmetic).
+    if (minRd > 0.) rd = std::min(3.0, std::max(rd, minRd));
+    Vs = 4.0 / 3.0 * kPi * rd * rd * rd;
+    clip.resize((size_t)R);
+    for (int r = 0; r < R; ++r) clip[(size_t)r] = makeSphereClip(g, rcv[(size_t)r].pos, rd);
+    }
+};
+// Analysis-only bounded replay records. Source ray propagation is unchanged.
+struct EnergySegment { Vec3 p,d;double L,path;std::array<double,NB> e;double x0,x1,y0,y1; };
+struct EnergyCapture {std::vector<EnergySegment> segments;double rz0=0,rz1=0,rd=0;std::atomic<size_t>* count=nullptr;};
+struct EnergyCaptureFull:std::runtime_error {EnergyCaptureFull():std::runtime_error("Analysis segment budget"){} };
+static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize,
+    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr, int firstRay=0,int lastRay=-1,const TailTracePrepared* prepared=nullptr,TailHist* recycle=nullptr,EnergyCapture* capture=nullptr,double minDetectRadius=0.) {
+    std::unique_ptr<TailTracePrepared> owned;
+    if(!prepared){owned=std::make_unique<TailTracePrepared>(sc,rcv,minDetectRadius);prepared=owned.get();}
+    const auto& g=prepared->g;const int R=prepared->R;const double c=prepared->c;
+    const auto& airDb=prepared->airDb;
+    TailHist out=recycle?std::move(*recycle):TailHist{};
     out.binDur = 0.001;
     out.nBins = integrated ? 1 : (size_t)std::ceil(sc.length / out.binDur) + 2;
     out.h.resize(R);
@@ -60,22 +190,13 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
     out.reliableEnd.resize(R);
     for (auto& r : out.reliableEnd) r.fill(out.nBins);
 
-    std::mt19937_64 rng((uint64_t)seed * 7919ull + 13);
-    std::uniform_real_distribution<double> U(0, 1);
+    TailCounter rng((uint64_t)seed * 7919ull + 13);
+    TailUniform U;
     const double maxPath = c * sc.length;
     // The receiver sphere grows with the room: in a hall only a handful of rays cross a 0.5 m sphere per millisecond,
     // and the late histogram turns into Poisson noise (heard as modulation / fragmentation of the tail). The late field
     // is diffuse, so averaging over a larger sphere loses nothing.
-    double rd = sc.detectRadius;
-    {
-        double x0 = 1e18, x1 = -1e18, y0 = 1e18, y1 = -1e18;
-        for (const auto& w : sc.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
-        if (x1 > x0 && y1 > y0) {
-            const double vol = (x1 - x0) * (y1 - y0) * std::max(1.0, std::min(sc.height, 40.0));
-            rd = std::min(3.0, std::max(rd, 0.05 * std::cbrt(vol)));
-        }
-    }
-    const double Vs = 4.0 / 3.0 * kPi * rd * rd * rd;
+    const double rd=prepared->rd,Vs=prepared->Vs;const auto&clip=prepared->clip;
     // Spatial queries are used only for analysis. Clip each segment to the
     // receivers' height slab, then search their X-sorted sphere bounds.
     std::vector<int> receiverOrder;
@@ -85,14 +206,16 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
         std::sort(receiverOrder.begin(), receiverOrder.end(), [&](int a, int b) { return rcv[a].pos.x < rcv[b].pos.x; });
         for (const auto& r : rcv) { rz0 = std::min(rz0, r.pos.z - rd); rz1 = std::max(rz1, r.pos.z + rd); }
     }
-    for (int i = 0; i < rays; ++i) {
+    for (int i = firstRay; i < (lastRay<0?rays:lastRay); ++i) {
         if (i % 32 == 0) {
             if (cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
             if (progress) progress((double)i / rays);
         }
+        rng.seed(tailRaySeed(seed,(uint64_t)i));
+        if (crn) crn->rayAcc.assign((size_t)R * NB, 0.0);
         double zc = 2 * U(rng) - 1, ph = 2 * kPi * U(rng), sr_ = std::sqrt(1 - zc * zc);
         Vec3 d{sr_ * std::cos(ph), sr_ * std::sin(ph), zc};
-        double gs = dirGain(src, d);
+        double gs = src.profile() != nullptr ? std::pow(10.0, src.gainDb / 20.0) : dirGain(src, d);
         std::array<double, NB> e;
         e.fill(gs * gs / rays);
         Vec3 p = src.pos;
@@ -101,6 +224,7 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
         int steps = 0;
         while (true) {
             if (++steps % 32 == 0 && cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
+            if (crn) crn->work += 1 + R;
             double tBest = std::numeric_limits<double>::infinity();
             int surf = -1;
             for (int w = 0; w < g.W; ++w) {
@@ -131,6 +255,8 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
             double L = surf < 0 ? maxPath - path : std::min(tBest, maxPath - path);
             if (L <= 0) break;
             if (refl > order) {
+                if(capture){double a=0,b=L;if(std::abs(d.z)>1e-12){double lo=(capture->rz0-p.z)/d.z,hi=(capture->rz1-p.z)/d.z;if(lo>hi)std::swap(lo,hi);a=std::max(a,lo);b=std::min(b,hi);}else if(p.z<capture->rz0||p.z>capture->rz1)b=-1;
+                    if(b>=a){if(capture->segments.size()%128==0&&capture->count->fetch_add(128)>=262144)throw EnergyCaptureFull();const auto q0=p+d*a,q1=p+d*b;capture->segments.push_back({p,d,L,path,e,std::min(q0.x,q1.x)-rd,std::max(q0.x,q1.x)+rd,std::min(q0.y,q1.y)-rd,std::max(q0.y,q1.y)+rd});}}
                 auto record = [&](int r) {
                     Vec3 oc = p - rcv[r].pos;
                     double bq = dot(oc, d), cc = dot(oc, oc) - rd * rd, disc = bq * bq - cc;
@@ -139,15 +265,37 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
                     double s1 = std::max(-bq - sq, 0.0), s2 = std::min(-bq + sq, L);
                     if (s2 <= s1) return;
                     double mid = path + 0.5 * (s1 + s2);
+                    double chord = s2 - s1, vol = Vs;
+                    const SphereClip& sphere = clip[(size_t)r];
+                    if (!sphere.clean) {  // count only the part of the chord the receiver can actually be reached from
+                        // Three probes first (both ends and the middle of the chord): all hidden or all reachable ends
+                        // the question; a chord that crosses a boundary is cut into 8 pieces, each judged at its middle.
+                        const Vec3 c0 = rcv[r].pos;
+                        const bool v0 = reachable(g, sphere, c0, p + d * s1), v1 = reachable(g, sphere, c0, p + d * (0.5 * (s1 + s2))),
+                                   v2 = reachable(g, sphere, c0, p + d * s2);
+                        if (v0 == v1 && v1 == v2) {
+                            if (!v0) return;
+                        } else {
+                            constexpr int K = 8;
+                            const double ds = chord / K;
+                            int seen = 0;
+                            for (int k = 0; k < K; ++k)
+                                if (reachable(g, sphere, c0, p + d * (s1 + (k + 0.5) * ds))) ++seen;
+                            if (seen == 0) return;
+                            chord = ds * seen;
+                        }
+                        vol = Vs * sphere.reach;
+                    }
                     size_t bin = integrated ? 0 : (size_t)(mid / c / out.binDur);
                     if (bin >= out.nBins) return;
                     double grb[NB];
                     dirGainBands(rcv[r], d * -1.0, grb);
                     for (int b = 0; b < NB; ++b) {
                         const double gr = grb[b];
-                        const double contrib = 4 * kPi * e[b] * std::pow(10.0, -airDb[b] * mid / 10.0) * (s2 - s1) / Vs * gr * gr;
+                        const double contrib = 4 * kPi * e[b] * std::pow(10.0, -airDb[b] * mid / 10.0) * chord / vol * gr * gr;
                         out.h[r][b][bin] += contrib;
                         out.h2[r][b][bin] += contrib * contrib;
+                        if (crn) crn->rayAcc[(size_t)r * NB + b] += contrib;
                     }
                 };
                 if (!integrated) {
@@ -200,6 +348,7 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
             }
             ++refl;
             if (emax < 1e-10 / rays) break;
+            if (crn && crn->stopRel > 0 && emax < crn->stopRel / rays) break;
             Vec3 n;
             if (surf < g.W) {
                 const Wall& wl = sc.walls[surf];
@@ -218,22 +367,337 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
             }
             p = p + n * 1e-6;
         }
+        if (crn) {
+            crn->sumSq.resize((size_t)R * NB, 0.0);
+            for (size_t k = 0; k < crn->rayAcc.size(); ++k) crn->sumSq[k] += crn->rayAcc[k] * crn->rayAcc[k];
+        }
     }
     if (finalize) finalizeTail(out);
     return out;
 }
 
-TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize, const std::function<bool()>& cancelled) {
-    return traceTailImpl(sc, src, rcv, order, rays, seed, finalize, false, cancelled);
+TailHist traceTail(const Scene& sc,const Transducer& src,const std::vector<Transducer>& rcv,int order,int rays,int seed,bool finalize,const std::function<bool()>& cancelled,const TailExecution& execution,double minDetectRadius){
+    using Clock=std::chrono::steady_clock;auto prepare=Clock::now();
+    constexpr int chunk=1024;const TailTracePrepared prepared(sc,rcv,minDetectRadius);
+    TailHist out;bool initialized=false;
+    const size_t bytes=(size_t)(std::ceil(sc.length/.001)+2)*std::max<size_t>(1,rcv.size())*NB*16;
+    const unsigned width=execution.pool?std::max(1u,std::min<unsigned>(execution.workers,(unsigned)std::max<size_t>(1,128u*1024u*1024u/std::max<size_t>(1,bytes)))):1;
+    const int chunks=std::max(1,(rays+chunk-1)/chunk);
+    std::vector<double> work(chunks,0.);std::atomic<bool> failed{false};
+    auto stop=[&]{return failed.load()||(cancelled&&cancelled());};
+    auto run=[&](int j,TailHist recycled=TailHist{}){auto t=Clock::now();auto h=traceTailImpl(sc,src,rcv,order,rays,seed,false,false,stop,{},nullptr,j*chunk,std::min(rays,(j+1)*chunk),&prepared,&recycled);work[j]=std::chrono::duration<double,std::milli>(Clock::now()-t).count();return h;};
+    auto merge=[&](TailHist& h){auto t=Clock::now();if(!initialized){out=std::move(h);initialized=true;}
+        else for(size_t r=0;r<rcv.size();++r)for(int b=0;b<NB;++b)for(size_t k=0;k<out.nBins;++k){out.h[r][b][k]+=h.h[r][b][k];out.h2[r][b][k]+=h.h2[r][b][k];}
+        if(execution.stats)execution.stats->mergeMs+=std::chrono::duration<double,std::milli>(Clock::now()-t).count();
+    };
+    if(execution.stats){*execution.stats={};execution.stats->prepareMs=std::chrono::duration<double,std::milli>(Clock::now()-prepare).count();execution.stats->chunks=chunks;execution.stats->peakHistBytes=bytes*std::min<size_t>(chunks,width);}
+    if(width==1){TailHist recycled;for(int j=0;j<chunks;++j){recycled=run(j,std::move(recycled));merge(recycled);}}
+    else{
+        std::vector<std::future<TailHist>> jobs(chunks);
+        try{
+            for(int j=0;j<std::min<int>(chunks,width);++j)jobs[j]=execution.pool->submit([&,j]{return run(j);},true);
+            for(int j=0;j<chunks;++j){auto t=Clock::now();auto h=jobs[j].get();if(execution.stats)execution.stats->waitMs+=std::chrono::duration<double,std::milli>(Clock::now()-t).count();
+                merge(h);
+                if(j+(int)width<chunks){int next=j+width;jobs[next]=execution.pool->submit([&,next,recycled=std::move(h)]()mutable{return run(next,std::move(recycled));},true);}
+                if(stop())throw std::runtime_error("Tail rebuild cancelled");
+            }
+        }catch(...){failed=true;for(auto&f:jobs)if(f.valid())try{f.get();}catch(...){}throw;}
+    }
+    if(execution.stats)for(double ms:work)execution.stats->workMs+=ms;
+    if(finalize)finalizeTail(out);return out;
 }
 
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
-    int order, int rays, int seed, const std::function<bool()>& cancelled, const std::function<void(double)>& progress) {
-    const auto hist = traceTailImpl(sc, src, rcv, order, rays, seed, false, true, cancelled, progress);
+    int order, int rays, int seed, const std::function<bool()>& cancelled, const std::function<void(double)>& progress, double minDetectRadius) {
+    const auto hist = traceTailImpl(sc, src, rcv, order, rays, seed, false, true, cancelled, progress, nullptr, 0, -1, nullptr, nullptr, nullptr, minDetectRadius);
     std::vector<std::array<double, NB>> result(rcv.size());
     for (size_t r = 0; r < rcv.size(); ++r) for (int b = 0; b < NB; ++b) result[r][b] = hist.h[r][b][0];
     if (progress) progress(1.0);
     return result;
+}
+
+
+static void replayEnergy(const TailTracePrepared& prepared,const Transducer& receiver,const SphereClip& clipping,const EnergySegment& segment,std::array<double,NB>& result) {
+    const auto& g=prepared.g;const auto& airDb=prepared.airDb;const double rd=prepared.rd,Vs=prepared.Vs;const auto p=segment.p,d=segment.d;const double L=segment.L,path=segment.path;const auto& e=segment.e;
+
+                    Vec3 oc = p - receiver.pos;
+                    double bq = dot(oc, d), cc = dot(oc, oc) - rd * rd, disc = bq * bq - cc;
+                    if (disc <= 0) return;
+                    double sq = std::sqrt(disc);
+                    double s1 = std::max(-bq - sq, 0.0), s2 = std::min(-bq + sq, L);
+                    if (s2 <= s1) return;
+                    double mid = path + 0.5 * (s1 + s2);
+                    double chord = s2 - s1, vol = Vs;
+                    const SphereClip& sphere = clipping;
+                    if (!sphere.clean) {  // count only the part of the chord the receiver can actually be reached from
+                        // Three probes first (both ends and the middle of the chord): all hidden or all reachable ends
+                        // the question; a chord that crosses a boundary is cut into 8 pieces, each judged at its middle.
+                        const Vec3 c0 = receiver.pos;
+                        const bool v0 = reachable(g, sphere, c0, p + d * s1), v1 = reachable(g, sphere, c0, p + d * (0.5 * (s1 + s2))),
+                                   v2 = reachable(g, sphere, c0, p + d * s2);
+                        if (v0 == v1 && v1 == v2) {
+                            if (!v0) return;
+                        } else {
+                            constexpr int K = 8;
+                            const double ds = chord / K;
+                            int seen = 0;
+                            for (int k = 0; k < K; ++k)
+                                if (reachable(g, sphere, c0, p + d * (s1 + (k + 0.5) * ds))) ++seen;
+                            if (seen == 0) return;
+                            chord = ds * seen;
+                        }
+                        vol = Vs * sphere.reach;
+                    }
+                    
+                    double grb[NB];
+                    dirGainBands(receiver, d * -1.0, grb);
+                    for (int b = 0; b < NB; ++b) {
+                        const double gr = grb[b];
+                        const double contrib = 4 * kPi * e[b] * std::pow(10.0, -airDb[b] * mid / 10.0) * chord / vol * gr * gr;
+                        result[b] += contrib;
+                        
+                        
+                    }
+
+}
+template<class F>static void analysisTasks(const TailExecution& execution,size_t count,F fn){
+    const unsigned width=std::max(1u,std::min<unsigned>((unsigned)count,execution.workers));std::atomic<bool> failed{false};std::vector<std::future<void>> jobs;
+    try{for(unsigned j=0;j<width;++j)jobs.push_back(execution.pool->submit([&,j]{try{for(size_t i=j;i<count&&!failed.load();i+=width)fn(i);}catch(...){failed=true;throw;}},false,true));}
+    catch(...){failed=true;for(auto& job:jobs)if(job.valid())try{job.get();}catch(...){}throw;}
+    std::exception_ptr error;for(auto& job:jobs)try{job.get();}catch(...){if(!error)error=std::current_exception();}if(error)std::rethrow_exception(error);
+}
+std::vector<std::array<double,NB>> traceTailEnergyAnalysis(const Scene& sc,const Transducer& src,const std::vector<Transducer>& receivers,int order,int rays,int seed,const std::function<bool()>& cancelled,const std::function<void(double)>& progress,const TailExecution& execution){
+    if(!execution.pool||execution.workers<=1)return traceTailEnergy(sc,src,receivers,order,rays,seed,cancelled,progress);
+    const TailTracePrepared prepared(sc,receivers),empty(sc,{});double rz0=1e30,rz1=-1e30;for(auto r:receivers){rz0=std::min(rz0,r.pos.z-prepared.rd);rz1=std::max(rz1,r.pos.z+prepared.rd);}
+    std::vector<std::array<double,NB>> result(receivers.size());
+    for(int first=0;first<rays;first+=128){if(cancelled&&cancelled())throw std::runtime_error("Analysis cancelled");const int count=std::min(128,rays-first);std::vector<EnergyCapture> captures((size_t)count);std::atomic<size_t> records{0};std::atomic<bool> overflow{false};
+        for(auto& c:captures){c.rz0=rz0;c.rz1=rz1;c.rd=prepared.rd;c.count=&records;}
+        try {analysisTasks(execution,count,[&](size_t i){try{traceTailImpl(sc,src,{},order,rays,seed,false,true,cancelled,{},nullptr,first+(int)i,first+(int)i+1,&empty,nullptr,&captures[i]);}catch(const EnergyCaptureFull&){overflow=true;throw;}});}
+        catch(...){if(overflow.load()&&!(cancelled&&cancelled())){auto fallback=traceTailEnergy(sc,src,receivers,order,rays,seed,cancelled);if(progress)progress(1.);return fallback;}throw;}
+        analysisTasks(execution,receivers.size(),[&](size_t r){if(cancelled&&cancelled())throw std::runtime_error("Analysis cancelled");const auto position=receivers[r].pos;
+            for(const auto& capture:captures)for(const auto& segment:capture.segments)if(position.x>=segment.x0&&position.x<=segment.x1&&position.y>=segment.y0&&position.y<=segment.y1)replayEnergy(prepared,receivers[r],prepared.clip[r],segment,result[r]);});
+        if(progress)progress((first+count)/(double)rays);
+    }return result;
+}
+std::vector<std::array<double, NB>> traceTailEnergyCRN(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
+    int order, int rays, int seed, double stopDb, const std::function<bool()>& cancelled, long long* work, std::vector<std::array<double, NB>>* sumSq) {
+    TraceCRN crn;
+    crn.perRay = true;
+    crn.stopRel = stopDb < 0 ? std::pow(10.0, stopDb / 10.0) : 0.0;
+    const auto hist = traceTailImpl(sc, src, rcv, order, rays, seed, false, true, cancelled, {}, &crn);
+    std::vector<std::array<double, NB>> result(rcv.size());
+    for (size_t r = 0; r < rcv.size(); ++r) for (int b = 0; b < NB; ++b) result[r][b] = hist.h[r][b][0];
+    if (work) *work = crn.work;
+    if (sumSq) {
+        sumSq->assign(rcv.size(), std::array<double, NB>{});
+        for (size_t r = 0; r < rcv.size(); ++r) for (int b = 0; b < NB; ++b) (*sumSq)[r][(size_t)b] = r * NB + b < crn.sumSq.size() ? crn.sumSq[r * NB + b] : 0.0;
+    }
+    return result;
+}
+
+// E4a: reciprocal (reverse) late-energy estimate for ALL sources at once. Rays start at the listener (head centre) and the
+// sources' detection spheres record them; by reciprocity this is the source->receiver late transfer. Each ray carries one
+// weight set per ear (the ear's pattern for the ray's direction), so one trace serves every source and both ears. The
+// propagation (walls, plates, floor/ceiling zones, transmission/reflection/scatter sampling, air) is traceTail's, step for
+// step; the detection sphere (with E3's clipping) sits round the source instead of the receiver. Ray i uses its own random
+// generator seeded from (seed, i) (common random numbers between poses). Result [s * ears + r][band].
+std::vector<std::array<double, NB>> traceLateReciprocal(const Scene& sc, Vec3 origin, const std::vector<Transducer>& ears,
+    const std::vector<Transducer>& srcs, int order, int rays, int seed, double stopDb, const std::function<bool()>& cancelled, long long* work,
+    std::vector<std::array<double, NB>>* sumSq) {
+    const Geo g(sc);
+    const int R = (int)ears.size(), S = (int)srcs.size();
+    std::vector<std::array<double, NB>> out((size_t)S * R);
+    for (auto& v : out) v.fill(0.0);
+    if (rays <= 0 || R == 0 || S == 0) return out;
+    const double c = speedOfSound(sc.tempC);
+    std::array<double, NB> airDb;
+    for (int b = 0; b < NB; ++b) airDb[b] = airAbsDbPerM(kBandHz[b], sc.tempC, sc.humidity);
+    const double maxPath = c * sc.length;
+    double rd = sc.detectRadius;  // as traceTail
+    {
+        double x0 = 1e18, x1 = -1e18, y0 = 1e18, y1 = -1e18;
+        for (const auto& w : sc.walls) { x0 = std::min({x0, w.ax, w.bx}); x1 = std::max({x1, w.ax, w.bx}); y0 = std::min({y0, w.ay, w.by}); y1 = std::max({y1, w.ay, w.by}); }
+        if (x1 > x0 && y1 > y0) {
+            const double vol = (x1 - x0) * (y1 - y0) * std::max(1.0, std::min(sc.height, 40.0));
+            rd = std::min(3.0, std::max(rd, 0.05 * std::cbrt(vol)));
+        }
+    }
+    const double Vs = 4.0 / 3.0 * kPi * rd * rd * rd;
+    std::vector<SphereClip> clip((size_t)S);
+    for (int s = 0; s < S; ++s) clip[(size_t)s] = makeSphereClip(g, srcs[(size_t)s].pos, rd);
+    std::vector<int> byX((size_t)S);
+    std::iota(byX.begin(), byX.end(), 0);
+    std::sort(byX.begin(), byX.end(), [&](int a, int b) { return srcs[(size_t)a].pos.x < srcs[(size_t)b].pos.x; });
+    double sz0 = 1e30, sz1 = -1e30;
+    for (const auto& t : srcs) { sz0 = std::min(sz0, t.pos.z - rd); sz1 = std::max(sz1, t.pos.z + rd); }
+    const double stopRel = stopDb < 0 ? std::pow(10.0, stopDb / 10.0) : 0.0;
+    long long units = 0;
+    TailCounter rng;
+    TailUniform U;
+    std::vector<double> w((size_t)R * NB);
+    std::vector<std::array<double, NB>> rayAcc;     // this ray's totals, for the variance
+    std::vector<int> touched;
+    std::vector<char> isTouched;
+    if (sumSq) { sumSq->assign((size_t)S * R, std::array<double, NB>{}); rayAcc.assign((size_t)S * R, std::array<double, NB>{}); isTouched.assign((size_t)S, 0); }
+    for (int i = 0; i < rays; ++i) {
+        if (i % 32 == 0 && cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
+        rng.seed(tailRaySeed(seed,(uint64_t)i));
+        double zc = 2 * U(rng) - 1, ph = 2 * kPi * U(rng), sr_ = std::sqrt(1 - zc * zc);
+        Vec3 d{sr_ * std::cos(ph), sr_ * std::sin(ph), zc};
+        for (int r = 0; r < R; ++r) {
+            double grb[NB];
+            dirGainBands(ears[(size_t)r], d, grb);  // the sound that reaches ear r from direction d
+            for (int b = 0; b < NB; ++b) w[(size_t)r * NB + b] = grb[b] * grb[b] / rays;
+        }
+        std::array<double, NB> f;
+        f.fill(1.0);
+        Vec3 p = origin;
+        double path = 0;
+        int refl = 0, steps = 0;
+        while (true) {
+            if (++steps % 32 == 0 && cancelled && cancelled()) throw std::runtime_error("Analysis cancelled");
+            ++units;
+            double tBest = std::numeric_limits<double>::infinity();
+            int surf = -1;
+            for (int wI = 0; wI < g.W; ++wI) {
+                const Wall& wl = sc.walls[wI];
+                double ex = wl.bx - wl.ax, ey = wl.by - wl.ay;
+                double den = cross2(d.x, d.y, ex, ey);
+                if (std::fabs(den) < 1e-12) continue;
+                double t = cross2(wl.ax - p.x, wl.ay - p.y, ex, ey) / den;
+                double u = cross2(wl.ax - p.x, wl.ay - p.y, d.x, d.y) / den;
+                if (t > 1e-7 && t < tBest && u >= 0 && u <= 1) {
+                    double z = p.z + d.z * t;
+                    if (z >= std::max(0.0, wl.z0) && z <= std::min(wl.z1, g.H)) { tBest = t; surf = wI; }
+                }
+            }
+            if (d.z < -1e-12) {
+                double t = -p.z / d.z;
+                if (t > 1e-7 && t < tBest) { tBest = t; surf = g.floorId(); }
+            }
+            if (g.hasCeil && d.z > 1e-12) {
+                double t = (g.H - p.z) / d.z;
+                if (t > 1e-7 && t < tBest) { tBest = t; surf = g.ceilId(); }
+            }
+            for (int k = 0; k < (int)g.plates.size() && std::fabs(d.z) > 1e-12; ++k) {
+                const Zone& pl = *g.plates[(size_t)k];
+                const double t = (pl.z - p.z) / d.z;
+                if (t > 1e-7 && t < tBest && pointInZone(pl, p.x + d.x * t, p.y + d.y * t)) { tBest = t; surf = g.W + 2 + k; }
+            }
+            double L = surf < 0 ? maxPath - path : std::min(tBest, maxPath - path);
+            if (L <= 0) break;
+            if (refl > order) {
+                double a = 0, bEnd = L;
+                if (std::fabs(d.z) > 1e-12) {
+                    double lo = (sz0 - p.z) / d.z, hi = (sz1 - p.z) / d.z;
+                    if (lo > hi) std::swap(lo, hi);
+                    a = std::max(a, lo); bEnd = std::min(bEnd, hi);
+                } else if (p.z < sz0 || p.z > sz1) bEnd = -1;
+                if (bEnd >= a) {
+                    const Vec3 q0 = p + d * a, q1 = p + d * bEnd;
+                    const double xa = std::min(q0.x, q1.x) - rd, xb = std::max(q0.x, q1.x) + rd;
+                    const double ya = std::min(q0.y, q1.y) - rd, yb = std::max(q0.y, q1.y) + rd;
+                    auto it = std::lower_bound(byX.begin(), byX.end(), xa, [&](int s, double x) { return srcs[(size_t)s].pos.x < x; });
+                    for (; it != byX.end() && srcs[(size_t)*it].pos.x <= xb; ++it) {
+                        const int s = *it;
+                        const Transducer& st = srcs[(size_t)s];
+                        if (st.pos.y < ya || st.pos.y > yb) continue;
+                        ++units;
+                        Vec3 oc = p - st.pos;
+                        double bq = dot(oc, d), cc = dot(oc, oc) - rd * rd, disc = bq * bq - cc;
+                        if (disc <= 0) continue;
+                        double sq = std::sqrt(disc);
+                        double s1 = std::max(-bq - sq, 0.0), s2 = std::min(-bq + sq, L);
+                        if (s2 <= s1) continue;
+                        double mid = path + 0.5 * (s1 + s2);
+                        double chord = s2 - s1, vol = Vs;
+                        const SphereClip& sphere = clip[(size_t)s];
+                        if (!sphere.clean) {
+                            const Vec3 c0 = st.pos;
+                            const bool v0 = reachable(g, sphere, c0, p + d * s1), v1 = reachable(g, sphere, c0, p + d * (0.5 * (s1 + s2))),
+                                       v2 = reachable(g, sphere, c0, p + d * s2);
+                            if (v0 == v1 && v1 == v2) {
+                                if (!v0) continue;
+                            } else {
+                                constexpr int K = 8;
+                                const double ds = chord / K;
+                                int seen = 0;
+                                for (int k = 0; k < K; ++k)
+                                    if (reachable(g, sphere, c0, p + d * (s1 + (k + 0.5) * ds))) ++seen;
+                                if (seen == 0) continue;
+                                chord = ds * seen;
+                            }
+                            vol = Vs * sphere.reach;
+                        }
+                        const double gs = st.profile() != nullptr ? std::pow(10.0, st.gainDb / 20.0) : dirGain(st, d * -1.0);  // the source sends this energy along -d
+                        for (int b = 0; b < NB; ++b) {
+                            const double base = 4 * kPi * f[(size_t)b] * std::pow(10.0, -airDb[(size_t)b] * mid / 10.0) * chord / vol * gs * gs;
+                            for (int r = 0; r < R; ++r) out[(size_t)s * R + r][(size_t)b] += base * w[(size_t)r * NB + b];
+                            if (sumSq) for (int r = 0; r < R; ++r) rayAcc[(size_t)s * R + r][(size_t)b] += base * w[(size_t)r * NB + b];
+                        }
+                        if (sumSq && !isTouched[(size_t)s]) { isTouched[(size_t)s] = 1; touched.push_back(s); }
+                    }
+                }
+            }
+            if (surf < 0 || tBest > maxPath - path) break;
+            p = p + d * tBest;
+            path += tBest;
+            const Material* mp = g.matAt(surf, p.x, p.y);
+            if (!mp) { p = p + d * 1e-6; continue; }
+            const Material& m = *mp;
+            double Tm = 0, Rm = 0;
+            std::array<double, NB> rho;
+            for (int b = 0; b < NB; ++b) {
+                rho[(size_t)b] = reflEnergy(m, b);
+                Rm += rho[(size_t)b] / NB;
+                if (surf < g.W || g.isPlate(surf)) Tm += m.tau[b] / NB;
+            }
+            if (Tm + Rm <= 1e-12) break;
+            const double pT = Tm / (Tm + Rm);
+            if (pT > 0 && U(rng) < pT) {
+                for (int b = 0; b < NB; ++b) f[(size_t)b] *= m.tau[b] / pT;
+                p = p + d * 1e-6;
+                continue;
+            }
+            double emax = 0;
+            for (int b = 0; b < NB; ++b) {
+                f[(size_t)b] *= rho[(size_t)b] / (1.0 - pT);
+                emax = std::max(emax, f[(size_t)b] * std::pow(10.0, -airDb[(size_t)b] * path / 10.0));
+            }
+            ++refl;
+            if (emax < 1e-10 || emax < stopRel) break;
+            Vec3 n;
+            if (surf < g.W) {
+                const Wall& wl = sc.walls[surf];
+                double ex = wl.bx - wl.ax, ey = wl.by - wl.ay, l = std::sqrt(ex * ex + ey * ey);
+                n = {-ey / l, ex / l, 0};
+            } else n = {0, 0, surf == g.floorId() ? 1.0 : -1.0};
+            if (dot(n, d) > 0) n = n * -1.0;
+            if (U(rng) < scatterAt(m, 3)) {
+                double u1 = U(rng), u2 = 2 * kPi * U(rng), rr = std::sqrt(u1);
+                Vec3 a = std::fabs(n.z) < 0.9 ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+                Vec3 t1 = unit(Vec3{n.y * a.z - n.z * a.y, n.z * a.x - n.x * a.z, n.x * a.y - n.y * a.x});
+                Vec3 t2{n.y * t1.z - n.z * t1.y, n.z * t1.x - n.x * t1.z, n.x * t1.y - n.y * t1.x};
+                d = unit(t1 * (rr * std::cos(u2)) + t2 * (rr * std::sin(u2)) + n * std::sqrt(1 - u1));
+            } else {
+                d = unit(d - n * (2 * dot(d, n)));
+            }
+            p = p + n * 1e-6;
+        }
+        if (sumSq) {
+            for (int s : touched) {
+                for (int r = 0; r < R; ++r) for (int b = 0; b < NB; ++b) {
+                    double& a = rayAcc[(size_t)s * R + r][(size_t)b];
+                    (*sumSq)[(size_t)s * R + r][(size_t)b] += a * a;
+                    a = 0;
+                }
+                isTouched[(size_t)s] = 0;
+            }
+            touched.clear();
+        }
+    }
+    if (work) *work = units;
+    return out;
 }
 
 static void smoothTailTransition(TailHist& out, const std::vector<std::array<std::vector<double>,NB>>& raw) {
@@ -455,16 +919,16 @@ bool tailNeedsMoreRays(const TailHist& raw, const TailHist& finalized) {
 }
 
 TailHist traceTailAdaptive(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rc,
-                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore, const std::function<bool()>& cancelled) {
+                          int order, int baseRays, int maxRays, int seed, int& raysUsed, bool* needsMore, const std::function<bool()>& cancelled, const TailExecution& execution,TailHist* retainedRaw,double minDetectRadius) {
     raysUsed = std::max(0, baseRays);
     maxRays = std::max(raysUsed, maxRays);
     for (;;) {
-        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false, cancelled);
+        auto raw = traceTail(sc, src, rc, order, raysUsed, seed, false, cancelled, execution, minDetectRadius);
         auto h = raw;
         finalizeTail(h);
         const bool sparse = tailNeedsMoreRays(raw, h);
         if (needsMore) *needsMore = sparse;
-        if (raysUsed == 0 || raysUsed >= maxRays || !sparse) return h;
+        if (raysUsed == 0 || raysUsed >= maxRays || !sparse) {if(retainedRaw)*retainedRaw=std::move(raw);return h;}
         raysUsed = (int)std::min<int64_t>(maxRays, 2ll * raysUsed);
     }
 }
@@ -509,6 +973,33 @@ TailDiagnostics analyzeTail(const TailHist& h) {
     return out;
 }
 
+static double analyzeBandRt60(const TailHist& h, int b, std::vector<double>& energy) {
+    energy.assign(h.nBins + 1, 0.0);
+    for (size_t r = 0; r < h.h.size(); ++r) {
+        const auto& band = h.h[r][b];
+        const size_t n = std::min(h.nBins, band.size());
+        for (size_t k = 0; k < n; ++k) energy[k] += band[k];
+    }
+    for (size_t k = h.nBins; k-- > 0;) energy[k] += energy[k + 1];
+    if (!(energy[0] > 0.0)) return -1.0;
+    const double invE0 = 1.0 / energy[0];
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    size_t count = 0;
+    for (size_t k = 0; k < h.nBins; ++k) {
+        const double db = std::max(-100.0, 10.0 * std::log10(std::max(energy[k] * invE0, 1e-10)));
+        if (db < -25.0) break;
+        if (db > -5.0) continue;
+        const double t = k * h.binDur;
+        sx += t; sy += db; sxx += t * t; sxy += t * db; ++count;
+    }
+    const double denom = count * sxx - sx * sx;
+    if (count >= 4 && denom > 1e-12) {
+        const double slope = (count * sxy - sx * sy) / denom;
+        if (slope < -1e-6) return -60.0 / slope;
+    }
+    return -1.0;
+}
+
 void reshapeTailDecay(TailHist& h, const std::array<double, 3>& multipliers) {
     if (multipliers == std::array<double, 3>{{1, 1, 1}} || h.h.empty()) return;
     const auto original = h;
@@ -535,6 +1026,7 @@ void reshapeTailDecay(TailHist& h, const std::array<double, 3>& multipliers) {
     }
     h.nBins=bins;
     for(auto& rc:h.h)for(auto& band:rc)band.resize(bins,0.);
+    std::vector<double> energyScratch(bins + 1, 0.0);
     for(int b=0;b<NB;++b) {
         if(targets[b]<=0)continue;
         // Every trial is rebuilt from the physical data, never from a previously lifted residue.
@@ -566,7 +1058,7 @@ void reshapeTailDecay(TailHist& h, const std::array<double, 3>& multipliers) {
         double bestError=INFINITY;
         std::vector<std::vector<double>> best(h.h.size());
         auto assess=[&](double tilt) {
-            trial(tilt);const double actual=analyzeTail(h).rt60[b];
+            trial(tilt);const double actual=analyzeBandRt60(h,b,energyScratch);
             const double error=actual>0?std::abs(std::log(actual/targets[b])):INFINITY;
             if(error<bestError) {bestError=error;for(size_t r=0;r<h.h.size();++r)best[r]=h.h[r][b];}
             return actual;
@@ -618,6 +1110,7 @@ Scene withAbsorptionScale(const Scene& scene, double scale) {
 
 std::array<double, NB> estimateRoomRT60(const Scene& scene) {
     const Scene s = withClutter(withRoughness(scene), 128);
+    const CeilingPlan ceilingPlan(s);
     // Even-odd scan integration handles concave outlines and overlapping material patches.
     double x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
     for (const auto& w : scene.walls) { x0 = std::min({x0,w.ax,w.bx}); x1 = std::max({x1,w.ax,w.bx}); y0 = std::min({y0,w.ay,w.by}); y1 = std::max({y1,w.ay,w.by}); }
@@ -633,7 +1126,7 @@ std::array<double, NB> estimateRoomRT60(const Scene& scene) {
         for (const auto& w : scene.walls) if ((w.ay > y) != (w.by > y) && w.ax+(y-w.ay)*(w.bx-w.ax)/(w.by-w.ay)>x) ++hits;
         if (!(hits & 1)) continue;
         const double a = (x1-x0)*(y1-y0)/25600.; area += a;
-        add(a, floorMatAt(s,x,y)); add(a,ceilMatAt(s,x,y));
+        add(a, floorMatAt(s,x,y)); add(a,ceilMatAt(s,x,y,&ceilingPlan));
     }
     for (const auto* zones : {&s.floorZones,&s.ceilZones}) for (const auto& z : *zones) if (z.z >= 0 && z.mat >= 0) {
         double twice = 0; for (size_t i=0;i<z.poly.size();++i) { const auto a=z.poly[i], b=z.poly[(i+1)%z.poly.size()]; twice += a.first*b.second-b.first*a.second; }
@@ -649,43 +1142,35 @@ std::array<double, NB> estimateRoomRT60(const Scene& scene) {
     return out;
 }
 
-double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled) {
+double tailSecondsFromTrace(const TailHist& input,double minimum){
+    double need = 0.0;
+    std::vector<double> edc(input.nBins);
+    for (size_t receiver = 0; receiver < input.h.size(); ++receiver) {
+        double acc = 0.0;
+        for (size_t k = input.nBins; k-- > 0;) {
+            double e = 0.0;
+            for (int b = 0; b < NB; ++b)
+                if (k < input.h[receiver][(size_t)b].size()) e += input.h[receiver][(size_t)b][k];
+            acc += e;
+            edc[k] = acc;
+        }
+        if (acc <= 0.0) continue;
+        const double target = acc * 1e-6;  // -60 dB below EDC at start of the late field
+        size_t k = 0;
+        while (k < input.nBins && edc[k] > target) ++k;
+        need = std::max(need, (double)k * input.binDur);
+    }
+    const double len = std::max(minimum, need + 0.8);  // leave the maximum 0.6 s end fade beyond -60 dB
+    return std::min(std::max(len, 0.2), 20.0);
+}
+
+double effectiveTailSeconds(const Scene& sc, int erOrder, const std::function<bool()>& cancelled, const TailExecution& execution, int probeRays) {
     double len = sc.length;
     if (!sc.sources.empty() && !sc.receivers.empty() && !sc.walls.empty()) {
         Scene t = sc;
         t.length = 20.0;  // allow long-decay rooms to reach the target before the final fade
-        const std::vector<Transducer> rc{t.receivers[0]};
-        // A 6000-ray probe often loses confidence during the initial build-up in
-        // absorbing halls, making a tiny slope error inflate the allocation to
-        // several seconds. Use the same order of ray budget as the live tail.
-        auto h = traceTail(t, t.sources[0], rc, erOrder, 48000, t.seed, false, cancelled);
-        finalizeTail(h,false); // preserve the legacy unity length probe exactly
-        double need = 0;
-        std::array<double, NB> totals{};
-        double largest = 0;
-        for (int b = 0; b < NB; ++b) {
-            for (double v : h.h[0][(size_t)b]) totals[(size_t)b] += v;
-            largest = std::max(largest, totals[(size_t)b]);
-        }
-        for (int b = 0; b < NB; ++b) {
-            const auto& e = h.h[0][(size_t)b];
-            const double total = totals[(size_t)b];
-            if (total <= largest * 1e-5) continue;
-            double rem = total;
-            size_t k = 0, k5 = 0, k35 = 0;
-            for (; k < e.size(); ++k) {
-                rem -= e[k];
-                if (k5 == 0 && rem < 0.316 * total) k5 = k;     // -5 dB
-                if (k35 == 0 && rem < 3.16e-4 * total) k35 = k;  // -35 dB
-                if (rem < 1e-8 * total) break;  // 80 dB of the energy has passed
-            }
-            need = std::max(need, (double)k * h.binDur);
-            // A truncated or sparse trace underestimates the remaining energy.
-            // Extrapolate the measured -5..-35 dB segment to -80 dB from its actual onset.
-            if (k5 > 0 && k35 > k5)
-                need = std::max(need, ((double)k5 + 2.5 * (double)(k35 - k5)) * h.binDur);
-        }
-        len = std::max(len, need + 0.8);  // leave the maximum 0.6 s end fade beyond the target
+        auto h = traceTail(t, t.sources[0], t.receivers, erOrder, probeRays, t.seed, false, cancelled, execution);
+        return tailSecondsFromTrace(h, len);
     }
     return std::min(std::max(len, 0.2), 20.0);
 }
@@ -702,12 +1187,23 @@ void fadeTailEnd(std::vector<std::vector<float>>& ir, size_t n, double sr) {
     }
 }
 
-void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf) {
+static void checkTailExecution(const TailExecution& e) {
+    if(e.cancelled&&e.cancelled())throw std::runtime_error("Tail rebuild cancelled");
+}
+template<class F> static void tailFor(const TailExecution& e,size_t n,F fn){
+    auto checked=[&](size_t i){checkTailExecution(e);fn(i);};
+    if(e.pool)e.pool->parallelFor(n,e.workers,checked);
+    else for(size_t i=0;i<n;++i)checked(i);
+    checkTailExecution(e);
+}
+void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf, const TailExecution& execution) {
     const int smoothK = 3;
     const double binSamples = hist.binDur * sc.sr;
     const size_t nBins = hist.nBins;
-    for (size_t r = 0; r < buf.size(); ++r)
-        for (int b = 0; b < NB; ++b) {
+    const size_t totalSamples = buf.empty() ? 0 : buf.size() * buf[0][0].size();
+    const TailExecution runExec = totalSamples < 262144 ? TailExecution{nullptr, 1, execution.cancelled} : execution;
+    tailFor(runExec,buf.size()*NB,[&](size_t job){
+            const size_t r=job/NB;const int b=(int)(job%NB);
             const size_t N = buf[r][b].size();
             std::vector<double> sm(nBins, 0.0);
             for (size_t k = 0; k < nBins; ++k) {
@@ -724,37 +1220,54 @@ void addTailNoise(const Scene& sc, const TailHist& hist, int seed, BandBuf& buf)
             std::mt19937_64 rng((uint64_t)seed * 104729ull + r * 131 + b * 7 + 1);
             std::normal_distribution<double> Nd(0, 1);
             for (size_t i = 0; i < N; ++i) {
+                if(i%4096==0)checkTailExecution(runExec);
+                const double z = Nd(rng);
                 double pos = (double)i / binSamples - 0.5;
                 long k0 = (long)std::floor(pos);
                 double f = pos - k0;
                 double v0 = k0 >= 0 && k0 < (long)nBins ? sm[k0] : 0.0;
                 double v1 = k0 + 1 >= 0 && k0 + 1 < (long)nBins ? sm[k0 + 1] : 0.0;
                 double var = v0 * (1 - f) + v1 * f;
-                if (var > 0) buf[r][b][i] += std::sqrt(var) * Nd(rng);
+                if (var > 0) buf[r][b][i] += std::sqrt(var) * z;
             }
-        }
+        });
 }
 
-std::vector<std::vector<float>> combineBands(const BandBuf& buf, double sr) {
+std::vector<std::vector<float>> combineBands(const BandBuf& buf, double sr, const TailExecution& execution) {
     const int taps = 2047, delay = (taps - 1) / 2;
     const size_t R = buf.size(), N = buf[0][0].size();
     auto bands = makeBandFilters(sr, taps);
     size_t FN = nextPow2(N + taps);
+    const TailExecution runExec = FN < 65536 ? TailExecution{nullptr, 1, execution.cancelled} : execution;
     std::vector<std::vector<cd>> Hf(NB, std::vector<cd>(FN));
-    for (int b = 0; b < NB; ++b) {
+    tailFor(runExec,NB,[&](size_t b){
         for (int n = 0; n < taps; ++n) Hf[b][n] = bands[b][n];
         fft(Hf[b], false);
-    }
+    });
     std::vector<std::vector<float>> out(R, std::vector<float>(N));
+    const size_t budget=128u*1024u*1024u;
+    const unsigned width=(unsigned)std::max<size_t>(1,std::min<size_t>(NB,
+        std::min<size_t>(runExec.workers,budget/std::max<size_t>(1,FN*sizeof(cd)))));
+    std::vector<cd> acc(FN,cd(0));
+    std::vector<std::vector<cd>> tmp(width,std::vector<cd>(FN));
     for (size_t r = 0; r < R; ++r) {
-        std::vector<cd> acc(FN, cd(0)), tmp(FN);
-        for (int b = 0; b < NB; ++b) {
-            std::fill(tmp.begin(), tmp.end(), cd(0));
-            for (size_t i = 0; i < N; ++i) tmp[i] = buf[r][b][i];
-            fft(tmp, false);
-            for (size_t i = 0; i < FN; ++i) acc[i] += tmp[i] * Hf[b][i];
+        // FFTs are independent. Merge bands in the ORIGINAL b/i order;
+        // partial histogram or band sums would change the legacy low bits.
+        std::fill(acc.begin(),acc.end(),cd(0));
+        for(int first=0;first<NB;first+=(int)width){
+            const size_t count=std::min<size_t>(width,NB-first);
+            tailFor(runExec,count,[&](size_t j){
+                auto& v=tmp[j];std::fill(v.begin(),v.end(),cd(0));
+                for(size_t i=0;i<N;++i)v[i]=buf[r][first+j][i];
+                fft(v,false);
+            });
+            for(size_t j=0;j<count;++j){const size_t b=first+j;
+                for(size_t i=0;i<FN;++i)acc[i]+=tmp[j][i]*Hf[b][i];
+            }
+            checkTailExecution(runExec);
         }
         fft(acc, true);
+        checkTailExecution(execution);
         for (size_t i = 0; i + delay < FN && i < N; ++i) out[r][i] = (float)acc[i + delay].real();
     }
     return out;

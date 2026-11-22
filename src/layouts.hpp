@@ -10,7 +10,7 @@
 
 namespace verb {
 
-enum class Layout { Mono, StereoORTF, StereoXY, LCR, Quad, Surround51, Surround71, Surround714, Ring };
+enum class Layout { Mono, StereoORTF, StereoXY, LCR, Quad, Surround51, Surround71, Surround714, Ring, AmbiX1, AmbiX2, AmbiX3 };
 
 struct LayoutDef {
     Layout id;
@@ -22,7 +22,9 @@ inline const std::vector<LayoutDef>& layoutDefs() {
     static const std::vector<LayoutDef> d = {
         {Layout::Mono, "Mono", 1},          {Layout::StereoORTF, "Stereo (ORTF)", 2}, {Layout::StereoXY, "Stereo (XY)", 2},
         {Layout::LCR, "LCR", 3},            {Layout::Quad, "Quad", 4},                {Layout::Surround51, "5.1", 6},
-        {Layout::Surround71, "7.1", 8},     {Layout::Surround714, "7.1.4", 12},       {Layout::Ring, "Ring (N channels)", 0}};
+        {Layout::Surround71, "7.1", 8},     {Layout::Surround714, "7.1.4", 12},       {Layout::Ring, "Ring (N channels)", 0},
+        {Layout::AmbiX1, "AmbiX (1st order)", 4},
+        {Layout::AmbiX2, "AmbiX (2nd order)", 9},   {Layout::AmbiX3, "AmbiX (3rd order)", 16}};
     return d;
 }
 
@@ -59,6 +61,17 @@ inline std::vector<SpeakerDef> speakersFor(Layout l, int ringChannels) {
         case Layout::Surround714:
             return {{"L", 30, 0}, {"R", -30, 0}, {"C", 0, 0}, {"LFE", 0, 0, true}, {"Lss", 90, 0}, {"Rss", -90, 0}, {"Lrs", 150, 0}, {"Rrs", -150, 0},
                     {"Ltf", 45, 45}, {"Rtf", -45, 45}, {"Ltr", 135, 45}, {"Rtr", -135, 45}};
+        case Layout::AmbiX1:
+            return {{"W", 0, 0}, {"Y", 90, 0}, {"Z", 0, 90}, {"X", 0, 0}};
+        case Layout::AmbiX2:
+        case Layout::AmbiX3: {  // ACN 0..8 / 0..15; the axes are unused (the harmonic is selected by shIndex)
+            static const char* const names[16] = {"ACN0", "ACN1", "ACN2",  "ACN3",  "ACN4",  "ACN5",  "ACN6",  "ACN7",
+                                                  "ACN8", "ACN9", "ACN10", "ACN11", "ACN12", "ACN13", "ACN14", "ACN15"};
+            std::vector<SpeakerDef> v;
+            const int n = l == Layout::AmbiX2 ? 9 : 16;
+            for (int i = 0; i < n; ++i) v.push_back({names[i], 0, 0});
+            return v;
+        }
         case Layout::Ring: {
             std::vector<SpeakerDef> v;
             static std::vector<std::string> names;  // storage for the c-strings
@@ -72,6 +85,9 @@ inline std::vector<SpeakerDef> speakersFor(Layout l, int ringChannels) {
 }
 
 // Virtual microphones for `layout` around `center` (listener at yaw 0). radius: distance of each capsule from the centre.
+// Any of the fixed-geometry Ambisonic output formats (coincident capsules, no microphone options).
+inline bool isAmbisonicLayout(Layout l) { return l == Layout::AmbiX1 || l == Layout::AmbiX2 || l == Layout::AmbiX3; }
+
 inline std::vector<Transducer> makeReceiverArray(Layout layout, Vec3 center, double radius, int ringChannels = 8) {
     std::vector<Transducer> out;
     const auto spk = speakersFor(layout, ringChannels);
@@ -79,11 +95,20 @@ inline std::vector<Transducer> makeReceiverArray(Layout layout, Vec3 center, dou
         Transducer t;
         t.name = s.name;
         const double a = s.az * kPi / 180.0, e = s.el * kPi / 180.0;
-        const double r = layout == Layout::Mono ? 0.0 : radius;
+        const double r = (layout == Layout::Mono || isAmbisonicLayout(layout)) ? 0.0 : radius;
         t.pos = {center.x + r * std::cos(e) * std::cos(a), center.y + r * std::cos(e) * std::sin(a), center.z + r * std::sin(e)};
         t.azimuthDeg = s.az;
         t.elevationDeg = s.el;
-        t.pattern = layout == Layout::Mono ? 0.0 : 0.5;  // cardioid towards the loudspeaker, omni for a mono output
+        if (layout == Layout::AmbiX1) {
+            t.pattern = (s.name[0] == 'W') ? 0.0 : 1.0;  // ACN W, Y, Z, X in SN3D (omni + orthogonal figure-8s)
+            t.patternHf = -1.0;
+        } else if (layout == Layout::AmbiX2 || layout == Layout::AmbiX3) {
+            t.shIndex = (int)(&s - spk.data());  // real SN3D harmonic, ACN order; no pattern, no frequency dependence
+            t.pattern = 0.0;
+            t.patternHf = -1.0;
+        } else {
+            t.pattern = layout == Layout::Mono ? 0.0 : 0.5;  // cardioid towards the loudspeaker, omni for a mono output
+        }
         t.gainDb = s.lfe ? -120.0 : 0.0;
         out.push_back(t);
     }
@@ -119,6 +144,10 @@ inline const std::vector<MicPatternDef>& micPatternDefs() {
 // about 0.0875 m), aimed at the ears with the head shadow.
 inline void applyMicPattern(std::vector<Transducer>& rcv, MicPattern m, double radius = 0.0875) {
     if (m == MicPattern::LayoutDefault) return;
+    if (rcv.size() == 4 && rcv[0].name == "W" && rcv[1].name == "Y" && rcv[2].name == "Z" && rcv[3].name == "X")
+        return;  // AmbiX first-order capsules are fixed by the layout (ignore pattern overrides and HumanEars)
+    for (const auto& t : rcv)
+        if (t.shIndex >= 0) return;  // higher-order AmbiX capsules (spherical harmonics) are fixed by the layout too
     if (m == MicPattern::HumanEars) {
         for (auto& t : rcv) { t.pattern = 0.0; t.patternHf = 0.45; }
         if (rcv.size() == 2) {  // a stereo pair becomes two ears

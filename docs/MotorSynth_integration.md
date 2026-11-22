@@ -1,6 +1,6 @@
 # Інтеграція Verb Room ↔ MotorSynth2 (SBP EngineSim Stems)
 
-Інструкція для агента, що збирає MotorSynth2. Плагін: `Verb Room` (VST3, SBP), репозиторій `sbp-verb-room`.
+Інструкція для агента, що збирає MotorSynth2. Плагін: `Verb Room` (VST3, SBP), проєкт `E:\Claude\verb`.
 
 ## 1. Що таке Verb Room
 Фізична кімнатна реверберація. Кожне джерело має позицію в 3D-кімнаті, слухач (водій) має позицію та орієнтацію.

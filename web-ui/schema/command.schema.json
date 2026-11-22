@@ -1,0 +1,2171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verbroom.invalid/web-ui/schema/command.schema.json",
+  "title": "Verb Room WebView contract v1: commands (payload of kind=command)",
+  "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/Command",
+  "$defs": {
+    "TransactionBegin": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "transaction.begin"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 60
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "TransactionCommit": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "transaction.commit"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "TransactionCancel": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "transaction.cancel"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "SurfaceTranslate": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.translate"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        },
+        "deltaM": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec2or3"
+        },
+        "includeGroups": {
+          "type": "boolean"
+        },
+        "autoLink": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs",
+        "deltaM"
+      ],
+      "description": "Delta is relative to the transaction start snapshot, never accumulated. With autoLink, eligible adjacent wall endpoints within 0.0001 m in that snapshot follow the XY delta."
+    },
+    "SurfaceMoveVertex": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.moveVertex"
+        },
+        "ref": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+        },
+        "vertex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "positionM": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec2"
+        },
+        "autoLink": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "ref",
+        "vertex",
+        "positionM"
+      ],
+      "description": "wall: vertex 0=a,1=b. autoLink (default true) moves coincident corners of pickable walls together."
+    },
+    "SurfaceCreate": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.create"
+        },
+        "kind": {
+          "enum": [
+            "wall",
+            "floorZone",
+            "ceilingZone"
+          ]
+        },
+        "groupName": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Assign the new surface to this construction, extending an existing unlocked group. Optional; omitted leaves it ungrouped."
+        },
+        "a": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec2"
+        },
+        "b": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec2"
+        },
+        "vertices": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec2"
+          },
+          "minItems": 3,
+          "maxItems": 64
+        },
+        "heightM": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "zBottomM": {
+          "type": "number",
+          "minimum": 0
+        },
+        "zTopM": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "material": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preset": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "kind"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "wall"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "a",
+              "b"
+            ]
+          },
+          "else": {
+            "required": [
+              "vertices"
+            ]
+          }
+        }
+      ]
+    },
+    "SurfaceDelete": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.delete"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs"
+      ]
+    },
+    "SurfaceApplyPreset": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.applyPreset"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        },
+        "preset": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs",
+        "preset"
+      ]
+    },
+    "SurfaceSetAbsorption": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.setAbsorption"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        },
+        "bands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "band": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 6
+              },
+              "alpha": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "band",
+              "alpha"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 7
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs",
+        "bands"
+      ],
+      "description": "Only listed bands change; others untouched (differs from mockup shareMaterial)."
+    },
+    "SurfaceSetTransmission": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.setTransmission"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        },
+        "bands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "band": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 6
+              },
+              "tau": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "band",
+              "tau"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 7
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs",
+        "bands"
+      ],
+      "description": "Wire value is tau; TL = -10log10(tau); opaque = tau 0. No 60/99 dB sentinel."
+    },
+    "SurfaceSetScatter": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.setScatter"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        },
+        "scatterLF": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "scatterHF": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs"
+      ]
+    },
+    "SurfaceSetHeights": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.setHeights"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        },
+        "zBottomM": {
+          "type": "number",
+          "minimum": 0
+        },
+        "zTopM": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "heightM": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs"
+      ],
+      "description": "zTopM null = full height; heightM null = patch (zones)."
+    },
+    "SurfaceSetMetadata": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.setMetadata"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        },
+        "name": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Name"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "locked": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs"
+      ]
+    },
+    "SurfaceLink": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.link"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        },
+        "groupName": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Name"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs",
+        "groupName"
+      ]
+    },
+    "SurfaceUnlink": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "surface.unlink"
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+          },
+          "minItems": 1,
+          "maxItems": 194
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "refs"
+      ]
+    },
+    "RoomScale": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.scale"
+        },
+        "factor": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 20
+        },
+        "includeObjects": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "factor",
+        "includeObjects"
+      ]
+    },
+    "RoomSetHeight": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.setHeight"
+        },
+        "heightM": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 30
+        },
+        "ceilingExtent": {
+          "enum": [
+            "walls",
+            "infinite"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "heightM"
+          ]
+        },
+        {
+          "required": [
+            "ceilingExtent"
+          ]
+        }
+      ]
+    },
+    "RoomSetOpening": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.setOpening"
+        },
+        "ref": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/SurfaceRef"
+        },
+        "open": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "ref",
+        "open"
+      ]
+    },
+    "RoomSetAir": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.setAir"
+        },
+        "tempC": {
+          "type": "number",
+          "minimum": -20,
+          "maximum": 45
+        },
+        "humidityPct": {
+          "type": "number",
+          "minimum": 5,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "RoomSetClutter": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.setClutter"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 80
+        },
+        "minLenM": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 3
+        },
+        "maxLenM": {
+          "type": "number",
+          "minimum": 0.2,
+          "maximum": 5
+        },
+        "tlMinDb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 30
+        },
+        "tlMaxDb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 40
+        },
+        "minHeightM": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 3
+        },
+        "maxHeightM": {
+          "type": "number",
+          "minimum": 0.2,
+          "maximum": 4
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        },
+        "minDistM": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "RoomSetRoughness": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.setRoughness"
+        },
+        "roughness": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "RoomSetDiffraction": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.setDiffraction"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "enabled"
+      ]
+    },
+    "RoomClear": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.clear"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "SourceAdd": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.add"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "SourceRemove": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.remove"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "index"
+      ]
+    },
+    "SourceSetConfig": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.setConfig"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "format": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "channels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "firstIn": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "sum": {
+          "type": "boolean"
+        },
+        "freePoints": {
+          "type": "boolean"
+        },
+        "color": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^$|^#[0-9a-fA-F]{6}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "index"
+      ]
+    },
+    "SourceSetPattern": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.setPattern"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        },
+        "pattern": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "index",
+        "pattern"
+      ]
+    },
+    "SourceSetSpread": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.setSpread"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        },
+        "spreadM": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "index",
+        "spreadM"
+      ]
+    },
+    "SourceSetPointOffset": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.setPointOffset"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "offsetM": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/Vec3"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "index",
+        "channel",
+        "offsetM"
+      ]
+    },
+    "OutputSet": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "output.set"
+        },
+        "layout": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 11
+        },
+        "radiusM": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "micPattern": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "TailSetQuality": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "tail.setQuality"
+        },
+        "baseRays": {
+          "type": "integer",
+          "minimum": 8000,
+          "maximum": 384000
+        },
+        "adaptive": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "HistoryUndo": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "history.undo"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "HistoryRedo": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "history.redo"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "description": "Unavailable in v1 (capability history.redo=false) -> error unsupported."
+    },
+    "PresetList": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "preset.list"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "PresetLoad": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "preset.load"
+        },
+        "source": {
+          "enum": [
+            "builtin",
+            "user",
+            "file"
+          ]
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 128
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4095
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "source"
+      ],
+      "description": "builtin: id = decimal index; user: opaque id from preset.list; file: native FileChooser (no id)."
+    },
+    "PresetSave": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "preset.save"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "name"
+      ],
+      "description": "C++ shows overwrite confirmation; replies ioError on write failure."
+    },
+    "IrExport": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "ir.export"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "description": "C++ opens the folder chooser; JS never sends a filesystem path."
+    },
+    "AnalysisStart": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "analysis.start"
+        },
+        "source": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 31
+        },
+        "heightM": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 30
+        },
+        "durationS": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "resolution": {
+          "enum": [
+            16,
+            24,
+            32,
+            48,
+            64,
+            96
+          ]
+        },
+        "rays": {
+          "enum": [
+            12000,
+            48000,
+            192000
+          ]
+        },
+        "components": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "source",
+        "heightM",
+        "durationS",
+        "resolution",
+        "rays",
+        "components"
+      ],
+      "description": "source -1 = all audible; components bitmask direct=1 early=2 tail=4. Engine accepts wider ranges (energy.cpp:51-54); these are the native UI values."
+    },
+    "AnalysisCancel": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "analysis.cancel"
+        },
+        "jobId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "Rt60Start": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "rt60.start"
+        },
+        "targetS": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "targetS"
+      ]
+    },
+    "Rt60Cancel": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "rt60.cancel"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "TelemetrySubscribe": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "telemetry.subscribe"
+        },
+        "topics": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "meters",
+              "tail",
+              "status",
+              "analysis"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 4
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "topics"
+      ]
+    },
+    "SessionSetViewState": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "session.setViewState"
+        },
+        "viewState": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "viewState"
+      ],
+      "description": "Opaque, versioned, <= limits.maxViewStateBytes; survives editor close, NOT saved in the project."
+    },
+    "PreferencesSet": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "preferences.set"
+        },
+        "patch": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "patch"
+      ]
+    },
+    "ComparisonCapture": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "comparison.capture"
+        },
+        "slot": {
+          "enum": [
+            "A",
+            "B"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "slot"
+      ],
+      "description": "Unavailable in v1 (ab.compare)."
+    },
+    "ComparisonActivate": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "comparison.activate"
+        },
+        "slot": {
+          "enum": [
+            "A",
+            "B"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "slot"
+      ],
+      "description": "Unavailable in v1 (ab.compare)."
+    },
+    "Command": {
+      "oneOf": [
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/TransactionBegin"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/TransactionCommit"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/TransactionCancel"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceTranslate"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceMoveVertex"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceCreate"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceDelete"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceApplyPreset"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceSetAbsorption"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceSetTransmission"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceSetScatter"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceSetHeights"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceSetMetadata"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceLink"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SurfaceUnlink"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomScale"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomSetHeight"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomSetOpening"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomSetAir"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomSetClutter"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomSetRoughness"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomSetDiffraction"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomClear"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SourceAdd"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SourceRemove"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SourceSetConfig"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SourceSetPattern"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SourceSetSpread"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SourceSetPointOffset"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/OutputSet"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/TailSetQuality"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/HistoryUndo"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/HistoryRedo"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PresetList"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PresetLoad"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PresetSave"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/IrExport"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/AnalysisStart"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/AnalysisCancel"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/Rt60Start"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/Rt60Cancel"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/TelemetrySubscribe"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/SessionSetViewState"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PreferencesSet"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/ComparisonCapture"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/ComparisonActivate"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/EditorSetFlags"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/ListenerSet"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/LayersSet"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/CatalogsList"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/ReflectionsQuery"
+        },
+        {
+          "$ref": "#/$defs/AutoMakeup"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/Pathset"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/Pathclear"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PathaddPoint"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PathmovePoint"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PathremovePoint"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PathsetFlags"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PathsetPointTiming"
+        },
+        {
+          "$ref": "#/$defs/PathBake"
+        },
+        {
+          "$ref": "#/$defs/PathBakeCancel"
+        },
+        {
+          "$ref": "#/$defs/PathBakeClear"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/OutputResetClip"
+        },
+        {
+          "$ref": "#/$defs/SourceSetDirectivity"
+        },
+        {
+          "$ref": "#/$defs/SourceSetInstrument"
+        },
+        {
+          "$ref": "#/$defs/SourceLoadDirectivityFile"
+        },
+        {
+          "$ref": "#/$defs/PathRecordPass"
+        },
+        {
+          "$ref": "#/$defs/PathRecordStop"
+        }
+      ]
+    },
+    "EditorSetFlags": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "editor.setFlags"
+        },
+        "flags": {
+          "type": "object",
+          "properties": {
+            "navLocked": {
+              "type": "boolean"
+            },
+            "outlinerVisible": {
+              "type": "boolean"
+            },
+            "mixerCompact": {
+              "type": "boolean"
+            },
+            "inputMeters": {
+              "type": "boolean"
+            },
+            "keepRouting": {
+              "type": "boolean"
+            },
+            "keepProcessing": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "required": [],
+          "minProperties": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "flags"
+      ]
+    },
+    "ListenerSet": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "listener.set"
+        },
+        "xM": {
+          "type": "number",
+          "minimum": -200,
+          "maximum": 200
+        },
+        "yM": {
+          "type": "number",
+          "minimum": -200,
+          "maximum": 200
+        },
+        "zM": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 30
+        },
+        "yawDeg": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "minProperties": 2
+    },
+    "LayersSet": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "layers.set"
+        },
+        "layer": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "mode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "layer",
+        "mode"
+      ]
+    },
+    "CatalogsList": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "catalogs.list"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "ReflectionsQuery": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "reflections.query"
+        },
+        "sourceIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        },
+        "pointIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "maxOrder": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "maxPaths": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op",
+        "sourceIndex"
+      ]
+    },
+    "AutoMakeup": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "output.autoMakeup"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    },
+    "Pathset": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.set"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "minimum": -200,
+              "maximum": 200
+            },
+            "minItems": 3,
+            "maxItems": 3
+          },
+          "minItems": 2,
+          "maxItems": 64
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "smooth": {
+          "type": "boolean"
+        },
+        "orient": {
+          "type": "boolean"
+        },
+        "orientMode": {
+          "enum": ["manual", "along", "lookAt"]
+        },
+        "lookTarget": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "lookPos": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": -200,
+            "maximum": 200
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "orientOffset": {
+          "type": "number",
+          "minimum": -360,
+          "maximum": 360
+        },
+        "laps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "group": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 31
+        },
+        "start": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 99.99
+        },
+        "end": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 100
+        },
+        "times": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "minItems": 2,
+          "maxItems": 64
+        },
+        "easings": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "linear",
+              "easeIn",
+              "easeOut",
+              "easeInOut"
+            ]
+          },
+          "minItems": 2,
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "op",
+        "object",
+        "points"
+      ],
+      "additionalProperties": false
+    },
+    "Pathclear": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.clear"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        }
+      },
+      "required": [
+        "op",
+        "object"
+      ],
+      "additionalProperties": false
+    },
+    "PathaddPoint": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.addPoint"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "point": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": -200,
+            "maximum": 200
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        }
+      },
+      "required": [
+        "op",
+        "object",
+        "point"
+      ],
+      "additionalProperties": false
+    },
+    "PathmovePoint": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.movePoint"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "point": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": -200,
+            "maximum": 200
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        }
+      },
+      "required": [
+        "op",
+        "object",
+        "point",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "PathremovePoint": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.removePoint"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        }
+      },
+      "required": [
+        "op",
+        "object",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "PathsetFlags": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.setFlags"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "smooth": {
+          "type": "boolean"
+        },
+        "orient": {
+          "type": "boolean"
+        },
+        "orientMode": {
+          "enum": ["manual", "along", "lookAt"]
+        },
+        "lookTarget": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "lookPos": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": -200,
+            "maximum": 200
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "orientOffset": {
+          "type": "number",
+          "minimum": -360,
+          "maximum": 360
+        },
+        "laps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "group": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 31
+        },
+        "start": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 99.99
+        },
+        "end": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "op",
+        "object"
+      ],
+      "additionalProperties": false
+    },
+    "PathsetPointTiming": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.setPointTiming"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 63
+        },
+        "time": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "easing": {
+          "enum": [
+            "linear",
+            "easeIn",
+            "easeOut",
+            "easeInOut"
+          ]
+        }
+      },
+      "required": [
+        "op",
+        "object",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "PathBake": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.bake"
+        },
+        "object": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            {
+              "const": "all"
+            }
+          ]
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    },
+    "PathBakeCancel": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.bakeCancel"
+        },
+        "object": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            {
+              "const": "all"
+            }
+          ]
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    },
+    "PathBakeClear": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.bakeClear"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    },
+    "OutputResetClip": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "output.resetClip"
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        }
+      },
+      "required": [
+        "op",
+        "channel"
+      ],
+      "additionalProperties": false
+    },
+    "SourceSetDirectivity": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.setDirectivity"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        },
+        "instrument": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "amount": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "aimAzDeg": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "aimElDeg": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "aimRollDeg": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "customData": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "customName": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "customPath": {
+          "type": "string",
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "op",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "SourceSetInstrument": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.setInstrument"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        },
+        "instrument": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "amount": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "aimAzDeg": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "aimElDeg": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "aimRollDeg": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "customData": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "customName": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "customPath": {
+          "type": "string",
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "op",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "SourceLoadDirectivityFile": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "source.loadDirectivityFile"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 31
+        }
+      },
+      "required": [
+        "op",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "PathRecordPass": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.recordPass"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    },
+    "PathRecordStop": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.recordStop"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

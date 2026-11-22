@@ -50,8 +50,7 @@ need testers.
 
 ## Where we are
 
-**Latest release: 0.1.16** (classic interface). **Version 0.2.0 is ready and being finished** for Windows and macOS
-(universal); downloads will be posted on the project's Ko-fi page. It is a large step from 0.1.16:
+**Latest release: [0.2.2](Release_0.2.2_en.md)** for Windows x64 and macOS Universal. Downloads are posted on the project's Ko-fi page.
 
 - **A new interface:** resizable, with a 3D room editor, material inspector, dimensions and scale, outliner, decay
   curves, energy map and a CPU load meter. The classic interface stays available. On macOS this is its first release
@@ -92,6 +91,13 @@ We would like to call the next major version 1.0 when the following is in place.
 - Movement paths: draw a path for a source or the listener in the viewport and automate one "position on path"
   parameter instead of X/Y/Z separately (requested by a tester). **Done in 0.2.0**, together with pre-computed
   ("baked") tails along a path, timing, groups and orientation.
+- Turning an object by hand (Manual orientation) no longer breaks a bake. **Done in 0.2.2**, for group bakes and for recorded
+  passes: for Manual objects the baked table no longer requires an azimuth match (position still has to match). The
+  direct sound and the early reflections follow the live azimuth; the baked tail keeps the azimuth it was baked with.
+- Azimuth keys on the timeline: a strip for the azimuth of each object next to its movement strip, locked to the same
+  position axis and the same table. Add keys anywhere and set the angle on a key with a slider or by turning the object
+  in the scene editor. Keys support hold and easing. The azimuth is then known in advance and baked with the path, so
+  the baked tail follows the turn as well.
 - Still to do: orientation of objects at sharp path corners, and more tests with other hosts.
 
 **2. Lower CPU for big scenes**
@@ -104,14 +110,22 @@ We would like to call the next major version 1.0 when the following is in place.
 
 **4. More realism**
 - Instrument and loudspeaker directivity from user-supplied data files (**done in 0.2.0**).
-- Ambisonics output: **AmbiX up to 3rd order is in 0.2.0**; a directional tail is experimental; binaural output is still
-  to come.
+- Ambisonics output: **AmbiX up to 3rd order is in 0.2.0**; binaural output is still to come.
+- Directivity profiles act on the direct sound and the early reflections. The late tail treats every source as
+  omnidirectional; a directional tail is not planned for 1.0.
+- Ambisonics normalization option: AmbiX output uses ACN channel order with SN3D normalization now. Add the other common
+  conventions (N3D, and FuMa for older material) as a selectable option.
+- Ambisonics output level: AmbiX output is louder than the same source through stereo. Add an optional gain
+  compensation, selectable, so the level can be matched to stereo.
 - Low-frequency room modes.
 
 **5. Easier room drawing**
 - A box primitive: a closed body with clean joints for car bodies, columns, furniture.
 - Edge extrusion in the editor (slide, then extrude), so surfaces share edges by construction.
 - An auto level button and a wider output range for quiet listener positions in big halls.
+- **Done in 0.2.2:** a Randomize button next to the Clutter seed; auto-link of corners when a whole wall is moved; in the
+  Sources panel, a Sum button for each source, "All formats…" for the channel format of all sources at once and Sum on or
+  off for all of them at once.
 - After 1.0: full 3D meshes with sloped surfaces.
 
 **6. Product basics**

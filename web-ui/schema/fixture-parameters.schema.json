@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verbroom.invalid/web-ui/schema/fixture-parameters.schema.json",
+  "title": "Verb Room WebView contract v1: parameter descriptor fixture wrapper (test-only)",
+  "type": "object",
+  "properties": {
+    "fixtureMeta": {
+      "$ref": "https://verbroom.invalid/web-ui/schema/common.schema.json#/$defs/FixtureMeta"
+    },
+    "descriptors": {
+      "$ref": "https://verbroom.invalid/web-ui/schema/parameters.schema.json#/$defs/DescriptorList"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "fixtureMeta",
+    "descriptors"
+  ]
+}

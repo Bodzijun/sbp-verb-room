@@ -190,7 +190,10 @@ int main(int argc, char** argv) {
         const size_t beforeFade = (size_t)std::max(0.0, std::floor((run.length - 0.65) / 0.05));
         const double fadeStart = levels[std::min(beforeFade, levels.size() - 1)] - peak;
         std::printf("  level before final fade: %.1f dB relative to peak\n", fadeStart);
-        check(run.length > 10.0, "long cathedral is not truncated at ten seconds");
+        // E11 (owner-accepted): the length is where the pooled energy decay reaches -60 dB (+ fade margin), 9.65 s for
+        // this hall instead of the legacy extrapolated 19.9 s. The intent stays: a long hall keeps a long tail that is
+        // set by its decay (quiet before the fade, checked below), not by a short fixed limit.
+        check(run.length > 8.0 && run.length < 19.99, "long cathedral keeps a long tail set by its decay, not by a fixed limit");
         check(fadeStart < -75.0, "final fade starts after cathedral tail becomes quiet");
         if (!dir.empty()) save(run, dir + "/cathedral");
         return failures ? 1 : 0;

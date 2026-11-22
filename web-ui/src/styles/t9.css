@@ -1,0 +1,52 @@
+/* One compact, movable Energy component on both pages. It consumes no stage height. */
+.viewport > .analysis,.edit-layout .viewport > .analysis {position:absolute;z-index:8;width:min(284px,calc(100% - 16px));max-height:calc(100% - 38px);margin:0;padding:6px 8px;gap:5px;background:#141e24ed;border:1px solid var(--line2);border-radius:4px;box-shadow:0 4px 12px #0005;right:auto;bottom:auto;overflow:visible}
+.energy-head {display:flex;align-items:center;justify-content:space-between;cursor:move;height:23px;touch-action:none}
+.energy-head button {height:23px;min-height:23px;padding:0 7px}
+.analysis.collapsed > :not(.energy-head) {display:none!important}
+.analysis .energy-strip {display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.analysis .energy-components {grid-column:1/-1;display:flex}
+.analysis .energy-components button {flex:1;height:24px}
+.analysis .energy-strip>.row {display:flex;gap:4px;min-width:0;margin:0;max-width:none}
+.analysis .energy-strip>.row>span:first-child {flex:none;font-size:11px}
+.analysis .energy-strip .row>.dd {flex:1;min-width:0;height:24px;max-width:none}
+.analysis .energy-line {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px;align-items:center}
+.analysis .energy-line>.slider-row {display:grid;grid-template-columns:46px minmax(20px,1fr) 48px;gap:5px;min-width:0;margin:0}
+.analysis .energy-line>.check {height:24px;padding:2px 4px;white-space:nowrap;margin:0;font-size:11px}
+.analysis .energy-advanced {grid-column:1/-1;margin:0;position:static}
+.analysis .energy-advanced>summary {display:flex;height:24px;align-items:center;width:100%;padding:0 5px}
+.analysis .energy-advanced-body {position:absolute;top:100%;left:0;right:0;width:auto;max-height:230px;overflow:auto;z-index:10}
+.analysis .energy-legend {font-size:11px;line-height:14px;padding:0}
+.analysis .energy-actions {display:grid;grid-template-columns:auto auto 1fr;gap:4px}
+.analysis .energy-actions .analysis-status {grid-column:1/-1;max-width:none;font-size:11px;white-space:normal;margin:0}
+.analysis .energy-actions progress {width:100%}
+.energy-scale {position:absolute;right:8px;bottom:50px;display:flex;gap:5px;pointer-events:none;z-index:4;background:#10191ee0;padding:5px;border-radius:3px;font:11px 'Segoe UI',-apple-system,BlinkMacSystemFont,sans-serif;color:var(--text-strong)}
+.energy-scale[hidden] {display:none}
+.energy-scale-bar {width:10px;height:132px}
+.energy-scale-ticks {height:132px;display:flex;flex-direction:column;justify-content:space-between;min-width:44px}
+.energy-scale-title {position:absolute;right:0;top:-17px;white-space:nowrap;background:#10191ee0;padding:1px 4px}
+.selection-marquee {position:absolute;pointer-events:none;border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 9%,transparent);z-index:5}
+.selection-marquee[hidden] {display:none}
+.perspective-inset {position:absolute;right:8px;top:30px;width:min(210px,42%);height:155px;z-index:6;border:1px solid var(--line2);border-radius:4px;background:var(--canvas);box-shadow:0 3px 10px #0006}
+.perspective-inset .viewport {width:100%;height:100%;min-height:0;border:0}
+.perspective-inset .viewport > :not(canvas) {display:none!important}
+.perspective-inset:after {content:'3D preview · drag to orbit';position:absolute;left:6px;bottom:5px;pointer-events:none;font-size:11px;color:var(--text-strong)}
+.layer-bar .snap-dd {width:121px!important;min-width:121px;flex-shrink:0}
+.layer-bar .snap-dd .dd-text {overflow:visible;text-overflow:clip;white-space:nowrap}
+.layer-bar .layer-filters button span {text-transform:capitalize}
+.mixed-value {color:var(--muted);font-size:11px}
+.check[aria-checked=mixed] .led {background:var(--accent);opacity:.5}
+@media(max-width:1100px){.perspective-inset{height:125px}.analysis .energy-advanced-body{max-height:165px}}
+
+/* narrow viewport (900x600 Edit, 335 px bar): the full 'Snap auto · 50 cm' (D2) needs the icon buttons a little tighter, still one row */
+@container (max-width:470px){.layer-bar .layer-filters button{padding-left:2px;padding-right:2px;min-width:0}.layer-bar .outliner-toggle{padding-left:6px;padding-right:6px;margin-right:0}.layer-bar .layer-options{padding-left:2px;gap:2px}}
+/* D3: the short nouns (Walls / Floors / Ceilings / Plates) show whenever the bar has room (≥ 561 px); icon-only below that. */
+@container (min-width:561px){.layer-filters button span{display:inline}}
+
+.listen button.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.duck-meter { min-width: 50px; font-variant-numeric: tabular-nums; opacity: .7; }
+.duck-controls { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; flex:none; }
+.duck-controls .slider-row { grid-template-columns:auto minmax(20px,1fr) 68px; }
+.mix-panel .mix-knobs { min-height:0; }
+/* Keep Physical lock labels inside the narrow Main macro cells; the full reason is in the tooltip. */
+.macro-row .parameter.locked .parameter-name:after { content:' · locked'; font-size:9px; }
+.macro-row .parameter-name { line-height:11px; }

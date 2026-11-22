@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(verb VERSION 0.1.16 LANGUAGES C CXX)
+project(verb VERSION 0.2.2 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -39,6 +39,9 @@ endif()
 add_executable(verb src/main.cpp)
 target_link_libraries(verb PRIVATE verbcore)
 
+add_executable(verbdir_tool src/verbdir_tool.cpp)
+target_link_libraries(verbdir_tool PRIVATE verbcore)
+
 add_executable(rt_test src/rt_test.cpp)
 target_link_libraries(rt_test PRIVATE verbcore)
 
@@ -64,3 +67,43 @@ if(VERB_BUILD_PLUGIN)
   add_subdirectory(third_party/JUCE)
   add_subdirectory(plugin)
 endif()
+
+# E1 objective focused tests (not a long-suite invocation).
+add_executable(e1_wet_test src/e1_wet_test.cpp)
+target_link_libraries(e1_wet_test PRIVATE verbcore)
+add_test(NAME e1_wet COMMAND e1_wet_test)
+set_tests_properties(e1_wet PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 180)
+
+# E2 listening renderer (tool only, not a test; renders out/E2/listen).
+add_executable(e2_listen src/e2_listen.cpp)
+target_link_libraries(e2_listen PRIVATE verbcore)
+add_executable(e2_bench src/e2_bench.cpp)
+target_link_libraries(e2_bench PRIVATE verbcore)
+target_compile_definitions(e2_bench PRIVATE E2_NEW=1)
+add_executable(e2_freeze_test src/e2_freeze_test.cpp)
+target_link_libraries(e2_freeze_test PRIVATE verbcore)
+add_test(NAME e2_freeze COMMAND e2_freeze_test)
+set_tests_properties(e2_freeze PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 600)
+
+# Unchanged 0.1.15 sources: focused forward-tolerance check, never installed.
+if(VERB_BUILD_PLUGIN AND EXISTS "${CMAKE_SOURCE_DIR}/archive/pre-stage2-2026-11-10/src/render.cpp" AND EXISTS "${CMAKE_SOURCE_DIR}/out/E1/LegacyParser.cpp")
+  set(E1_OLD "${CMAKE_SOURCE_DIR}/archive/pre-stage2-2026-11-10")
+  add_library(e1_old_core STATIC EXCLUDE_FROM_ALL "${E1_OLD}/src/render.cpp" "${E1_OLD}/src/tail.cpp" "${E1_OLD}/src/rt_engine.cpp" "${E1_OLD}/src/energy.cpp")
+  target_include_directories(e1_old_core PUBLIC "${E1_OLD}/src")
+  target_link_libraries(e1_old_core PUBLIC Threads::Threads)
+  if(MSVC)
+    target_compile_options(e1_old_core PRIVATE /utf-8)
+  endif()
+  juce_add_console_app(E1LegacyParser PRODUCT_NAME "E1LegacyParser")
+  set_target_properties(E1LegacyParser PROPERTIES EXCLUDE_FROM_ALL TRUE)
+  target_sources(E1LegacyParser PRIVATE out/E1/LegacyParser.cpp "${E1_OLD}/plugin/PluginProcessor.cpp" "${E1_OLD}/plugin/PluginEditor.cpp" "${E1_OLD}/plugin/EnergyMapView.cpp")
+  target_include_directories(E1LegacyParser PRIVATE "${E1_OLD}/plugin")
+  target_compile_definitions(E1LegacyParser PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+  target_link_libraries(E1LegacyParser PRIVATE e1_old_core juce::juce_audio_utils juce::juce_recommended_config_flags)
+endif()
+
+# E13f profile ownership, live tails and normalization regressions.
+add_executable(directivity_test src/directivity_test.cpp)
+target_link_libraries(directivity_test PRIVATE verbcore)
+add_test(NAME directivity_profiles COMMAND directivity_test)
+set_tests_properties(directivity_profiles PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 180)
