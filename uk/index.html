@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Verb Room — фізично змодельований кімнатний ревербератор VST3. Намалюйте кімнату й послухайте, як вона звучить під час руху джерел і слухача.">
+  <title>Verb Room 0.2.2 — Фізично змодельований кімнатний ревербератор</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230a121b%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%273%27 fill=%27%2318b0ca%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%209%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%272.2%27 opacity=%27.7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2713.5%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%271.6%27 opacity=%27.4%27/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="en" href="../index.html">
+</head>
+<body>
+  <a class="skip" href="#main">Перейти до вмісту</a>
+  <header class="masthead">
+    <div class="wrap">
+      <a class="brand" href="index.html">Verb Room</a>
+      <nav class="section-nav" aria-label="На цій сторінці">
+        <a href="#room-details">Деталі кімнати</a>
+        <a href="#comparison">Порівняння</a>
+      </nav>
+      <nav class="languages" aria-label="Мова">
+        <a lang="en" hreflang="en" href="../index.html" aria-label="English">EN</a><span aria-hidden="true">|</span>
+        <a lang="uk" hreflang="uk" href="index.html" aria-current="page" aria-label="Українська">UK</a>
+      </nav>
+      <a class="cta header-cta" href="#download">Завантажити</a>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <section class="hero" aria-labelledby="title">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="release">VST3 · 0.2.2 альфа</p>
+          <h1 id="title">Намалюйте кімнату.<br><em>Почуйте її в русі.</em></h1>
+          <p class="lead">Фізично змодельований ревербератор. Побудуйте простір зі стін і матеріалів та рухайте в ньому джерела звуку й слухача.</p>
+          <div class="hero-actions">
+            <a class="cta" href="#download">Завантажити</a>
+            <a class="cta secondary" href="#video"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Переглянути демо руху</a>
+          </div>
+        </div>
+        <figure class="plan-card">
+          <div class="diagram-bar">
+            <span>План кімнати</span>
+            <label class="motion-control"><input type="checkbox" class="motion-toggle"><span>Призупинити анімацію</span></label>
+          </div>
+          <svg class="room-plan" viewBox="0 0 590 430" role="img" aria-labelledby="plan-title plan-desc">
+              <title id="plan-title">План кімнати з рухомим джерелом і слухачем</title>
+              <desc id="plan-desc">Помаранчева точка рухається замкненою траєкторією. Від джерела розходяться блакитні хвилі, а промені відбиваються від стін і прямують до слухача.</desc>
+              <defs>
+                <pattern id="plan-grid" width="22" height="22" patternUnits="userSpaceOnUse">
+                  <path d="M22 0H0V22" fill="none" class="plan-grid"/>
+                </pattern>
+                <linearGradient id="room-fill" x2="1" y2="1">
+                  <stop stop-color="var(--accent)" stop-opacity=".15"/>
+                  <stop offset="1" stop-color="var(--accent)" stop-opacity=".025"/>
+                </linearGradient>
+                <path id="room-outline" d="M78 119 155 67H372L510 150V297L435 350H219L78 266Z"/>
+                <clipPath id="inside-room"><use href="#room-outline"/></clipPath>
+              </defs>
+              <rect x="23" y="23" width="544" height="384" rx="9" fill="url(#plan-grid)"/>
+              <path class="plan-measure" d="M153 48H374M153 42v12m221-12v12M218 374H437m-219-6v12m219-12v12M534 150v148m-6-148h12m-12 148h12M33 40h13m-6-6v13m500 343h13m-6-6v13"/>
+              <use href="#room-outline" transform="translate(0 14)" class="plan-thickness"/>
+              <use href="#room-outline" class="plan-walls" fill="url(#room-fill)"/>
+              <path class="plan-details" d="M78 119l141 85h216l75-54M219 204v146m216-146v146M155 67v126m217-126v89M78 266l75-51h219l138 82"/>
+              <path class="plan-panels" d="M180 67h24m10 0h24m10 0h24m10 0h24m10 0h24M510 176v24m0 10v24m0 10v24M253 350h24m10 0h24m10 0h24m10 0h24m10 0h24"/>
+              <g clip-path="url(#inside-room)">
+                <path class="ray-base" d="M175 218 272 67 443 110 394 264M175 218 78 173 252 350 394 264M175 218 394 264"/>
+                <path class="ray-pulse ray-one" pathLength="100" d="M175 218 272 67 443 110 394 264"/>
+                <path class="ray-pulse ray-two" pathLength="100" d="M175 218 78 173 252 350 394 264"/>
+              </g>
+              <path class="source-course" d="M175 218C211 208 219 137 261 137S319 193 291 223 237 264 216 243 196 210 175 218Z"/>
+              <circle cx="261" cy="137" r="3" class="course-point"/>
+              <circle cx="216" cy="243" r="3" class="course-point"/>
+              <g class="source-dot">
+                <ellipse class="wavefront" rx="26" ry="18"/>
+                <ellipse class="wavefront wavefront-late" rx="41" ry="29"/>
+                <circle r="12" class="source-halo"/>
+                <circle r="5.5" class="source-core"/>
+              </g>
+              <g class="listener-mark" transform="translate(394 264)">
+                <circle r="14"/>
+                <path d="M-5 5 0-7 5 5 0 2Z"/>
+              </g>
+            </svg>
+          <figcaption class="plan-legend">
+            <span><i class="key-source" aria-hidden="true"></i>Шлях джерела</span>
+            <span><i class="key-listener" aria-hidden="true"></i>Слухач</span>
+            <span><i class="key-ray" aria-hidden="true"></i>Відбиття</span>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section audience-section" aria-labelledby="audience">
+      <div class="wrap">
+        <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+        <h2 id="audience">Для кого цей плагін</h2>
+        <div class="audience-grid">
+          <article class="audience-card">
+            <svg class="audience-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16V4h12v12H4Zm0-6h6V4m0 6v6"/></svg>
+            <h3>Аранжувальники, композитори й інженери зведення</h3>
+            <p class="promise">Створюйте віртуальні зали й сцени для своїх оркеструвань і міксів.</p>
+            <ul>
+                <li>Розставте секції віртуального оркестру на власній сцені й спрямуйте туди доріжки з бібліотек семплів.</li>
+                <li>Перемістіть слухача з диригентського подіуму до шостого ряду й послухайте те саме аранжування у створеному вами залі.</li>
+                <li>Автоматизуйте позиції в DAW або почніть із комплектних пресетів VSL Grand Hall Audience і Conductor, кожен із 32 стереогрупами.</li>
+            </ul>
+            <a class="section-link" href="#listen">Познайомитися з пресетами залу</a>
+          </article>
+          <article class="audience-card">
+            <svg class="audience-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16h14M10 3v5m-5-2 2 3m8-3-2 3"/><circle cx="10" cy="12" r="2"/></svg>
+            <h3>Звукодизайнери та інженери перезапису й постпродакшну</h3>
+            <p class="promise">Моделюйте реальні приміщення, відтворюйте рух і працюйте з імерсивними форматами.</p>
+            <ul>
+                <li>Передайте акустичний характер локації для кіно, телебачення чи гри, змоделювавши її стіни й матеріали поверхонь.</li>
+                <li>Намалюйте траєкторію прольоту, проходу чи проїзду. Автоматизуйте рух джерела або слухача в DAW і запечіть пізній хвіст уздовж шляху.</li>
+                <li>Вибирайте моно, стерео, 5.1, 7.1 чи 7.1.4 або використовуйте AmbiX від першого до третього порядку для імерсивного звуку й VR.</li>
+            </ul>
+            <a class="section-link" href="#model">Переглянути можливості руху й формати виходу</a>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="how">
+      <div class="wrap">
+        <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+        <h2 id="how">Як це працює</h2>
+        <ol class="steps" role="list">
+          <li>
+            <span class="step-number" aria-hidden="true">01</span>
+            <h3>Намалюйте кімнату</h3>
+            <p>Задайте стіни, зони підлоги й стелі та горизонтальні плити. Виберіть, як поверхні поглинають, розсіюють і пропускають звук.</p>
+          </li>
+          <li>
+            <span class="step-number" aria-hidden="true">02</span>
+            <h3>Розмістіть джерела й слухача</h3>
+            <p>Спрямуйте сухі доріжки до джерел і поставте слухача там, звідки хочете почути сцену.</p>
+          </li>
+          <li>
+            <span class="step-number" aria-hidden="true">03</span>
+            <h3>Задайте рух</h3>
+            <p>Намалюйте шлях для джерела або слухача й автоматизуйте його позицію в DAW.</p>
+          </li>
+          <li>
+            <span class="step-number" aria-hidden="true">04</span>
+            <h3>Запечіть і відтворіть</h3>
+            <p>Заздалегідь розрахуйте пізній хвіст уздовж шляху. Запечені таблиці відновлюються з пресетів і проєктів DAW.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section model-section" aria-labelledby="model">
+      <div class="wrap">
+        <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+        <h2 id="model">Як звучить модель кімнати</h2>
+        <p class="narrow">Гібридний рушій обчислює ранні відбиття методом уявних джерел, оцінює пізній хвіст трасуванням променів і відтворює його згорткою.</p>
+        <ul class="chips" role="list">
+          <li>Ранні відбиття методом уявних джерел</li>
+          <li>Хвіст із трасуванням променів</li>
+          <li>7 октавних смуг</li>
+          <li>AmbiX 1–3</li>
+          <li>Автоматизація позицій</li>
+          <li>Запечені траєкторії</li>
+        </ul>
+        <div class="features">
+          <div>
+            <h3>Режими Physical і Creative</h3>
+            <p>У Physical кімната звучить за моделлю. Creative відкриває творчі регулятори, зокрема передзатримку, ширину стерео, Ducking і Freeze.</p>
+          </div>
+          <div>
+            <h3>Об’ємний звук і AmbiX</h3>
+            <p>Серед форматів слухача є моно, стерео, 5.1, 7.1 і 7.1.4, а також AmbiX першого, другого і третього порядків (4, 9 і 16 вихідних каналів, ACN/SN3D). У REAPER для AmbiX задайте 4, 10 або 16 каналів доріжки.</p>
+          </div>
+          <div>
+            <h3>Подивіться, куди йдуть відбиття</h3>
+            <p>Переглядайте шляхи відбиттів у вікні сцени, порівнюйте спад у семи октавних смугах і досліджуйте розподіл енергії на горизонтальному зрізі.</p>
+          </div>
+          <div>
+            <h3>Діліться повним налаштуванням</h3>
+            <p>Зберігайте геометрію, матеріали, маршрутизацію джерел і параметри міксу у пресеті <code>.verbroom</code>. Увімкніть Keep I/O, щоб під час імпорту зберегти поточну конфігурацію джерел і виходу.</p>
+          </div>
+        </div>
+        <h3 class="gallery-title">Інтерфейс плагіна</h3>
+        <div class="shots">
+          <figure>
+            <img src="../assets/hall-sources.webp" width="1674" height="992" loading="lazy" alt="Verb Room: тривимірний концертний зал із групами інструментів на сцені, слухачем у залі та панеллю джерела з вибраними Violins I">
+            <figcaption>Verb Room із пресетом VSL Grand Hall — Audience: 32 стереогрупи джерел і один слухач.</figcaption>
+          </figure>
+          <figure>
+            <img src="../assets/plan-rays-mix.webp" width="1667" height="980" alt="План невеликої кімнати з променями відбиттів між джерелом і слухачем та сторінкою Mix знизу" loading="lazy">
+            <figcaption>Вигляд у плані з променями перших відбиттів і сторінка Mix.</figcaption>
+          </figure>
+          <figure>
+            <img src="../assets/edit-materials.webp" width="1669" height="990" alt="Редактор кімнати у 3D із вибраною стіною, списком матеріалів і поглинанням за смугами в інспекторі" loading="lazy">
+            <figcaption>Edit room: вибрана стіна з матеріалом і поглинанням за октавними смугами.</figcaption>
+          </figure>
+          <figure>
+            <img src="../assets/edit-energy-map.webp" width="1675" height="990" alt="Редактор кімнати в плані з кольоровою картою енергії навколо джерела та налаштуваннями сцени праворуч" loading="lazy">
+            <figcaption>Edit room: змодельована енергія невеликої кімнати на горизонтальному зрізі.</figcaption>
+          </figure>
+          <figure>
+            <img src="../assets/trajectory-timeline.webp" width="1536" height="912" alt="Шлях джерела у 3D-кімнаті з часовою шкалою шляху внизу" loading="lazy">
+            <figcaption>Шлях джерела та часова шкала шляху.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="room-details">
+      <div class="wrap">
+        <h2 id="room-details">Деталі, що формують звучання кімнати</h2>
+        <div class="detail-grid">
+          <article class="detail-card">
+            <h3>Предмети в кімнаті</h3>
+            <figure class="detail-figure">
+              <svg class="detail-art" viewBox="0 0 420 120" aria-hidden="true">
+                <path class="outline" d="M18 35 52 14h97l40 21v49l-40 20H52L18 84ZM231 35l34-21h97l40 21v49l-40 20h-97l-34-20Z"/>
+                <path class="guide" d="M20 57h166m-166 20h166m48-20h166m-166 20h166"/>
+                <path class="signal" stroke-width="1.8" d="M51 68 94 14 147 68M51 68l43 36 53-36m117 0 40-36 56 36m-96 0 48 16 90-36-42 20"/>
+                <path class="obstacles" d="M293 35l22-6m12 13 13 11m-36 33 19-5m32 8 18 3m-12-54 14 9"/>
+                <circle class="source" cx="51" cy="68" r="4.5"/><circle class="source" cx="264" cy="68" r="4.5"/>
+                <path class="receiver" d="M147 62l5 6-5 6-5-6Zm213 0 5 6-5 6-5-6Z"/>
+              </svg>
+              <figcaption class="diagram-pair"><span>Порожня кімната</span><span>Та сама кімната з предметами</span></figcaption>
+            </figure>
+            <p class="detail-copy">Clutter додає перешкоди, що імітують меблі й змінюють шляхи відбиттів і пізній хвіст. Задайте кількість, мінімальну й максимальну довжину, висоту та втрати при проходженні звуку, а також відступ від джерел і слухача. Те саме початкове число генератора (seed) і ті самі налаштування сцени відтворюють розташування в обох режимах, Physical і Creative.</p>
+            <p class="detail-use">Додайте діалогу або доріжці з близького мікрофона відбиття мебльованої кімнати.</p>
+          </article>
+          <article class="detail-card">
+            <h3>Спрямованість джерел</h3>
+            <figure class="detail-figure">
+              <svg class="detail-art" viewBox="0 0 420 120" aria-hidden="true">
+                <defs>
+                  <g id="polar-grid" opacity=".7"><circle r="21"/><circle r="40"/><circle r="53"/><path d="M-53 0H53M0-53V53"/></g>
+                  <path id="polar-lobe" stroke-width="2" d="M-16 0C-16-14 10-37 34-24 58-11 58 11 34 24 10 37-16 14-16 0Z"/>
+                  <path id="polar-aim" stroke-width="2" d="M0 0H58m-6-5 6 5-6 5"/>
+                </defs>
+                <g transform="translate(104 60)"><use href="#polar-grid" class="axis"/><use href="#polar-lobe" class="lobe"/><use href="#polar-aim" class="signal"/><circle class="source" r="4.5"/></g>
+                <path class="axis" stroke-width="1.5" d="M184 60h50m-7-5 7 5-7 5"/>
+                <g transform="translate(312 60)"><use href="#polar-grid" class="axis"/><g transform="rotate(-58)"><use href="#polar-lobe" class="lobe"/><use href="#polar-aim" class="signal"/></g><circle class="source" r="4.5"/></g>
+              </svg>
+              <figcaption>Схема · Та сама діаграма в іншій орієнтації</figcaption>
+            </figure>
+            <p class="detail-copy">Виберіть аналітичну діаграму, наприклад кругову чи субкардіоїдну, або вбудовані виміряні профілі голосу й гучномовця, щоб змоделювати випромінювання в різних напрямках (<a href="#source">атрибуція CC BY 4.0</a>). Перегляньте полярну діаграму, задайте ступінь дії профілю й орієнтацію (азимут, кут піднесення та крен) або розверніть профіль на 180°. Через ліцензійні обмеження виміряні профілі інструментів не включено до пакета, тож конвертуйте власні дані через <code>verbdir_tool</code> і завантажте їх для джерела командою <strong>Load .verbdir file…</strong>.</p>
+            <p class="detail-copy">Профілі діють на прямий звук і ранні відбиття. Для пізнього хвоста джерело вважається всеспрямованим.</p>
+            <p class="detail-use">Змініть напрям гучномовця або передайте, як персонаж відвертається від слухача.</p>
+          </article>
+          <article class="detail-card">
+            <h3>Поглинання звуку повітрям</h3>
+            <figure class="detail-figure">
+              <svg class="detail-art" viewBox="0 0 420 120" aria-hidden="true">
+                <path class="guide" d="M45 16H386M45 45H386M45 74H386M45 103H386M130 16V103M215 16V103M300 16V103M385 16V103"/>
+                <path class="axis" stroke-width="1.5" d="M45 8v95h347m-6-5 6 5-6 5"/>
+                <path class="attenuation" stroke-width="2" d="M46 17 377 36"/>
+                <path class="signal" stroke-width="2.5" d="M46 17 377 87"/>
+                <circle class="source" cx="46" cy="17" r="4"/><circle class="signal" cx="377" cy="87" r="4" stroke-width="2"/>
+              </svg>
+              <figcaption>Схема · З відстанню високі частоти (суцільна лінія) слабшають більше за низькі (пунктир)</figcaption>
+            </figure>
+            <p class="detail-copy">У панелі Scene розділ Air задає температуру (°C) і відносну вологість (%). Рушій розраховує поглинання повітрям у семи октавних смугах від 125 Гц до 8 кГц і враховує втрати високих частот зі збільшенням пройденої відстані.</p>
+            <p class="detail-use">Врахуйте ослаблення високих частот на довгих шляхах у залі або на знімальному майданчику.</p>
+          </article>
+          <article class="detail-card">
+            <h3>Налаштування інтерфейсу</h3>
+            <figure class="detail-figure">
+              <svg class="detail-art" viewBox="0 0 420 120" aria-hidden="true">
+                <g transform="translate(14 7)">
+                  <rect width="124" height="104" rx="8" class="outline"/>
+                  <rect x="7" y="7" width="110" height="60" rx="4" fill="#100e0b"/>
+                  <path d="M20 49 37 21H98L108 55H48Z" fill="#4fb39c" fill-opacity=".22" stroke="#dccfb4"/>
+                  <path d="M48 45 73 21 92 49" stroke="#4da3ff" fill="none" stroke-width="1.5"/>
+                  <circle cx="48" cy="45" r="3" fill="#ff8a2e"/>
+                  <rect x="7" y="76" width="22" height="18" rx="2" fill="#100e0b"/><rect x="29" y="76" width="22" height="18" rx="2" fill="#dccfb4"/><rect x="51" y="76" width="22" height="18" rx="2" fill="#4fb39c"/><rect x="73" y="76" width="22" height="18" rx="2" fill="#ff8a2e"/><rect x="95" y="76" width="22" height="18" rx="2" fill="#4da3ff"/>
+                </g>
+                <g transform="translate(148 7)">
+                  <rect width="124" height="104" rx="8" class="outline"/>
+                  <rect x="7" y="7" width="110" height="60" rx="4" fill="#0a121c"/>
+                  <path d="M20 49 37 21H98L108 55H48Z" fill="#62c79a" fill-opacity=".22" stroke="#d2e0ea"/>
+                  <path d="M48 45 73 21 92 49" stroke="#ff8566" fill="none" stroke-width="1.5"/>
+                  <circle cx="48" cy="45" r="3" fill="#4cc2ff"/>
+                  <rect x="7" y="76" width="22" height="18" rx="2" fill="#0a121c"/><rect x="29" y="76" width="22" height="18" rx="2" fill="#d2e0ea"/><rect x="51" y="76" width="22" height="18" rx="2" fill="#62c79a"/><rect x="73" y="76" width="22" height="18" rx="2" fill="#4cc2ff"/><rect x="95" y="76" width="22" height="18" rx="2" fill="#ff8566"/>
+                </g>
+                <g transform="translate(282 7)">
+                  <rect width="124" height="104" rx="8" class="outline"/>
+                  <rect x="7" y="7" width="110" height="60" rx="4" fill="#091511"/>
+                  <path d="M20 49 37 21H98L108 55H48Z" fill="#e0b85a" fill-opacity=".22" stroke="#d0e4da"/>
+                  <path d="M48 45 73 21 92 49" stroke="#a98cff" fill="none" stroke-width="1.5"/>
+                  <circle cx="48" cy="45" r="3" fill="#4fe0a0"/>
+                  <rect x="7" y="76" width="22" height="18" rx="2" fill="#091511"/><rect x="29" y="76" width="22" height="18" rx="2" fill="#d0e4da"/><rect x="51" y="76" width="22" height="18" rx="2" fill="#e0b85a"/><rect x="73" y="76" width="22" height="18" rx="2" fill="#4fe0a0"/><rect x="95" y="76" width="22" height="18" rx="2" fill="#a98cff"/>
+                </g>
+              </svg>
+              <figcaption>Ілюстрація · Палітри в’юпорта Amber, Ice blue та Classic emerald</figcaption>
+            </figure>
+            <p class="detail-copy">У Theme можна задати акцент, відтінок фону вікна та його інтенсивність, вибрати готову палітру в’юпорта або кольори окремих елементів. Також можна вибрати палітру мапи енергії чи розфарбувати поверхні за класами матеріалів. Зміна значень колесом типово вимкнена, а Alt + колесо дає змогу їх змінювати.</p>
+            <p class="detail-use">Зробіть джерела й шляхи відбиттів помітними в насиченій сцені.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section comparison-section" aria-labelledby="comparison">
+      <div class="wrap">
+        <h2 id="comparison">Чим Verb Room відрізняється від інших ревербераторів</h2>
+        <table class="comparison-table" role="table">
+          <caption>Порівняння типових підходів до реверберації</caption>
+          <thead role="rowgroup">
+            <tr role="row">
+              <th id="compare-col-0" scope="col" role="columnheader">Властивість</th>
+              <th id="compare-col-1" scope="col" role="columnheader">Алгоритмічний</th>
+              <th id="compare-col-2" scope="col" role="columnheader">Згортковий</th>
+              <th id="compare-col-3" class="verb-column" scope="col" role="columnheader">Verb Room</th>
+            </tr>
+          </thead>
+          <tbody role="rowgroup">
+            <tr role="row">
+              <th id="compare-row-0" scope="row" role="rowheader">Звідки береться звук</th>
+              <td headers="compare-row-0 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Алгоритмічний</span>Спроєктована мережа затримок</td>
+              <td headers="compare-row-0 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Згортковий</span>Імпульсна характеристика, записана в певному просторі</td>
+              <td class="verb-column" headers="compare-row-0 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Модель кімнати, яку ви намалювали</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-1" scope="row" role="rowheader">Положення джерел і слухача</th>
+              <td headers="compare-row-1 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Алгоритмічний</span>Регулятори панорами, ширини й відстані</td>
+              <td headers="compare-row-1 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Згортковий</span>Положення зафіксовано в кожній записаній характеристиці</td>
+              <td class="verb-column" headers="compare-row-1 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Положення кожного джерела й слухача в моделі, з автоматизацією</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-2" scope="row" role="rowheader">Багато джерел в одному просторі</th>
+              <td headers="compare-row-2 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Алгоритмічний</span>Однакова реверберація для всіх джерел</td>
+              <td headers="compare-row-2 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Згортковий</span>Однакова імпульсна характеристика для всіх джерел</td>
+              <td class="verb-column" headers="compare-row-2 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Кожне джерело має власні відбиття та внесок у хвіст</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-3" scope="row" role="rowheader">Перешкоди, двері й сусідні кімнати</th>
+              <td headers="compare-row-3 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Алгоритмічний</span>Поза типовою моделлю на основі затримок</td>
+              <td headers="compare-row-3 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Згортковий</span>Акустика, зафіксована в імпульсній характеристиці</td>
+              <td class="verb-column" headers="compare-row-3 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Моделює затінення, пропускання й дифракцію</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-4" scope="row" role="rowheader">Зміна кімнати</th>
+              <td headers="compare-row-4 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Алгоритмічний</span>Налаштувати параметри реверберації</td>
+              <td headers="compare-row-4 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Згортковий</span>Завантажити іншу імпульсну характеристику</td>
+              <td class="verb-column" headers="compare-row-4 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Пересунути стіну або змінити матеріал</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-5" scope="row" role="rowheader">Рух</th>
+              <td headers="compare-row-5 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Алгоритмічний</span>Поза типовою моделлю на основі затримок</td>
+              <td headers="compare-row-5 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Згортковий</span>Кожна записана характеристика відповідає фіксованим положенням</td>
+              <td class="verb-column" headers="compare-row-5 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Шляхи змінюються разом із рухом, з фізичним ефектом Доплера</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="comparison-notes">
+          <p><strong>Physical</strong> відтворює модель кімнати й блокує творчі корекції. <strong>Creative</strong> відкриває спад за смугами, рівні ранніх відбиттів і хвоста, розмір, передзатримку, ширину, дакінг і Freeze.</p>
+          <p>Verb Room показує результати обчислень у вигляді шляхів відбиттів у в’юпорті, кривих спаду за смугами й мапи енергії кімнати.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section video-section" aria-labelledby="video">
+      <div class="wrap video-grid">
+        <div>
+          <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+          <h2 id="video">Джерело в русі</h2>
+          <p>Подивіться, як джерело рухається кімнатою за траєкторією. Це 20-секундний запис у реальному часі без звуку.</p>
+          <p class="note">Відео під’єднується до YouTube після натискання кнопки відтворення. Якщо плеєр показує помилку, <a href="https://www.youtube.com/watch?v=F0fv417fTNY">відкрийте відео на YouTube</a>.</p>
+        </div>
+        <div>
+          <div class="video" data-yt="F0fv417fTNY" data-title="Демонстрація руху у Verb Room" hidden>
+            <button class="video-trigger" type="button">
+              <img src="../assets/trajectory-timeline.webp" width="1536" height="912" alt="" loading="lazy">
+              <span class="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Відтворити демо руху</span>
+            </button>
+          </div>
+          <noscript>
+            <a class="video-fallback" href="https://www.youtube.com/watch?v=F0fv417fTNY">
+              <img src="../assets/trajectory-timeline.webp" width="1536" height="912" alt="" loading="lazy">
+              <span class="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Переглянути демо руху на YouTube</span>
+            </a>
+          </noscript>
+        </div>
+      </div>
+    </section>
+
+    <section class="section audio-section" aria-labelledby="hear">
+      <div class="wrap">
+        <h2 id="hear">Послухайте, як звучить кімната</h2>
+        <p>Порівняйте звучання до й після обробки. Радимо слухати в навушниках.</p>
+        <div class="audio-grid">
+          <article class="audio-card" aria-labelledby="orchestra-title" data-audio-ab
+                   data-play="Відтворити" data-pause="Пауза" data-playing="Відтворення"
+                   data-paused="Пауза" data-loading="Завантаження аудіо…" data-of="з" data-error="Не вдалося запустити A/B-плеєр. Спробуйте окремі плеєри нижче.">
+            <h3 id="orchestra-title">Оркестр у залі</h3>
+            <p>Послухайте короткий оркестровий начерк спершу сухим, а потім після обробки у пресеті Symphony Hall у Verb Room, з місця слухача в залі.</p>
+            <div class="audio-controls" hidden>
+              <div class="audio-actions">
+                <button class="cta audio-play" type="button">Відтворити</button>
+                <div class="audio-toggle" role="group" aria-label="A/B">
+                  <button type="button" aria-pressed="true">Сухий звук</button>
+                  <button type="button" aria-pressed="false">З Verb Room</button>
+                </div>
+              </div>
+              <div class="audio-progress">
+                <input type="range" min="0" max="1" step="0.1" value="0" aria-label="Позиція відтворення" disabled>
+                <span aria-hidden="true">0:00 / –:––</span>
+              </div>
+            </div>
+            <p class="audio-status" role="status" aria-live="polite"></p>
+            <div class="audio-native">
+              <div>
+                <span id="orchestra-dry">Сухий звук</span>
+                <audio aria-labelledby="orchestra-title orchestra-dry" controls preload="none" src="../assets/audio/orchestra-dry.mp3"></audio>
+              </div>
+              <div>
+                <span id="orchestra-wet">З Verb Room</span>
+                <audio aria-labelledby="orchestra-title orchestra-wet" controls preload="none" src="../assets/audio/orchestra-wet.mp3"></audio>
+              </div>
+            </div>
+          </article>
+          <article class="audio-card" aria-labelledby="walk-title" data-audio-ab
+                   data-play="Відтворити" data-pause="Пауза" data-playing="Відтворення"
+                   data-paused="Пауза" data-loading="Завантаження аудіо…" data-of="з" data-error="Не вдалося запустити A/B-плеєр. Спробуйте окремі плеєри нижче.">
+            <h3 id="walk-title">Голос у русі кімнатою</h3>
+            <p>Порівняйте сухий голос зі звучанням рухомого джерела у Verb Room. Для обробленого запису джерело рухалося намальованою траєкторією. Голос синтетичний, згенерований в ElevenLabs.</p>
+            <div class="audio-controls" hidden>
+              <div class="audio-actions">
+                <button class="cta audio-play" type="button">Відтворити</button>
+                <div class="audio-toggle" role="group" aria-label="A/B">
+                  <button type="button" aria-pressed="true">Сухий звук</button>
+                  <button type="button" aria-pressed="false">З Verb Room</button>
+                </div>
+              </div>
+              <div class="audio-progress">
+                <input type="range" min="0" max="1" step="0.1" value="0" aria-label="Позиція відтворення" disabled>
+                <span aria-hidden="true">0:00 / –:––</span>
+              </div>
+            </div>
+            <p class="audio-status" role="status" aria-live="polite"></p>
+            <div class="audio-native">
+              <div>
+                <span id="walk-dry">Сухий звук</span>
+                <audio aria-labelledby="walk-title walk-dry" controls preload="none" src="../assets/audio/walk-dry.mp3"></audio>
+              </div>
+              <div>
+                <span id="walk-wet">З Verb Room</span>
+                <audio aria-labelledby="walk-title walk-wet" controls preload="none" src="../assets/audio/walk-wet.mp3"></audio>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="listen">
+      <div class="wrap split">
+        <div>
+          <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+          <h2 id="listen">Один зал, дві точки слухання</h2>
+          <p>Відтворіть той самий сухий оркестровий фрагмент у двох комплектних пресетах VSL Grand Hall. Обидва використовують ту саму оригінальну модель залу.</p>
+        </div>
+        <div>
+          <div class="seats">
+          <div class="seat">
+            <h3>Audience</h3>
+            <p>Послухайте сцену з місця в залі.</p>
+          </div>
+          <div class="seat">
+            <h3>Conductor</h3>
+            <p>Послухайте ті самі секції з диригентського подіуму.</p>
+          </div>
+          </div>
+          <p>Вимкніть Keep I/O, налаштуйте 64 вхідні канали і відповідні посили в DAW. Потім відкрийте пресет із папки <code>Presets</code>, щоб відновити всі 32 стереогрупи. Використовуйте свої інструменти й семпли. За потреби імпортуйте профілі спрямованості інструментів.</p>
+          <p>Для меншого проєкту почніть із вбудованого Chamber Hall і спробуйте перемістити слухача під час відтворення сухого джерела.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="download" aria-labelledby="download-title">
+      <div class="wrap">
+        <h2 id="download-title">Завантажити Verb Room 0.2.2</h2>
+        <p class="narrow">Windows x64 і macOS Universal. Суму визначаєте ви, можна завантажити за нуль. Платежі підтримують розробку.</p>
+        <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Завантажити Verb Room на Ko-fi</a>
+        <div class="platforms">
+          <section class="platform" aria-labelledby="windows">
+            <h3 id="windows">Windows x64</h3>
+            <p>Windows 10 або 11, 64-бітний VST3-хост і процесор з AVX2 та FMA для стандартної збірки. Новий інтерфейс використовує WebView2 Runtime. Без нього Verb Room відкриє класичний редактор. У <a href="https://github.com/Bodzijun/sbp-verb-room#build">розділі про збірку</a> та <a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/docs/Cross_platform_builds_en.md#build-locally">нотатках про портативну збірку</a> описано параметр <code>-DVERB_AVX2=OFF</code>.</p>
+            <ol>
+              <li>Збережіть проєкт, закрийте DAW і розпакуйте ZIP.</li>
+              <li>Скопіюйте всю папку <code>Verb Room.vst3</code> до <code>C:\Program Files\Common Files\VST3\</code>.</li>
+              <li>Знову відкрийте DAW і за потреби повторіть сканування VST3-плагінів.</li>
+            </ol>
+          </section>
+          <section class="platform" aria-labelledby="macos">
+            <h3 id="macos">macOS Universal</h3>
+            <p>Apple silicon або Intel, VST3-хост і macOS 11 з актуальними оновленнями Safari/WebKit. Для нового інтерфейсу рекомендовано macOS 12 або новішу. Пакет має <strong>підпис ad-hoc і не пройшов нотаризацію Apple</strong>.</p>
+            <ol>
+              <li>Збережіть проєкт, закрийте DAW і розпакуйте ZIP.</li>
+              <li>Скопіюйте весь пакет <code>Verb Room.vst3</code> до <code>~/Library/Audio/Plug-Ins/VST3/</code> для свого облікового запису або до <code>/Library/Audio/Plug-Ins/VST3/</code> для всіх користувачів.</li>
+              <li>Якщо macOS блокує перевірений пакет, клацніть його правою кнопкою у Finder і виберіть <strong>Open</strong>, якщо пункт доступний. Можна також зняти карантин із цього пакета в Terminal. Якщо встановили пакет для всіх користувачів, змініть шлях.</li>
+            </ol>
+            <pre><code>xattr -dr com.apple.quarantine "$HOME/Library/Audio/Plug-Ins/VST3/Verb Room.vst3"</code></pre>
+            <p>Знову відкрийте DAW і за потреби повторіть сканування VST3-плагінів. Якщо новий інтерфейс не запускається, виберіть класичний редактор у меню Theme або запустіть хост із <code>VERB_UI=classic</code>.</p>
+          </section>
+        </div>
+        <h3 class="checksum-title">SHA-256 пакетів</h3>
+        <dl class="hashes">
+          <div>
+            <dt>VerbRoom-0.2.2-win64.zip</dt>
+            <dd><code>f551e7b2c1c4c502be949b223c6b7add2f9d7da5b0b5251081b23eb1e59302e7</code></dd>
+          </div>
+          <div>
+            <dt>VerbRoom-0.2.2-macos-universal.zip</dt>
+            <dd><code>c0f7a28674d9c32502aac73c1454df704acc10bd189621ac28b9647399ae9de3</code></dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="section support" id="support" aria-labelledby="support-title">
+      <div class="wrap split">
+        <h2 id="support-title">Підтримати Verb Room</h2>
+        <div>
+          <p>Verb Room можна завантажити безкоштовно, і спробувати його можна буде безкоштовно й надалі. Я розробляю його сам в Україні, а інструменти й час, потрібні для цього, коштують мені реальних грошей. Якщо плагін вам корисний і ви хочете, щоб він розвивався, внесок будь-якого розміру допоможе мені продовжувати роботу: стабільніші випуски, тестування на macOS, нові функції та краща документація.</p>
+          <p>Не можете або не готові платити? Це зовсім нормально. Тестування, звіт про помилку чи розповідь іншому звукорежисерові допоможуть не менше. Дякую, що спробували Verb Room.</p>
+          <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Підтримати на Ko-fi</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="limits">
+      <div class="wrap split">
+        <h2 id="limits">Відомі обмеження</h2>
+        <ul>
+          <li>Verb Room — альфа-версія. Плагін тестували в REAPER під Windows. Автоматизовані перевірки продуктивності охоплюють сцени з багатьма джерелами. Прослуховування в реальних сесіях і тести продуктивності на старіших чотириядерних системах ще попереду.</li>
+          <li>Версію 0.2.0 перевіряв на реальному Mac тестувальник зі спільноти; 0.2.1 і 0.2.2 на Mac ще не перевіряли. Щоб скористатися командами хоста, яких редактор macOS не обробляє, клацніть поза вікном плагіна. У цьому випуску немає пакета для Linux.</li>
+          <li>Геометрія 2,5D обмежена вертикальними стінами й горизонтальними підлогами, стелями та плитами. Модель ґрунтується на геометричній акустиці без низькочастотних кімнатних мод. Пізній хвіст оцінюється статистично.</li>
+          <li>Великі сцени можуть відчутно навантажувати процесор, особливо з AmbiX третього порядку в Creative. Для таких проєктів спробуйте Physical. Запікання шляху у великій сцені може тривати близько 1–2 хвилин залежно від сцени, процесора й навантаження.</li>
+          <li>Наявні пресети, сцени й проєкти завантажуються. Для рухомих об’єктів у режимі Manual із таблицями з попередніх збірок може знадобитися повторний Bake path. Для таблиць, запечених у 0.2.0, повторне запікання досі обов’язкове.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="changes">
+      <div class="wrap split">
+        <h2 id="changes">Що змінилося у 0.2.2</h2>
+        <div>
+          <ul>
+            <li><strong>Запікання шляхів.</strong> Bake завершується після редагування кімнати зі зупиненим транспортом хоста. Банер показує, чого очікує запікання. Ручна зміна азимуту під час руху більше не перериває запечений хвіст у зв’язаних групах і записаних проходах. Запікання записаного проходу працює незалежно від розміру буфера хоста.</li>
+            <li><strong>Редагування кімнати.</strong> З увімкненим Auto-link рух цілої стіни також пересуває з’єднані кінці сусідніх стін. У Clutter кнопка Randomize змінює Seed.</li>
+            <li><strong>Робота зі шляхами.</strong> Додано підказки для Bake path, Record pass, Clear bake та орієнтації Manual. Після Record pass натисніть Bake path, щоб обчислити таблицю.</li>
+            <li><strong>Джерела.</strong> Використовуйте Σ для окремого багатоканального джерела або масові дії All formats… і Sum for all sources. Кожну масову дію можна скасувати одним Undo. Після редагування список зберігає позицію прокручування.</li>
+          </ul>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/docs/Release_0.2.2_uk.md">Повні нотатки випуску 0.2.2</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/docs/Roadmap_1.0_uk.md">Дорожня карта до 1.0</a></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="source">
+      <div class="wrap split">
+        <h2 id="source">Вихідний код і відгуки</h2>
+        <div>
+          <p>Вихідний код Verb Room відкритий за ліцензією GNU Affero General Public License v3.0. Проєкт використовує JUCE 8 за AGPLv3. Вбудовані виміряні профілі спрямованості голосу й гучномовця мають атрибуцію за CC BY 4.0. До збірок не включено виміряні набори даних без ліцензії або з обмеженням на комерційне використання.</p>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room">Вихідний код</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/LICENSE">Ліцензія</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/THIRD_PARTY_DIRECTIVITY.md">Атрибуція профілів спрямованості</a></p>
+          <p>У повідомленні вкажіть ОС, процесор, версію DAW і сцену чи пресет. Особливо потрібні тести хостів під macOS, відгуки з інших DAW і спостереження за навантаженням великих сцен на чотириядерних процесорах.</p>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room/issues">Залишити відгук на GitHub</a></p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="footer"><div class="wrap"><p>Verb Room 0.2.2 · SBP</p><a lang="en" hreflang="en" href="../index.html">English version</a></div></footer>
+  <script src="../video.js"></script>
+  <script src="../audio-ab.js"></script>
+</body>
+</html>

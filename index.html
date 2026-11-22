@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Verb Room is a physically based room reverb for VST3 hosts. Draw a room and listen as sources and the listener move through it.">
+  <title>Verb Room 0.2.2 – Physically based room reverb</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230a121b%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%273%27 fill=%27%2318b0ca%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%209%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%272.2%27 opacity=%27.7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2713.5%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%271.6%27 opacity=%27.4%27/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <link rel="alternate" hreflang="uk" href="uk/index.html">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead">
+    <div class="wrap">
+      <a class="brand" href="index.html">Verb Room</a>
+      <nav class="section-nav" aria-label="On this page">
+        <a href="#room-details">Room details</a>
+        <a href="#comparison">Compare</a>
+      </nav>
+      <nav class="languages" aria-label="Language">
+        <a lang="en" hreflang="en" href="index.html" aria-current="page" aria-label="English">EN</a><span aria-hidden="true">|</span>
+        <a lang="uk" hreflang="uk" href="uk/index.html" aria-label="Українська">UK</a>
+      </nav>
+      <a class="cta header-cta" href="#download">Download</a>
+    </div>
+  </header>
+  <main id="main" tabindex="-1">
+    <section class="hero" aria-labelledby="title">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="release">VST3 · 0.2.2 alpha</p>
+          <h1 id="title">Draw the room.<br><em>Hear it move.</em></h1>
+          <p class="lead">A physically based room reverb. Build a space from walls and materials, then move sound sources and the listener through it.</p>
+          <div class="hero-actions">
+            <a class="cta" href="#download">Download</a>
+            <a class="cta secondary" href="#video"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Watch the motion demo</a>
+          </div>
+        </div>
+        <figure class="plan-card">
+          <div class="diagram-bar">
+            <span>Room plan</span>
+            <label class="motion-control"><input type="checkbox" class="motion-toggle"><span>Pause animation</span></label>
+          </div>
+          <svg class="room-plan" viewBox="0 0 590 430" role="img" aria-labelledby="plan-title plan-desc">
+              <title id="plan-title">Room plan with a moving source and a listener</title>
+              <desc id="plan-desc">The orange source follows a loop. Blue waves expand from the source, and reflection pulses bounce off the walls toward the listener.</desc>
+              <defs>
+                <pattern id="plan-grid" width="22" height="22" patternUnits="userSpaceOnUse">
+                  <path d="M22 0H0V22" fill="none" class="plan-grid"/>
+                </pattern>
+                <linearGradient id="room-fill" x2="1" y2="1">
+                  <stop stop-color="var(--accent)" stop-opacity=".15"/>
+                  <stop offset="1" stop-color="var(--accent)" stop-opacity=".025"/>
+                </linearGradient>
+                <path id="room-outline" d="M78 119 155 67H372L510 150V297L435 350H219L78 266Z"/>
+                <clipPath id="inside-room"><use href="#room-outline"/></clipPath>
+              </defs>
+              <rect x="23" y="23" width="544" height="384" rx="9" fill="url(#plan-grid)"/>
+              <path class="plan-measure" d="M153 48H374M153 42v12m221-12v12M218 374H437m-219-6v12m219-12v12M534 150v148m-6-148h12m-12 148h12M33 40h13m-6-6v13m500 343h13m-6-6v13"/>
+              <use href="#room-outline" transform="translate(0 14)" class="plan-thickness"/>
+              <use href="#room-outline" class="plan-walls" fill="url(#room-fill)"/>
+              <path class="plan-details" d="M78 119l141 85h216l75-54M219 204v146m216-146v146M155 67v126m217-126v89M78 266l75-51h219l138 82"/>
+              <path class="plan-panels" d="M180 67h24m10 0h24m10 0h24m10 0h24m10 0h24M510 176v24m0 10v24m0 10v24M253 350h24m10 0h24m10 0h24m10 0h24m10 0h24"/>
+              <g clip-path="url(#inside-room)">
+                <path class="ray-base" d="M175 218 272 67 443 110 394 264M175 218 78 173 252 350 394 264M175 218 394 264"/>
+                <path class="ray-pulse ray-one" pathLength="100" d="M175 218 272 67 443 110 394 264"/>
+                <path class="ray-pulse ray-two" pathLength="100" d="M175 218 78 173 252 350 394 264"/>
+              </g>
+              <path class="source-course" d="M175 218C211 208 219 137 261 137S319 193 291 223 237 264 216 243 196 210 175 218Z"/>
+              <circle cx="261" cy="137" r="3" class="course-point"/>
+              <circle cx="216" cy="243" r="3" class="course-point"/>
+              <g class="source-dot">
+                <ellipse class="wavefront" rx="26" ry="18"/>
+                <ellipse class="wavefront wavefront-late" rx="41" ry="29"/>
+                <circle r="12" class="source-halo"/>
+                <circle r="5.5" class="source-core"/>
+              </g>
+              <g class="listener-mark" transform="translate(394 264)">
+                <circle r="14"/>
+                <path d="M-5 5 0-7 5 5 0 2Z"/>
+              </g>
+            </svg>
+          <figcaption class="plan-legend">
+            <span><i class="key-source" aria-hidden="true"></i>Source path</span>
+            <span><i class="key-listener" aria-hidden="true"></i>Listener</span>
+            <span><i class="key-ray" aria-hidden="true"></i>Reflections</span>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section audience-section" aria-labelledby="audience">
+      <div class="wrap">
+        <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+        <h2 id="audience">Who it’s for</h2>
+        <div class="audience-grid">
+          <article class="audience-card">
+            <svg class="audience-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16V4h12v12H4Zm0-6h6V4m0 6v6"/></svg>
+            <h3>Arrangers, composers, and mixers</h3>
+            <p class="promise">Build virtual halls and stages for your orchestrations and mixes.</p>
+            <ul>
+                <li>Place each section of your virtual orchestra on a stage you design and route tracks from your sample libraries.</li>
+                <li>Move from the conductor’s podium to row 6 and hear the same arrangement in the space you built.</li>
+                <li>Automate positions from your DAW or start with the included VSL Grand Hall Audience and Conductor presets, each set up for 32 stereo groups.</li>
+            </ul>
+            <a class="section-link" href="#listen">Explore the hall presets</a>
+          </article>
+          <article class="audience-card">
+            <svg class="audience-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 16h14M10 3v5m-5-2 2 3m8-3-2 3"/><circle cx="10" cy="12" r="2"/></svg>
+            <h3>Sound designers and post-production engineers</h3>
+            <p class="promise">Model real rooms, animate movement, and output immersive formats.</p>
+            <ul>
+                <li>Recreate the acoustic character of a film, TV, or game location by modeling its walls and surface materials.</li>
+                <li>Draw a flyby, walkthrough, or vehicle path. Automate the source or listener in your DAW and bake the late tail along the route.</li>
+                <li>Choose mono, stereo, 5.1, 7.1, or 7.1.4, or use first- to third-order AmbiX in an immersive or VR audio workflow.</li>
+            </ul>
+            <a class="section-link" href="#model">See movement and output formats</a>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="how">
+      <div class="wrap">
+        <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+        <h2 id="how">How it works</h2>
+        <ol class="steps" role="list">
+          <li>
+            <span class="step-number" aria-hidden="true">01</span>
+            <h3>Draw the room</h3>
+            <p>Set the walls, floor and ceiling zones, and horizontal plates. Choose how surfaces absorb, scatter, and transmit sound.</p>
+          </li>
+          <li>
+            <span class="step-number" aria-hidden="true">02</span>
+            <h3>Place sources and the listener</h3>
+            <p>Route dry tracks to sources and position the listener where you want to hear the scene.</p>
+          </li>
+          <li>
+            <span class="step-number" aria-hidden="true">03</span>
+            <h3>Set them moving</h3>
+            <p>Draw a path for a source or the listener and automate its position in your DAW.</p>
+          </li>
+          <li>
+            <span class="step-number" aria-hidden="true">04</span>
+            <h3>Bake and play</h3>
+            <p>Precompute the late tail along the path. Baked tables reload with presets and DAW sessions.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section model-section" aria-labelledby="model">
+      <div class="wrap">
+        <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+        <h2 id="model">Inside the room model</h2>
+        <p class="narrow">The hybrid engine calculates early reflections with the image-source method, estimates the late tail with ray tracing, and plays it back through convolution.</p>
+        <ul class="chips" role="list">
+          <li>Image-source early reflections</li>
+          <li>Ray-traced tail</li>
+          <li>7 octave bands</li>
+          <li>AmbiX 1–3</li>
+          <li>Automatable positions</li>
+          <li>Baked paths</li>
+        </ul>
+        <div class="features">
+          <div>
+            <h3>Physical and Creative modes</h3>
+            <p>Physical plays the room as modeled. Creative unlocks controls such as pre-delay, stereo width, ducking, and Freeze.</p>
+          </div>
+          <div>
+            <h3>Surround and AmbiX</h3>
+            <p>Listener layouts include mono, stereo, 5.1, 7.1, and 7.1.4, plus first-, second-, and third-order AmbiX (4, 9, and 16 output channels, ACN/SN3D). In REAPER, use 4, 10, or 16 track channels for AmbiX.</p>
+          </div>
+          <div>
+            <h3>See where reflections go</h3>
+            <p>Inspect reflection paths in the viewport, compare decay across seven octave bands, or view the modeled energy on a horizontal slice.</p>
+          </div>
+          <div>
+            <h3>Share the whole setup</h3>
+            <p>Save room geometry, materials, source routing, and mix settings in a <code>.verbroom</code> preset. Enable Keep I/O to preserve your current source setup and output configuration when importing.</p>
+          </div>
+        </div>
+        <h3 class="gallery-title">Inside the plug-in</h3>
+        <div class="shots">
+          <figure>
+            <img src="assets/hall-sources.webp" width="1674" height="992" loading="lazy" alt="Verb Room showing a 3D concert hall with instrument groups on stage, a listener in the audience, and the source panel with Violins I selected">
+            <figcaption>Verb Room with the VSL Grand Hall — Audience preset: 32 stereo source groups and one listener.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/plan-rays-mix.webp" width="1667" height="980" alt="Plan view of a small room with reflection rays between a source and the listener, and the Mix page below" loading="lazy">
+            <figcaption>Plan view with first-order reflection rays, and the Mix page.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/edit-materials.webp" width="1669" height="990" alt="Room editor in 3D with a selected wall and the material list and per-band absorption in the inspector" loading="lazy">
+            <figcaption>Edit room: a selected wall with its material and absorption by octave band.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/edit-energy-map.webp" width="1675" height="990" alt="Room editor plan view with a colored energy map around the source and the scene settings on the right" loading="lazy">
+            <figcaption>Edit room: the modeled energy of a small room on a horizontal slice.</figcaption>
+          </figure>
+          <figure>
+            <img src="assets/trajectory-timeline.webp" width="1536" height="912" alt="A source path drawn in a 3D room with the path timeline at the bottom" loading="lazy">
+            <figcaption>A source path with the path timeline.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="room-details">
+      <div class="wrap">
+        <h2 id="room-details">Details that shape the room</h2>
+        <div class="detail-grid">
+          <article class="detail-card">
+            <h3>Room clutter</h3>
+            <figure class="detail-figure">
+              <svg class="detail-art" viewBox="0 0 420 120" aria-hidden="true">
+                <path class="outline" d="M18 35 52 14h97l40 21v49l-40 20H52L18 84ZM231 35l34-21h97l40 21v49l-40 20h-97l-34-20Z"/>
+                <path class="guide" d="M20 57h166m-166 20h166m48-20h166m-166 20h166"/>
+                <path class="signal" stroke-width="1.8" d="M51 68 94 14 147 68M51 68l43 36 53-36m117 0 40-36 56 36m-96 0 48 16 90-36-42 20"/>
+                <path class="obstacles" d="M293 35l22-6m12 13 13 11m-36 33 19-5m32 8 18 3m-12-54 14 9"/>
+                <circle class="source" cx="51" cy="68" r="4.5"/><circle class="source" cx="264" cy="68" r="4.5"/>
+                <path class="receiver" d="M147 62l5 6-5 6-5-6Zm213 0 5 6-5 6-5-6Z"/>
+              </svg>
+              <figcaption class="diagram-pair"><span>Empty room</span><span>Same room with clutter</span></figcaption>
+            </figure>
+            <p class="detail-copy">Clutter adds furniture-like obstacles that change reflection paths and the late tail. Set the count, minimum and maximum length, height, and transmission loss, plus clearance around sources and the listener. The same seed and scene settings reproduce the layout in either Physical or Creative.</p>
+            <p class="detail-use">Give dialogue or a close-miked track the reflections of a furnished room.</p>
+          </article>
+          <article class="detail-card">
+            <h3>Source directivity</h3>
+            <figure class="detail-figure">
+              <svg class="detail-art" viewBox="0 0 420 120" aria-hidden="true">
+                <defs>
+                  <g id="polar-grid" opacity=".7"><circle r="21"/><circle r="40"/><circle r="53"/><path d="M-53 0H53M0-53V53"/></g>
+                  <path id="polar-lobe" stroke-width="2" d="M-16 0C-16-14 10-37 34-24 58-11 58 11 34 24 10 37-16 14-16 0Z"/>
+                  <path id="polar-aim" stroke-width="2" d="M0 0H58m-6-5 6 5-6 5"/>
+                </defs>
+                <g transform="translate(104 60)"><use href="#polar-grid" class="axis"/><use href="#polar-lobe" class="lobe"/><use href="#polar-aim" class="signal"/><circle class="source" r="4.5"/></g>
+                <path class="axis" stroke-width="1.5" d="M184 60h50m-7-5 7 5-7 5"/>
+                <g transform="translate(312 60)"><use href="#polar-grid" class="axis"/><g transform="rotate(-58)"><use href="#polar-lobe" class="lobe"/><use href="#polar-aim" class="signal"/></g><circle class="source" r="4.5"/></g>
+              </svg>
+              <figcaption>Illustration · Same pattern, different aim</figcaption>
+            </figure>
+            <p class="detail-copy">Choose an analytic pattern such as omni or subcardioid, or use the built-in voice and speaker measurements to model how sound radiates in different directions (<a href="#source">CC BY 4.0 credits</a>). Inspect the polar plot, set profile amount and aim (azimuth, elevation, and roll), or flip front and back. The bundle excludes instrument measurements for licensing reasons, so convert your own data with <code>verbdir_tool</code> and import it with the source’s <strong>Load .verbdir file…</strong> command.</p>
+            <p class="detail-copy">Profiles affect direct sound and early reflections. The late tail treats each source as omnidirectional.</p>
+            <p class="detail-use">Aim a speaker across the room or turn a voice away from the listener.</p>
+          </article>
+          <article class="detail-card">
+            <h3>Air absorption</h3>
+            <figure class="detail-figure">
+              <svg class="detail-art" viewBox="0 0 420 120" aria-hidden="true">
+                <path class="guide" d="M45 16H386M45 45H386M45 74H386M45 103H386M130 16V103M215 16V103M300 16V103M385 16V103"/>
+                <path class="axis" stroke-width="1.5" d="M45 8v95h347m-6-5 6 5-6 5"/>
+                <path class="attenuation" stroke-width="2" d="M46 17 377 36"/>
+                <path class="signal" stroke-width="2.5" d="M46 17 377 87"/>
+                <circle class="source" cx="46" cy="17" r="4"/><circle class="signal" cx="377" cy="87" r="4" stroke-width="2"/>
+              </svg>
+              <figcaption>Illustration · With distance, the high band (solid) loses more level than the low band (dashed)</figcaption>
+            </figure>
+            <p class="detail-copy">In the Scene panel, Air sets temperature (°C) and relative humidity (%). The engine calculates air absorption in seven octave bands from 125 Hz to 8 kHz, accounting for high-frequency loss as sound travels farther.</p>
+            <p class="detail-use">Account for high-frequency loss on long paths through a hall or across a set.</p>
+          </article>
+          <article class="detail-card">
+            <h3>Customize the interface</h3>
+            <figure class="detail-figure">
+              <svg class="detail-art" viewBox="0 0 420 120" aria-hidden="true">
+                <g transform="translate(14 7)">
+                  <rect width="124" height="104" rx="8" class="outline"/>
+                  <rect x="7" y="7" width="110" height="60" rx="4" fill="#100e0b"/>
+                  <path d="M20 49 37 21H98L108 55H48Z" fill="#4fb39c" fill-opacity=".22" stroke="#dccfb4"/>
+                  <path d="M48 45 73 21 92 49" stroke="#4da3ff" fill="none" stroke-width="1.5"/>
+                  <circle cx="48" cy="45" r="3" fill="#ff8a2e"/>
+                  <rect x="7" y="76" width="22" height="18" rx="2" fill="#100e0b"/><rect x="29" y="76" width="22" height="18" rx="2" fill="#dccfb4"/><rect x="51" y="76" width="22" height="18" rx="2" fill="#4fb39c"/><rect x="73" y="76" width="22" height="18" rx="2" fill="#ff8a2e"/><rect x="95" y="76" width="22" height="18" rx="2" fill="#4da3ff"/>
+                </g>
+                <g transform="translate(148 7)">
+                  <rect width="124" height="104" rx="8" class="outline"/>
+                  <rect x="7" y="7" width="110" height="60" rx="4" fill="#0a121c"/>
+                  <path d="M20 49 37 21H98L108 55H48Z" fill="#62c79a" fill-opacity=".22" stroke="#d2e0ea"/>
+                  <path d="M48 45 73 21 92 49" stroke="#ff8566" fill="none" stroke-width="1.5"/>
+                  <circle cx="48" cy="45" r="3" fill="#4cc2ff"/>
+                  <rect x="7" y="76" width="22" height="18" rx="2" fill="#0a121c"/><rect x="29" y="76" width="22" height="18" rx="2" fill="#d2e0ea"/><rect x="51" y="76" width="22" height="18" rx="2" fill="#62c79a"/><rect x="73" y="76" width="22" height="18" rx="2" fill="#4cc2ff"/><rect x="95" y="76" width="22" height="18" rx="2" fill="#ff8566"/>
+                </g>
+                <g transform="translate(282 7)">
+                  <rect width="124" height="104" rx="8" class="outline"/>
+                  <rect x="7" y="7" width="110" height="60" rx="4" fill="#091511"/>
+                  <path d="M20 49 37 21H98L108 55H48Z" fill="#e0b85a" fill-opacity=".22" stroke="#d0e4da"/>
+                  <path d="M48 45 73 21 92 49" stroke="#a98cff" fill="none" stroke-width="1.5"/>
+                  <circle cx="48" cy="45" r="3" fill="#4fe0a0"/>
+                  <rect x="7" y="76" width="22" height="18" rx="2" fill="#091511"/><rect x="29" y="76" width="22" height="18" rx="2" fill="#d0e4da"/><rect x="51" y="76" width="22" height="18" rx="2" fill="#e0b85a"/><rect x="73" y="76" width="22" height="18" rx="2" fill="#4fe0a0"/><rect x="95" y="76" width="22" height="18" rx="2" fill="#a98cff"/>
+                </g>
+              </svg>
+              <figcaption>Illustration · Amber, Ice blue, and Classic emerald viewport palettes</figcaption>
+            </figure>
+            <p class="detail-copy">In Theme, set the window accent, background tint and strength, and choose viewport presets or colors for individual elements. You can also choose the energy-map palette or color surfaces by material class. Mouse-wheel value changes are off by default, but Alt+wheel still adjusts values.</p>
+            <p class="detail-use">Make sources and reflection paths easy to pick out in a busy scene.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section comparison-section" aria-labelledby="comparison">
+      <div class="wrap">
+        <h2 id="comparison">What is different from other reverbs</h2>
+        <table class="comparison-table" role="table">
+          <caption>Comparison of typical reverb approaches</caption>
+          <thead role="rowgroup">
+            <tr role="row">
+              <th id="compare-col-0" scope="col" role="columnheader">Aspect</th>
+              <th id="compare-col-1" scope="col" role="columnheader">Algorithmic reverb</th>
+              <th id="compare-col-2" scope="col" role="columnheader">Convolution reverb</th>
+              <th id="compare-col-3" class="verb-column" scope="col" role="columnheader">Verb Room</th>
+            </tr>
+          </thead>
+          <tbody role="rowgroup">
+            <tr role="row">
+              <th id="compare-row-0" scope="row" role="rowheader">Where the sound comes from</th>
+              <td headers="compare-row-0 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Algorithmic reverb</span>A designed network of delays</td>
+              <td headers="compare-row-0 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Convolution reverb</span>An impulse response captured in a space</td>
+              <td class="verb-column" headers="compare-row-0 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>A simulation of the room you drew</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-1" scope="row" role="rowheader">Source and listener positions</th>
+              <td headers="compare-row-1 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Algorithmic reverb</span>Pan, width, and distance controls</td>
+              <td headers="compare-row-1 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Convolution reverb</span>Positions fixed in each captured response</td>
+              <td class="verb-column" headers="compare-row-1 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Per-source positions and listener position in the model, with automation</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-2" scope="row" role="rowheader">Many sources in one space</th>
+              <td headers="compare-row-2 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Algorithmic reverb</span>The same reverb response for each source</td>
+              <td headers="compare-row-2 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Convolution reverb</span>The same impulse response for each source</td>
+              <td class="verb-column" headers="compare-row-2 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Each source has its own reflections and contribution to the tail</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-3" scope="row" role="rowheader">Obstacles, doors, and adjacent rooms</th>
+              <td headers="compare-row-3 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Algorithmic reverb</span>Outside the typical delay-network model</td>
+              <td headers="compare-row-3 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Convolution reverb</span>Acoustics captured in the impulse response</td>
+              <td class="verb-column" headers="compare-row-3 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Models occlusion, transmission, and diffraction</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-4" scope="row" role="rowheader">Changing the room</th>
+              <td headers="compare-row-4 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Algorithmic reverb</span>Adjust reverb controls</td>
+              <td headers="compare-row-4 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Convolution reverb</span>Load a different impulse response</td>
+              <td class="verb-column" headers="compare-row-4 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Move a wall or change a material</td>
+            </tr>
+            <tr role="row">
+              <th id="compare-row-5" scope="row" role="rowheader">Movement</th>
+              <td headers="compare-row-5 compare-col-1" role="cell"><span class="cell-label" aria-hidden="true">Algorithmic reverb</span>Outside the typical delay-network model</td>
+              <td headers="compare-row-5 compare-col-2" role="cell"><span class="cell-label" aria-hidden="true">Convolution reverb</span>Each captured response holds its positions fixed</td>
+              <td class="verb-column" headers="compare-row-5 compare-col-3" role="cell"><span class="cell-label" aria-hidden="true">Verb Room</span>Paths follow movement with physical Doppler</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="comparison-notes">
+          <p><strong>Physical</strong> plays the room as modeled and locks the creative overrides. <strong>Creative</strong> unlocks decay by band, early and tail levels, size, pre-delay, width, ducking, and Freeze.</p>
+          <p>Verb Room shows what it computes with reflection paths in the viewport, decay curves by band, and an energy map of the room.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section video-section" aria-labelledby="video">
+      <div class="wrap video-grid">
+        <div>
+          <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+          <h2 id="video">A source in motion</h2>
+          <p>Watch a source follow a path through a room in a silent, 20-second real-time capture.</p>
+          <p class="note">The video connects to YouTube after you press play. If the player shows an error, <a href="https://www.youtube.com/watch?v=F0fv417fTNY">open the video on YouTube</a>.</p>
+        </div>
+        <div>
+          <div class="video" data-yt="F0fv417fTNY" data-title="Verb Room motion demo" hidden>
+            <button class="video-trigger" type="button">
+              <img src="assets/trajectory-timeline.webp" width="1536" height="912" alt="" loading="lazy">
+              <span class="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Play the motion demo</span>
+            </button>
+          </div>
+          <noscript>
+            <a class="video-fallback" href="https://www.youtube.com/watch?v=F0fv417fTNY">
+              <img src="assets/trajectory-timeline.webp" width="1536" height="912" alt="" loading="lazy">
+              <span class="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Watch the motion demo on YouTube</span>
+            </a>
+          </noscript>
+        </div>
+      </div>
+    </section>
+
+    <section class="section audio-section" aria-labelledby="hear">
+      <div class="wrap">
+        <h2 id="hear">Hear the room</h2>
+        <p>Compare the dry and processed versions of each demo. Headphones recommended.</p>
+        <div class="audio-grid">
+          <article class="audio-card" aria-labelledby="orchestra-title" data-audio-ab
+                   data-play="Play" data-pause="Pause" data-playing="Playing"
+                   data-paused="Paused" data-loading="Loading audio…" data-of="of" data-error="The A/B player couldn’t start. Try the separate audio controls below.">
+            <h3 id="orchestra-title">Orchestra in a hall</h3>
+            <p>Hear a short orchestral sketch dry and then processed in Verb Room’s Symphony Hall preset, from a listener seat in the audience.</p>
+            <div class="audio-controls" hidden>
+              <div class="audio-actions">
+                <button class="cta audio-play" type="button">Play</button>
+                <div class="audio-toggle" role="group" aria-label="A/B">
+                  <button type="button" aria-pressed="true">Dry</button>
+                  <button type="button" aria-pressed="false">With Verb Room</button>
+                </div>
+              </div>
+              <div class="audio-progress">
+                <input type="range" min="0" max="1" step="0.1" value="0" aria-label="Playback position" disabled>
+                <span aria-hidden="true">0:00 / –:––</span>
+              </div>
+            </div>
+            <p class="audio-status" role="status" aria-live="polite"></p>
+            <div class="audio-native">
+              <div>
+                <span id="orchestra-dry">Dry</span>
+                <audio aria-labelledby="orchestra-title orchestra-dry" controls preload="none" src="assets/audio/orchestra-dry.mp3"></audio>
+              </div>
+              <div>
+                <span id="orchestra-wet">With Verb Room</span>
+                <audio aria-labelledby="orchestra-title orchestra-wet" controls preload="none" src="assets/audio/orchestra-wet.mp3"></audio>
+              </div>
+            </div>
+          </article>
+          <article class="audio-card" aria-labelledby="walk-title" data-audio-ab
+                   data-play="Play" data-pause="Pause" data-playing="Playing"
+                   data-paused="Paused" data-loading="Loading audio…" data-of="of" data-error="The A/B player couldn’t start. Try the separate audio controls below.">
+            <h3 id="walk-title">A voice walking through a room</h3>
+            <p>Compare the dry voice with the sound of a moving source in Verb Room. The processed take was recorded with a drawn path. The voice is synthetic, generated with ElevenLabs.</p>
+            <div class="audio-controls" hidden>
+              <div class="audio-actions">
+                <button class="cta audio-play" type="button">Play</button>
+                <div class="audio-toggle" role="group" aria-label="A/B">
+                  <button type="button" aria-pressed="true">Dry</button>
+                  <button type="button" aria-pressed="false">With Verb Room</button>
+                </div>
+              </div>
+              <div class="audio-progress">
+                <input type="range" min="0" max="1" step="0.1" value="0" aria-label="Playback position" disabled>
+                <span aria-hidden="true">0:00 / –:––</span>
+              </div>
+            </div>
+            <p class="audio-status" role="status" aria-live="polite"></p>
+            <div class="audio-native">
+              <div>
+                <span id="walk-dry">Dry</span>
+                <audio aria-labelledby="walk-title walk-dry" controls preload="none" src="assets/audio/walk-dry.mp3"></audio>
+              </div>
+              <div>
+                <span id="walk-wet">With Verb Room</span>
+                <audio aria-labelledby="walk-title walk-wet" controls preload="none" src="assets/audio/walk-wet.mp3"></audio>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="listen">
+      <div class="wrap split">
+        <div>
+          <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+          <h2 id="listen">One hall, two perspectives</h2>
+          <p>Play the same dry orchestral passage through the two included VSL Grand Hall presets. Both use the same original model of the hall.</p>
+        </div>
+        <div>
+          <div class="seats">
+          <div class="seat">
+            <h3>Audience</h3>
+            <p>Hear the stage from a seat in the hall.</p>
+          </div>
+          <div class="seat">
+            <h3>Conductor</h3>
+            <p>Hear the same sections from the podium.</p>
+          </div>
+          </div>
+          <p>Turn off Keep I/O, configure 64 input channels and the corresponding DAW sends, then load a preset from the <code>Presets</code> folder to restore all 32 stereo groups. Bring your own instruments, samples, and any instrument directivity profiles you want to import.</p>
+          <p>For a smaller session, start with the built-in Chamber Hall and try moving the listener while a dry source plays.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="download" aria-labelledby="download-title">
+      <div class="wrap">
+        <h2 id="download-title">Download Verb Room 0.2.2</h2>
+        <p class="narrow">Windows x64 and macOS Universal. Pay what you want, including zero. Payments support development.</p>
+        <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Get Verb Room on Ko-fi</a>
+        <div class="platforms">
+          <section class="platform" aria-labelledby="windows">
+            <h3 id="windows">Windows x64</h3>
+            <p>Windows 10 or 11, a 64-bit VST3 host, and a CPU with AVX2 and FMA for the default build. The new interface uses WebView2 Runtime. If it is missing, Verb Room opens the classic editor. The <a href="https://github.com/Bodzijun/sbp-verb-room#build">source build instructions</a> and <a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/docs/Cross_platform_builds_en.md#build-locally">portable build notes</a> explain the build option <code>-DVERB_AVX2=OFF</code>.</p>
+            <ol>
+              <li>Save your work, close the DAW, and extract the ZIP.</li>
+              <li>Copy the entire <code>Verb Room.vst3</code> folder to <code>C:\Program Files\Common Files\VST3\</code>.</li>
+              <li>Reopen the DAW and rescan VST3 plug-ins if needed.</li>
+            </ol>
+          </section>
+          <section class="platform" aria-labelledby="macos">
+            <h3 id="macos">macOS Universal</h3>
+            <p>Apple silicon or Intel, a VST3 host, and macOS 11 with current Safari/WebKit updates. macOS 12 or newer is recommended for the new interface. The bundle is <strong>ad-hoc signed and not notarized</strong>.</p>
+            <ol>
+              <li>Save your work, close the DAW, and extract the ZIP.</li>
+              <li>Copy the whole <code>Verb Room.vst3</code> bundle to <code>~/Library/Audio/Plug-Ins/VST3/</code> for your account or <code>/Library/Audio/Plug-Ins/VST3/</code> for all users.</li>
+              <li>If macOS blocks the verified download, try right-clicking the bundle in Finder and choosing <strong>Open</strong> if Finder offers it. You can also remove quarantine from this bundle in Terminal. Adjust the path if you installed it for all users.</li>
+            </ol>
+            <pre><code>xattr -dr com.apple.quarantine "$HOME/Library/Audio/Plug-Ins/VST3/Verb Room.vst3"</code></pre>
+            <p>Reopen the DAW and rescan VST3 plug-ins if needed. If the new interface fails to start, try the classic editor via Theme or launch the host with <code>VERB_UI=classic</code>.</p>
+          </section>
+        </div>
+        <h3 class="checksum-title">Package SHA-256</h3>
+        <dl class="hashes">
+          <div>
+            <dt>VerbRoom-0.2.2-win64.zip</dt>
+            <dd><code>f551e7b2c1c4c502be949b223c6b7add2f9d7da5b0b5251081b23eb1e59302e7</code></dd>
+          </div>
+          <div>
+            <dt>VerbRoom-0.2.2-macos-universal.zip</dt>
+            <dd><code>c0f7a28674d9c32502aac73c1454df704acc10bd189621ac28b9647399ae9de3</code></dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="section support" id="support" aria-labelledby="support-title">
+      <div class="wrap split">
+        <h2 id="support-title">Support Verb Room</h2>
+        <div>
+          <p>Verb Room is free to download, and it will stay free to try. I build it alone, in Ukraine, and the tools and time behind it are a real cost for me. If the plugin is useful to you and you’d like to see it grow, a contribution of any size helps me keep working on it: more stable releases, macOS testing, new features, and better documentation.</p>
+          <p>Not able or not ready to pay? That is completely fine. Testing it, sending a bug report, or telling another sound designer about it helps just as much. Thank you for trying Verb Room.</p>
+          <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Support on Ko-fi</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="limits">
+      <div class="wrap split">
+        <h2 id="limits">Known limitations</h2>
+        <ul>
+          <li>Verb Room is alpha software. Windows is the platform tested in REAPER. Automated performance checks cover multi-source scenes. Live listening and performance on older four-core systems remain open.</li>
+          <li>Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 and 0.2.2 have yet to be tested on a Mac. When the macOS editor has focus, click outside it to use host shortcuts the editor does not handle. This release has no Linux package.</li>
+          <li>Geometry is 2.5D: vertical walls and horizontal floors, ceilings, and plates. The model covers geometric acoustics without low-frequency room modes. The tail is a statistical estimate.</li>
+          <li>Large scenes can be CPU-intensive, especially with third-order AmbiX in Creative mode. Try Physical mode for large sessions. A large-scene path bake can take about 1–2 minutes depending on the scene, CPU, and system load.</li>
+          <li>Existing presets, scenes, and projects still load. Moving objects in Manual mode with tables baked in an earlier build may need one fresh Bake path. Tables baked in 0.2.0 still require a fresh bake.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="changes">
+      <div class="wrap split">
+        <h2 id="changes">What changed in 0.2.2</h2>
+        <div>
+          <ul>
+            <li><strong>Path baking.</strong> Bake finishes after room edits with the host transport stopped, and the banner shows what it’s waiting for. The baked tail keeps playing during manual azimuth changes on linked path groups and recorded passes. Recorded-pass baking works independently of host buffer size.</li>
+            <li><strong>Room editing.</strong> With Auto-link enabled, moving an entire wall also moves the joined ends of adjacent walls. Clutter has a Randomize button for its seed.</li>
+            <li><strong>Path tools.</strong> New tooltips cover Bake path, Record pass, Clear bake, and Manual orientation. After Record pass, press Bake path to compute the table.</li>
+            <li><strong>Sources.</strong> Use Σ on a multichannel source or run All formats… and Sum for all sources. Each bulk action takes one Undo, and the list keeps its scroll position after edits.</li>
+          </ul>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/docs/Release_0.2.2_en.md">Read the 0.2.2 release notes</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/docs/Roadmap_1.0_en.md">See the roadmap to 1.0</a></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="source">
+      <div class="wrap split">
+        <h2 id="source">Source and feedback</h2>
+        <div>
+          <p>Verb Room is open source under the GNU Affero General Public License v3.0 and uses JUCE 8 under its AGPLv3 option. Built-in measured voice and speaker directivity profiles are attributed under CC BY 4.0. No non-commercial or unlicensed measured datasets are bundled.</p>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room">Source code</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/LICENSE">License</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/next/THIRD_PARTY_DIRECTIVITY.md">Directivity attributions</a></p>
+          <p>Tell us your OS, CPU, DAW version, and scene or preset when filing an issue. Mac host tests, reports from other DAWs, and large-scene CPU observations from four-core machines are especially welcome.</p>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room/issues">Report feedback on GitHub</a></p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="footer"><div class="wrap"><p>Verb Room 0.2.2 · SBP</p><a lang="uk" hreflang="uk" href="uk/index.html">Українська версія</a></div></footer>
+  <script src="video.js"></script>
+  <script src="audio-ab.js"></script>
+</body>
+</html>
