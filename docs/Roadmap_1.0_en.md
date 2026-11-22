@@ -91,15 +91,13 @@ We would like to call the next major version 1.0 when the following is in place.
 - Movement paths: draw a path for a source or the listener in the viewport and automate one "position on path"
   parameter instead of X/Y/Z separately (requested by a tester). **Done in 0.2.0**, together with pre-computed
   ("baked") tails along a path, timing, groups and orientation.
-- Fix: turning an object by hand (Manual orientation) must not break a bake. A baked table is currently used only while
-  the live azimuth stays within 1 degree of the azimuth at bake time. For Manual objects the table should not require
-  an azimuth match (position still has to match); the direct sound and early reflections keep following the live
-  azimuth, and the baked tail stays as baked. The same applies to a recorded pass: during the motion the baked tail is
-  not used when a Manual azimuth deviates, and the correct tail only appears after the motion stops, in the rebuild.
+- Turning an object by hand (Manual orientation) no longer breaks a bake. **Done in 0.2.2**, for group bakes and for recorded
+  passes: for Manual objects the baked table no longer requires an azimuth match (position still has to match). The
+  direct sound and the early reflections follow the live azimuth; the baked tail keeps the azimuth it was baked with.
 - Azimuth keys on the timeline: a strip for the azimuth of each object next to its movement strip, locked to the same
   position axis and the same table. Add keys anywhere and set the angle on a key with a slider or by turning the object
   in the scene editor. Keys support hold and easing. The azimuth is then known in advance and baked with the path, so
-  turning an object by hand no longer breaks a bake.
+  the baked tail follows the turn as well.
 - Still to do: orientation of objects at sharp path corners, and more tests with other hosts.
 
 **2. Lower CPU for big scenes**
@@ -125,12 +123,9 @@ We would like to call the next major version 1.0 when the following is in place.
 - A box primitive: a closed body with clean joints for car bodies, columns, furniture.
 - Edge extrusion in the editor (slide, then extrude), so surfaces share edges by construction.
 - An auto level button and a wider output range for quiet listener positions in big halls.
-- A Randomize button next to the Clutter seed (it existed in the classic interface).
-- Faster setup of many sources: at the top of the Sources list, choose the channel type for all sources at once and
-  switch Sum on or off for all of them at once. Also add a Sum button for each source in the lower source list, so it can
-  be switched per source without opening the inspector.
-- Fix: auto-link of corners does not work when a wall is moved (found in 0.2.1). Moving a wall should keep its corners
-  linked to the neighboring walls.
+- **Done in 0.2.2:** a Randomize button next to the Clutter seed; auto-link of corners when a whole wall is moved; in the
+  Sources panel, a Sum button for each source, "All formats…" for the channel format of all sources at once and Sum on or
+  off for all of them at once.
 - After 1.0: full 3D meshes with sloped surfaces.
 
 **6. Product basics**
