@@ -1,6 +1,6 @@
 # Verb Room 0.2.2
 
-Verb Room 0.2.2 is a maintenance release over 0.2.1. It fixes path baking after room edits and during manual orientation, and improves wall editing and the Sources panel. Release targets are Windows x64 and macOS Universal (Apple silicon and Intel). There is no Linux release package.
+Verb Room 0.2.2 is a maintenance release over 0.2.1. It fixes path baking after room edits and during manual orientation, and improves wall editing and the Sources panel. Release packages are Windows x64, macOS Universal (Apple silicon and Intel) and Linux x86_64 (classic interface only).
 
 ## What is fixed and new
 
@@ -26,6 +26,6 @@ Verb Room 0.2.2 is a maintenance release over 0.2.1. It fixes path baking after 
 - **Tail direction:** baked late tails retain the azimuth at bake time. Source directivity profiles affect direct sound and early reflections. The late tail treats each source as omnidirectional.
 - **AmbiX level:** the output uses ACN/SN3D with an unattenuated W channel. It is louder than stereo by design. Normalization and gain options are planned.
 - **Round-robin early reflections:** up to four sources are solved on each 128-sample control period. With more than four, early reflections update in batches over 4–6 periods and glide linearly during motion (about 10.7 ms at 48 kHz).
-- **Host verification:** Windows is the platform tested in REAPER. Automated performance checks cover multi-source scenes. Live listening and performance on older 4-core systems remain open. Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 and 0.2.2 have yet to be tested on a Mac. The macOS bundle is ad-hoc signed, lacks notarization, and the web editor does not forward unused keys to the host.
+- **Host verification:** Windows is the platform tested in REAPER. Automated performance checks cover multi-source scenes. Live listening and performance on older 4-core systems remain open. Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 and 0.2.2 have yet to be tested on a Mac. The macOS bundle is ad-hoc signed, lacks notarization, and the web editor does not forward unused keys to the host. The Linux x86_64 build (Ubuntu 24.04, glibc 2.39 or newer, no AVX2 required) has the classic interface only; it builds and passes the automated tests but has not been tried in a real host yet.
 
 For installation and switching between the new and classic interfaces, see the [0.2.0 release notes](Release_0.2.0_en.md).
