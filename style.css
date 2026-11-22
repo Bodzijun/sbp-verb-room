@@ -213,6 +213,7 @@ pre code { padding: 0; }
 #download .cta, .support .cta { margin-top: 1.25rem; }
 .support { background: radial-gradient(ellipse at 15% 50%, var(--glow), transparent 70%), var(--bg); }
 #download .platform { background: var(--bg); }
+@media (min-width: 62rem) { #download .platforms { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .checksum-title { margin-top: 2rem; }
 .hashes { margin-bottom: 0; }
 .hashes > div { padding: .75rem 0; border-top: 1px solid var(--hairline); }

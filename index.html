@@ -479,7 +479,7 @@
     <section class="section" id="download" aria-labelledby="download-title">
       <div class="wrap">
         <h2 id="download-title">Download Verb Room 0.2.2</h2>
-        <p class="narrow">Windows x64 and macOS Universal. Pay what you want, including zero. Payments support development.</p>
+        <p class="narrow">Windows x64, macOS Universal and Linux x86_64. Pay what you want, including zero. Payments support development.</p>
         <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Get Verb Room on Ko-fi</a>
         <div class="platforms">
           <section class="platform" aria-labelledby="windows">
@@ -502,6 +502,15 @@
             <pre><code>xattr -dr com.apple.quarantine "$HOME/Library/Audio/Plug-Ins/VST3/Verb Room.vst3"</code></pre>
             <p>Reopen the DAW and rescan VST3 plug-ins if needed. If the new interface fails to start, try the classic editor via Theme or launch the host with <code>VERB_UI=classic</code>.</p>
           </section>
+          <section class="platform" aria-labelledby="linux">
+            <h3 id="linux">Linux x86_64</h3>
+            <p>Built on Ubuntu 24.04, so it needs glibc 2.39 or newer and a VST3 host. No AVX2 is required. This build has the <strong>classic interface only</strong>. It builds and passes the automated tests, but it has not been tried in a real host yet.</p>
+            <ol>
+              <li>Save your work, close the DAW, and extract the tar.gz archive in a way that keeps file permissions, for example with <code>tar -xzf</code>.</li>
+              <li>Copy the whole <code>Verb Room.vst3</code> folder to <code>~/.vst3/</code>.</li>
+              <li>Reopen the DAW and rescan VST3 plug-ins if needed.</li>
+            </ol>
+          </section>
         </div>
         <h3 class="checksum-title">Package SHA-256</h3>
         <dl class="hashes">
@@ -512,6 +521,10 @@
           <div>
             <dt>VerbRoom-0.2.2-macos-universal.zip</dt>
             <dd><code>c0f7a28674d9c32502aac73c1454df704acc10bd189621ac28b9647399ae9de3</code></dd>
+          </div>
+          <div>
+            <dt>VerbRoom-0.2.2-linux-x86_64.tar.gz</dt>
+            <dd><code>613f3804e7b492aaa79939f7ab1b3593276426deae2d00703001ce719e78a702</code></dd>
           </div>
         </dl>
       </div>
@@ -533,7 +546,7 @@
         <h2 id="limits">Known limitations</h2>
         <ul>
           <li>Verb Room is alpha software. Windows is the platform tested in REAPER. Automated performance checks cover multi-source scenes. Live listening and performance on older four-core systems remain open.</li>
-          <li>Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 and 0.2.2 have yet to be tested on a Mac. When the macOS editor has focus, click outside it to use host shortcuts the editor does not handle. This release has no Linux package.</li>
+          <li>Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 and 0.2.2 have yet to be tested on a Mac. When the macOS editor has focus, click outside it to use host shortcuts the editor does not handle. The Linux build has the classic interface only and has not been tried in a real host yet.</li>
           <li>Geometry is 2.5D: vertical walls and horizontal floors, ceilings, and plates. The model covers geometric acoustics without low-frequency room modes. The tail is a statistical estimate.</li>
           <li>Large scenes can be CPU-intensive, especially with third-order AmbiX in Creative mode. Try Physical mode for large sessions. A large-scene path bake can take about 1–2 minutes depending on the scene, CPU, and system load.</li>
           <li>Existing presets, scenes, and projects still load. Moving objects in Manual mode with tables baked in an earlier build may need one fresh Bake path. Tables baked in 0.2.0 still require a fresh bake.</li>
