@@ -4,6 +4,18 @@
 
 **Download:** Windows x64, macOS Universal and Linux x86_64 packages are on Ko-fi, pay what you want, including zero: [ko-fi.com/s/405ebacfcc](https://ko-fi.com/s/405ebacfcc). Project page with audio demos: [bodzijun.github.io/sbp-verb-room](https://bodzijun.github.io/sbp-verb-room/).
 
+<details>
+<summary><b>Support the project</b> (voluntary; the download is free)</summary>
+
+Verb Room is built by one person. If it is useful to you:
+
+- **Ko-fi** (card, or PayPal through Ko-fi, any amount): [ko-fi.com/s/405ebacfcc](https://ko-fi.com/s/405ebacfcc)
+- **Monobank jar** (the page is in Ukrainian; Visa and Mastercard from any country, Google Pay, Apple Pay): [send.monobank.ua/jar/7uwNLVbptd](https://send.monobank.ua/jar/7uwNLVbptd)
+- **PayPal**: send to `bodzik@gmail.com`
+- Questions or help: `bodzik@gmail.com`
+
+</details>
+
 **Latest release: [0.2.3](docs/Release_0.2.3_en.md)** · [українською](docs/Release_0.2.3_uk.md). Version 0.2.3 adds corner snapping and repair, Ambisonics output options and clearer recording and baking controls. See also [0.2.2](docs/Release_0.2.2_en.md) · [українською](docs/Release_0.2.2_uk.md).
 
 **User manual:** [English](docs/Manual_en.md) · [українською](docs/Manual_uk.md), including a guide to baking paths and recording host automation.
