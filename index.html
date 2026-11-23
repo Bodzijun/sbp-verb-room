@@ -35,6 +35,7 @@
           <div class="hero-actions">
             <a class="cta" href="#download">Download</a>
             <a class="cta secondary" href="#video"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Watch the motion demo</a>
+            <a class="cta secondary" href="#support" data-support-open>Support the project</a>
           </div>
         </div>
         <figure class="plan-card">
@@ -480,7 +481,10 @@
       <div class="wrap">
         <h2 id="download-title">Download Verb Room 0.2.3</h2>
         <p class="narrow">Windows x64, macOS Universal and Linux x86_64. Pay what you want, including zero. Payments support development.</p>
-        <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Get Verb Room on Ko-fi</a>
+        <div class="download-actions">
+          <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Get Verb Room on Ko-fi</a>
+          <a class="cta secondary" href="#support" data-support-open>Support the project</a>
+        </div>
         <div class="platforms">
           <section class="platform" aria-labelledby="windows">
             <h3 id="windows">Windows x64</h3>
@@ -536,7 +540,20 @@
         <div>
           <p>Verb Room is free to download, and it will stay free to try. I build it alone, in Ukraine, and the tools and time behind it are a real cost for me. If the plugin is useful to you and you’d like to see it grow, a contribution of any size helps me keep working on it: more stable releases, macOS testing, new features, and better documentation.</p>
           <p>Not able or not ready to pay? That is completely fine. Testing it, sending a bug report, or telling another sound designer about it helps just as much. Thank you for trying Verb Room.</p>
-          <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Support on Ko-fi</a>
+          <div class="support-methods">
+            <article class="support-option">
+              <h3>Ko-fi</h3>
+              <p>Card or PayPal through Ko-fi, any amount ($0+).</p>
+              <a class="cta" href="https://ko-fi.com/s/405ebacfcc" target="_blank" rel="noopener noreferrer">Support on Ko-fi</a>
+            </article>
+            <article class="support-option">
+              <h3>Monobank Jar</h3>
+              <p>The jar page is in Ukrainian and supports cards (Visa or Mastercard from any country), Google Pay, and Apple Pay.</p>
+              <a class="cta secondary" href="https://send.monobank.ua/jar/7uwNLVbptd" target="_blank" rel="noopener noreferrer">Open Monobank Jar</a>
+            </article>
+          </div>
+          <p class="support-footnote"><span>PayPal: send to <code>bodzik@gmail.com</code></span><button class="copy-btn" type="button" data-copy="bodzik@gmail.com" data-copied="Copied">Copy</button></p>
+          <p class="support-footnote">Questions or help: <a href="mailto:bodzik@gmail.com">bodzik@gmail.com</a></p>
         </div>
       </div>
     </section>
@@ -582,8 +599,64 @@
       </div>
     </section>
   </main>
-  <footer class="footer"><div class="wrap"><p>Verb Room 0.2.3 · SBP</p><a lang="uk" hreflang="uk" href="uk/index.html">Українська версія</a></div></footer>
+  <footer class="footer"><div class="wrap"><p>Verb Room 0.2.3 · SBP</p><div class="footer-links"><a href="#support" data-support-open>Support the project</a><a lang="uk" hreflang="uk" href="uk/index.html">Українська версія</a></div></div></footer>
+  <dialog class="support-dialog" id="support-dialog" aria-labelledby="support-dialog-title">
+    <div class="support-dialog-panel">
+      <div class="support-dialog-head">
+        <h2 id="support-dialog-title">Support the project</h2>
+        <button class="dialog-close" type="button" data-support-close aria-label="Close">×</button>
+      </div>
+      <p class="support-dialog-intro">Verb Room is built by one person. The download is free on a pay-what-you-want basis, and any support is voluntary.</p>
+      <div class="support-methods">
+        <article class="support-option">
+          <h3>Ko-fi</h3>
+          <p>Card or PayPal through Ko-fi, any amount ($0+).</p>
+          <a class="cta" href="https://ko-fi.com/s/405ebacfcc" target="_blank" rel="noopener noreferrer">Support on Ko-fi</a>
+        </article>
+        <article class="support-option">
+          <h3>Monobank Jar</h3>
+          <p>The jar page is in Ukrainian and supports cards (Visa or Mastercard from any country), Google Pay, and Apple Pay.</p>
+          <a class="cta secondary" href="https://send.monobank.ua/jar/7uwNLVbptd" target="_blank" rel="noopener noreferrer">Open Monobank Jar</a>
+        </article>
+      </div>
+      <p class="support-footnote"><span>PayPal: send to <code>bodzik@gmail.com</code></span><button class="copy-btn" type="button" data-copy="bodzik@gmail.com" data-copied="Copied">Copy</button></p>
+      <p class="support-footnote">Questions or help: <a href="mailto:bodzik@gmail.com">bodzik@gmail.com</a></p>
+    </div>
+  </dialog>
   <script src="video.js"></script>
   <script src="audio-ab.js"></script>
+  <script>
+    (() => {
+      document.querySelectorAll('[data-copy]').forEach(btn => {
+        const label = btn.textContent;
+        btn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(btn.dataset.copy);
+            btn.textContent = btn.dataset.copied || label;
+            setTimeout(() => { btn.textContent = label; }, 1600);
+          } catch {}
+        });
+      });
+      const dialog = document.getElementById('support-dialog');
+      if (!dialog || typeof dialog.showModal !== 'function') return;
+      const closeBtn = dialog.querySelector('[data-support-close]');
+      let lastTrigger = null;
+      document.querySelectorAll('[data-support-open]').forEach(trigger => {
+        trigger.addEventListener('click', event => {
+          event.preventDefault();
+          lastTrigger = trigger;
+          if (!dialog.open) dialog.showModal();
+          closeBtn?.focus();
+        });
+      });
+      closeBtn?.addEventListener('click', () => dialog.close());
+      dialog.addEventListener('click', event => {
+        if (event.target === dialog) dialog.close();
+      });
+      dialog.addEventListener('close', () => {
+        if (lastTrigger && typeof lastTrigger.focus === 'function') lastTrigger.focus();
+      });
+    })();
+  </script>
 </body>
 </html>
