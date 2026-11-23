@@ -50,7 +50,7 @@ need testers.
 
 ## Where we are
 
-**Latest release: [0.2.2](Release_0.2.2_en.md)** for Windows x64, macOS Universal and Linux x86_64. Downloads are posted on the project's Ko-fi page.
+**Latest release: [0.2.2](Release_0.2.2_en.md)** for Windows x64, macOS Universal and Linux x86_64. Downloads are posted on the project's [Ko-fi page](https://ko-fi.com/s/405ebacfcc).
 
 - **A new interface:** resizable, with a 3D room editor, material inspector, dimensions and scale, outliner, decay
   curves, energy map and a CPU load meter. The classic interface stays available. On macOS this is its first release

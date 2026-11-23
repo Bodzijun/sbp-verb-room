@@ -2,6 +2,8 @@
 
 **Where the project is going and how to help:** [road to 1.0](docs/Roadmap_1.0_en.md) · [українською](docs/Roadmap_1.0_uk.md) · support the project: [ko-fi.com/bohdan_sbp](https://ko-fi.com/bohdan_sbp)
 
+**Download:** Windows x64, macOS Universal and Linux x86_64 packages are on Ko-fi, pay what you want, including zero: [ko-fi.com/s/405ebacfcc](https://ko-fi.com/s/405ebacfcc). Project page with audio demos: [bodzijun.github.io/sbp-verb-room](https://bodzijun.github.io/sbp-verb-room/).
+
 **Latest release: [0.2.2](docs/Release_0.2.2_en.md)** · [українською](docs/Release_0.2.2_uk.md). Version 0.2.2 fixes path baking and improves wall editing and the Sources panel.
 
 **User manual:** [English](docs/Manual_en.md) · [українською](docs/Manual_uk.md), including a guide to baking paths and the Record pass.
@@ -56,7 +58,7 @@ listener move. Position and orientation of every source and of the listener are 
 
 ## Install (binary)
 
-Close the DAW, copy the entire `Verb Room.vst3` folder to `C:\Program Files\Common Files\VST3\`, then reopen the DAW
+Get the package for your system from [Ko-fi](https://ko-fi.com/s/405ebacfcc) (this repository holds the source code, not the binaries). Then close the DAW, copy the entire `Verb Room.vst3` folder to `C:\Program Files\Common Files\VST3\`, then reopen the DAW
 and rescan plug-ins if needed. A room is saved with the project; choose a library room again
 after updating if you want the new defaults.
 
