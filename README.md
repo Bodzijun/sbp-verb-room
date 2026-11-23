@@ -10,7 +10,7 @@
 Verb Room is built by one person. If it is useful to you:
 
 - **Ko-fi** (card, or PayPal through Ko-fi, any amount): [ko-fi.com/s/405ebacfcc](https://ko-fi.com/s/405ebacfcc)
-- **Monobank jar** (the page is in Ukrainian and the amount is in hryvnias, UAH: roughly 40 UAH is 1 USD; Visa and Mastercard from any country, Google Pay, Apple Pay): [send.monobank.ua/jar/7uwNLVbptd](https://send.monobank.ua/jar/7uwNLVbptd)
+- **Monobank jar** (the page is in Ukrainian and the amount is in hryvnias, UAH: the rate is currently about 45 UAH per 1 USD; Visa and Mastercard from any country, Google Pay, Apple Pay): [send.monobank.ua/jar/7uwNLVbptd](https://send.monobank.ua/jar/7uwNLVbptd)
 - **PayPal**: send to `bodzik@gmail.com`
 - Questions or help: `bodzik@gmail.com`
 
