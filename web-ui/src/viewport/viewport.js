@@ -15,7 +15,8 @@ import { materialColour, rayColour, surfaceRole, sourceMarkerColour, sourceLabel
 import { skyEscapeGuides } from './rays.js';
 import { mockRays, enginePaths, rayStyle, describeRay } from './ray-model.js';
 import { finiteGrid, gridStep, projectedSegment, clipPolygonNear } from './grid.js';
-import { effectiveStep, autoStep, pixelsPerMetre, snapValue, visibleGrid } from './snap.js';
+import { effectiveStep, autoStep, pixelsPerMetre, visibleGrid } from './snap.js';
+import { cornerXY, movedVertexCorners, sameCorner, snapTranslation, snapVertex, visibleCorners, wallCorners } from './corner-snap.js';
 import { viewportEvent } from '../state/render-policy.js';
 import { scaleIndicatorState, wallLengthM, formatMetres2 } from './room-metrics.js';
 // Default material strokes stay inside the warm canvas palette. Explicit user
@@ -98,31 +99,19 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     if (obj.vertices) return obj.vertices.map(p => [...p, obj.heightM ?? (r.kind === 'floorZone' ? 0 : s.heightM)]);
     return [];
   }
-  function movingSurfaceRefs(s, d) {
+  function movingSurfaceRefs(d) {
     if (!d) return [];
-    if (d.type === 'surface') return d.movingRefs || [];
-    const modes = store.state.document.editorFlags.layerModes || {};
-    const unlocked = refs => !refs.some(r => {
-      const obj = surface(s, r);
-      return !obj || obj.editor.locked || (modes[layerKey(s, r)] || 0) !== 0;
-    });
-    if (d.type === 'vertex' && d.liveVertexPos && d.ref) {
-      let moved = [d.ref];
-      if (d.ref.kind === 'wall' && store.view.autoLink !== false && d.initialWallPoint) {
-        const oldPt = d.initialWallPoint;
-        moved = s.walls.map((w, index) => ({ kind: 'wall', index, w })).filter(({ index, w }) => index === d.ref.index || Math.hypot(w.a[0] - oldPt[0], w.a[1] - oldPt[1]) < 1e-4 || Math.hypot(w.b[0] - oldPt[0], w.b[1] - oldPt[1]) < 1e-4).map(({ index }) => ({ kind: 'wall', index }));
-      }
-      return unlocked(moved) ? moved : [];
-    }
-    return [];
+    return d.movingRefs || [];
   }
   function ghostPointsFor(r, s, d) {
     if (d?.type === 'surface' && d.liveDelta) {
       const points = basePointsFor(r, d.startScene), linkedEnds = r.kind === 'wall' && d.linkedWalls.get(r.index);
       return points.map((p, index) => {
-        if (!linkedEnds) return p.map((c, i) => c + (d.liveDelta[i] || 0));
-        return linkedEnds.includes(index < 2 ? 'a' : 'b')
-          ? [p[0] + d.liveDelta[0], p[1] + d.liveDelta[1], p[2]] : p;
+        if (linkedEnds && !linkedEnds.includes(index < 2 ? 'a' : 'b')) return p;
+        const z = p[2] + (linkedEnds ? 0 : d.liveDelta[2] || 0);
+        if (r.kind === 'wall' && d.snapFrom && p[0] === d.snapFrom[0] && p[1] === d.snapFrom[1])
+          return [...d.snapReadout.world, z];
+        return [p[0] + d.liveDelta[0], p[1] + d.liveDelta[1], z];
       });
     }
     if (d?.type === 'vertex' && d.liveVertexPos) {
@@ -130,15 +119,8 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       if (!obj) return [];
       const topZ = (obj.zTopM ?? s.heightM) < 1e5 ? (obj.zTopM ?? s.heightM) : s.heightM;
       if (r.kind === 'wall') {
-        let a = obj.a.slice(), b = obj.b.slice();
-        const moved = d.liveVertexPos, oldPt = d.initialWallPoint;
-        if (d.ref?.kind === 'wall') {
-          if (r.index === d.ref.index) { if (d.ref.vertex === 0) a = moved.slice(); else b = moved.slice(); }
-          else if (store.view.autoLink !== false && oldPt) {
-            if (Math.hypot(a[0] - oldPt[0], a[1] - oldPt[1]) < 1e-4) a = moved.slice();
-            if (Math.hypot(b[0] - oldPt[0], b[1] - oldPt[1]) < 1e-4) b = moved.slice();
-          }
-        }
+        const moved = vertex => d.movedVertices.some(c => sameCorner(c, { ...r, vertex }));
+        const a = moved(0) ? d.liveVertexPos : obj.a, b = moved(1) ? d.liveVertexPos : obj.b;
         return [[...a, obj.zBottomM], [...a, topZ], [...b, topZ], [...b, obj.zBottomM]];
       }
       if (obj.vertices) return obj.vertices.map((p, vi) => {
@@ -150,7 +132,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   }
   function pointsFor(r) {
     const s = store.state.document.scene, d = activeDrag();
-    if (movingSurfaceRefs(s, d).some(m => same(m, r))) return ghostPointsFor(r, s, d);
+    if (movingSurfaceRefs(d).some(m => same(m, r))) return ghostPointsFor(r, s, d);
     return basePointsFor(r, s);
   }
   const energyLoader = createEnergyLoader(url => bridge.readResource(url), value => {
@@ -204,7 +186,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       ctx.globalAlpha = 1; ctx.lineWidth = 1; root.dataset.clutterDrawn = String(clutter?.objects?.length || 0);
     } else root.dataset.clutterDrawn = '0';
     const d = activeDrag();
-    const moving = movingSurfaceRefs(s, d);
+    const moving = movingSurfaceRefs(d);
     const faces = surfaceRefs(s).filter(r => !['floor', 'ceiling'].includes(r.kind)).map(ref => ({ ref, points: basePointsFor(ref, s) }));
     faces.sort((a, b) => b.points.reduce((n, p) => n + project(p, camera, width, height)[2], 0) / b.points.length - a.points.reduce((n, p) => n + project(p, camera, width, height)[2], 0) / a.points.length);
     faces.forEach(({ ref, points }) => {
@@ -424,29 +406,15 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     }
       // T12 item 2: wall segment length label(s) in Edit room (selected wall(s) and live drag / vertex move).
     if (store.view.page === 'edit' && !preview) {
-      const selectedWalls = wouldSelect.filter(r => r.kind === 'wall');
+      const selectedWalls = [...wouldSelect, ...moving].filter(r => r.kind === 'wall');
       const liveWalls = new Map();
       for (const r of selectedWalls) {
         const w = surface(s, r);
         if (!w || w.editor.hidden) continue;
-        const dd = drag?.type === 'surface' && moving.some(m => same(m, r)) && drag.liveDelta ? drag.liveDelta : null;
-        liveWalls.set(r.index, dd
-          ? { a: [w.a[0] + dd[0], w.a[1] + dd[1]], b: [w.b[0] + dd[0], w.b[1] + dd[1]], zBottomM: Math.max(0, w.zBottomM + (dd[2] || 0)), zTopM: w.zTopM != null && w.zTopM < 1e5 ? w.zTopM + (dd[2] || 0) : w.zTopM }
-          : { a: w.a.slice(), b: w.b.slice(), zBottomM: w.zBottomM, zTopM: w.zTopM });
-      }
-      if (drag?.type === 'vertex' && drag.ref?.kind === 'wall' && drag.liveVertexPos) {
-        const moved = drag.liveVertexPos;
-        const oldPt = drag.initialWallPoint;
-        s.walls.forEach((w, idx) => {
-          if (w.editor.hidden) return;
-          let a = w.a.slice(), b = w.b.slice(), touched = false;
-          if (idx === drag.ref.index) { if (drag.ref.vertex === 0) a = moved.slice(); else b = moved.slice(); touched = true; }
-          else if (store.view.autoLink !== false && oldPt) {
-            if (Math.hypot(w.a[0] - oldPt[0], w.a[1] - oldPt[1]) < 1e-4) { a = moved.slice(); touched = true; }
-            if (Math.hypot(w.b[0] - oldPt[0], w.b[1] - oldPt[1]) < 1e-4) { b = moved.slice(); touched = true; }
-          }
-          if (touched) liveWalls.set(idx, { a, b, zBottomM: w.zBottomM, zTopM: w.zTopM });
-        });
+        if (moving.some(m => same(m, r))) {
+          const [a, top, , b] = ghostPointsFor(r, s, d);
+          liveWalls.set(r.index, { a: a.slice(0, 2), b: b.slice(0, 2), zBottomM: Math.max(0, a[2]), zTopM: top[2] });
+        } else liveWalls.set(r.index, w);
       }
       const wallLabelTexts = [];
       ctx.font = '600 11px Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif';
@@ -511,16 +479,17 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       if(preview){const top=store.view.tool==='plate'?1:s.heightM;ctx.setLineDash([4,3]);for(const p of points)worldLine([...p,0],[...p,top]);for(let i=1;i<points.length;i++)worldLine([...points[i-1],top],[...points[i],top]);if(['room','floorZone','ceilingZone','plate'].includes(store.view.tool)&&points.length>2)worldLine([...points.at(-1),top],[...points[0],top]);ctx.setLineDash([]);}
       for(const p of points){const q=project([...p,0],camera,width,height);ctx.beginPath();ctx.arc(q[0],q[1],5,0,Math.PI*2);ctx.fill();ctx.stroke();}
     }
-    drawingReadout.hidden=!draftCursor||!isDrawing()||camera.view!=='plan';
+    const readout = drag?.snapReadout || (isDrawing() && camera.view === 'plan' ? draftCursor : null);
+    drawingReadout.hidden = !readout;
     if(!drawingReadout.hidden){
-      const q=draftCursor,from=draft.at(-1),dx=from?q.world[0]-from[0]:0,dy=from?q.world[1]-from[1]:0;
-      if (store.view.tool === 'room' && from) {
+      const q=readout,from=drag?.snapReadout ? q.from : draft.at(-1),dx=from?q.world[0]-from[0]:0,dy=from?q.world[1]-from[1]:0;
+      if (!drag?.snapReadout && store.view.tool === 'room' && from) {
         drawingReadout.textContent = `${Math.abs(dx).toFixed(2)} × ${Math.abs(dy).toFixed(2)} m · ${q.snap}`;
       } else {
         drawingReadout.textContent=`${Math.hypot(dx,dy).toFixed(2)} m · ${Math.atan2(dy,dx)*180/Math.PI<0?'-':''}${Math.abs(Math.atan2(dy,dx)*180/Math.PI).toFixed(1)}° · ${q.snap}`;
       }
       drawingReadout.style.left=`${Math.max(4,Math.min(width-245,q.screen[0]+14))}px`;drawingReadout.style.top=`${Math.max(30,Math.min(height-45,q.screen[1]+18))}px`;
-      if(q.snap!=='free'){const p=project([...q.world,0],camera,width,height);ctx.strokeStyle=roles.selection;ctx.lineWidth=1;ctx.strokeRect(p[0]-8,p[1]-8,16,16);}
+      if(q.snap!=='free'){const p=project([...q.world,q.z ?? 0],camera,width,height);ctx.strokeStyle=roles.selection;ctx.lineWidth=1;ctx.strokeRect(p[0]-8,p[1]-8,16,16);}
     }
     // T12 item 1: grid scale indicator (scale bar + grid step) in bottom-right corner.
     if (!preview) {
@@ -549,17 +518,62 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   let reportedStep = null;
   const snapStep = () => effectiveStep(store.view, camera, height);
   function publishSnapStep() { const step = snapStep(); if (step !== reportedStep) { reportedStep = step; root.dataset.snapStep = String(step); root.dispatchEvent(new CustomEvent('snapstep', { detail: step })); } }
-  const snapPoint = (world, e) => e?.altKey ? world : world.map(v => snapValue(v, snapStep()));
   const isDrawing=()=>store.view.page==='edit'&&['room','wall','floorZone','ceilingZone','plate'].includes(store.view.tool);
   const rectangle=(a,b)=>[[a[0],a[1]],[b[0],a[1]],[b[0],b[1]],[a[0],b[1]]];
   function drawingPoint(p,e){
     const raw=pointOnTargetPlane(p,camera,width,height).slice(0,2);
-    let world=snapPoint(raw,e),snap=e.altKey||store.view.snap===false?'free':'grid';
-    if(!e.altKey){
-      const s=store.state.document.scene,corners=[...s.walls.filter(w=>!w.editor.hidden).flatMap(w=>[w.a,w.b]),...s.floorZones.filter(z=>!z.editor.hidden).flatMap(z=>z.vertices),...s.ceilingZones.filter(z=>!z.editor.hidden).flatMap(z=>z.vertices),...draft];
-      let best=9;for(const c of corners){const q=project([...c,0],camera,width,height),d=Math.hypot(p[0]-q[0],p[1]-q[1]);if(d<best){best=d;world=c.slice();snap='corner';}}
+    const { scene, editorFlags } = store.state.document;
+    const corners = [...visibleCorners(scene, editorFlags.layerModes || {}), ...draft.map(xy => ({ xy, heights: [0] }))];
+    return snapVertex(raw, p, corners, q => project(q, camera, width, height), snapStep(), e.altKey);
+  }
+  function surfaceDragPlane(d, p) {
+    if (d.camera.view === '3d' && d.hitZ != null) {
+      const a = pointOnHeightPlane(d.start, d.camera, width, height, d.hitZ);
+      const b = pointOnHeightPlane(p, d.camera, width, height, d.hitZ);
+      if (a && b) return [a, b, true];
     }
-    return {world,snap,screen:p};
+    return [d.start, p].map(q => pointOnTargetPlane(q, d.camera, width, height));
+  }
+  function updateGeometryDrag(d, p, e, a, b, onHeightPlane) {
+    const scene = d.startScene, modes = store.state.document.editorFlags.layerModes || {};
+    const view = d.camera.view, autoLink = store.view.autoLink !== false;
+    const free = e.altKey || (view === '3d' && !onHeightPlane);
+    const projectCorner = q => {
+      const point = project(view === '3d' ? [q[0], q[1], d.hitZ] : q, d.camera, width, height);
+      return view === '3d' && point[2] <= .1 ? [Infinity, Infinity] : point;
+    };
+    const candidates = free ? [] : visibleCorners(scene, modes);
+    const unlocked = refs => !refs.some(r => surface(scene, r).editor.locked || modes[layerKey(scene, r)]);
+    const { kind, index, vertex } = d.ref;
+    if (d.type === 'vertex') {
+      const ref = { kind, index, vertex };
+      d.movedVertices = movedVertexCorners(scene, ref, autoLink, modes.walls);
+      const available = candidates.filter(c => !d.movedVertices.some(r => sameCorner(c.ref, r)));
+      const result = snapVertex(b.slice(0, 2), p, available, projectCorner, snapStep(), free);
+      d.movingRefs = unlocked([ref]) ? d.movedVertices : [];
+      d.liveVertexPos = result.world;
+      d.snapReadout = { ...result, z: view === '3d' ? d.hitZ : result.z, from: cornerXY(scene, ref) };
+      d.final = { op: 'surface.moveVertex', ref: { kind, index }, vertex, positionM: result.world, autoLink,
+        ...(result.target ? { snapTarget: result.target } : {}) };
+      return;
+    }
+    const refs = d.refs.map(({ kind, index }) => ({ kind, index })), includeGroups = !e.altKey;
+    const moved = expandedRefs(scene, refs, includeGroups).filter(r => !['floor', 'ceiling'].includes(r.kind));
+    const allowed = unlocked(moved);
+    const links = allowed && autoLink ? translatedWallLinks(scene, moved, modes.walls) : new Map();
+    const delta = b.map((v, i) => v - a[i]).slice(0, view === 'plan' || view === '3d' ? 2 : 3);
+    const movingWalls = allowed && !free ? moved.filter(r => r.kind === 'wall').flatMap(r => wallCorners(scene.walls[r.index], r.index, scene.heightM)) : [];
+    const available = candidates.filter(({ ref }) => !moved.some(r => same(r, ref)) &&
+      !(ref.kind === 'wall' && links.get(ref.index)?.includes(ref.vertex === 0 ? 'a' : 'b')));
+    const hit = snapTranslation(delta, movingWalls, available, projectCorner, free);
+    d.liveDelta = hit?.delta ?? delta;
+    d.snapFrom = hit ? cornerXY(scene, hit.from) : null;
+    d.snapReadout = hit ? { world: hit.world, screen: p, z: view === '3d' ? d.hitZ : hit.z, snap: 'corner', from: d.snapFrom } : null;
+    d.linkedWalls = d.liveDelta[0] || d.liveDelta[1] ? links : new Map();
+    d.movingRefs = allowed && d.liveDelta.some(v => Math.abs(v) > 1e-6) ?
+      [...moved, ...[...d.linkedWalls.keys()].map(index => ({ kind: 'wall', index }))] : [];
+    d.final = { op: 'surface.translate', refs, deltaM: d.liveDelta, includeGroups, autoLink,
+      ...(hit ? { snapFrom: hit.from, snapTarget: hit.target } : {}) };
   }
   function endDraft(){chainGroup=null;draft=[];draftCursor=null;drawingReadout.hidden=true;schedule();}
   // Undo while a chain is being drawn takes back the LAST CLICK only: the wall that click created (history) and its draft point, so the
@@ -932,10 +946,8 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       if (e.button === 0) {
         const tx = `geometry-${Date.now()}`;
         const scene = store.state.document.scene, pickedObj = surface(scene, ref);
-        const wallObj = ref.kind === 'wall' ? pickedObj : null;
-        const initialWallPoint = wallObj && ref.vertex !== undefined ? (ref.vertex === 0 ? wallObj.a.slice() : wallObj.b.slice()) : null;
         const hitZ = hitHeightForSurface(p, camera, width, height, pickedObj, ref.kind, scene.heightM);
-        drag = { type: ref.vertex !== undefined && selection.length===1 ? 'vertex' : 'surface', ref, refs: selection.filter(r=>!['source','listener'].includes(r.kind)), tx, start: p, camera, lastSent: 0, initialWallPoint, hitZ, startScene: scene };
+        drag = { type: ref.vertex !== undefined && selection.length===1 ? 'vertex' : 'surface', ref, refs: selection.filter(r=>!['source','listener'].includes(r.kind)), tx, start: p, camera, lastSent: 0, hitZ, startScene: scene };
         store.command({ op: 'transaction.begin', label: 'Move surface' }, tx);
       }
     } else if (store.view.pathEditing != null && e.button === 0 && !mouseLocked()) {
@@ -1009,32 +1021,18 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       if (performance.now() - lastPoseTime >= 1000 / 60) flushPose();
       else if(poseTimer===null)poseTimer=setTimeout(flushPose,Math.max(0,1000/60-(performance.now()-lastPoseTime)));
     } else if (drag.tx) {
-      let a, b;
-      if (drag.camera.view === '3d' && drag.hitZ != null) {
-        const ha = pointOnHeightPlane(drag.start, drag.camera, width, height, drag.hitZ);
-        const hb = pointOnHeightPlane(p, drag.camera, width, height, drag.hitZ);
-        if (ha && hb) { a = ha; b = hb; }
-      }
-      if (!a || !b) { a = pointOnTargetPlane(drag.start, drag.camera, width, height); b = pointOnTargetPlane(p, drag.camera, width, height); }
-      const delta = b.map((v, i) => v - a[i]);
-      if (drag.type === 'vertex') drag.liveVertexPos = b.slice(0, 2);
-      const localDelta = drag.type === 'point' ? rotateOffset(delta, -store.state.parameters.values[`s${drag.ref.index + 1}az`]) : null;
-      const command = drag.type === 'point' ? { op: 'source.setPointOffset', index: drag.ref.index, channel: drag.ref.channel, offsetM: drag.local.map((n, i) => Math.max(-100, Math.min(100, n + localDelta[i]))) } : drag.type === 'vertex' ? { op: 'surface.moveVertex', ref: { kind: drag.ref.kind, index: drag.ref.index }, vertex: drag.ref.vertex, positionM: b.slice(0, 2), autoLink: store.view.autoLink } : { op: 'surface.translate', refs: drag.refs.map(({ kind, index }) => ({ kind, index })), deltaM: drag.camera.view === 'plan' || drag.camera.view === '3d' ? delta.slice(0, 2) : delta, includeGroups: !e.altKey, autoLink: store.view.autoLink !== false };
-      if (drag.type === 'surface') {
-        const scene = drag.startScene, modes = store.state.document.editorFlags.layerModes || {};
-        const moved = expandedRefs(scene, command.refs, command.includeGroups).filter(r => !['floor', 'ceiling'].includes(r.kind));
-        const allowed = command.deltaM.some(v => Math.abs(v) > 1e-6) &&
-          !moved.some(r => surface(scene, r).editor.locked || modes[layerKey(scene, r)]);
-        drag.liveDelta = command.deltaM;
-        drag.linkedWalls = allowed && command.autoLink && (delta[0] || delta[1])
-          ? translatedWallLinks(scene, moved, modes.walls) : new Map();
-        drag.movingRefs = allowed ? [...moved, ...[...drag.linkedWalls.keys()].map(index => ({ kind: 'wall', index }))] : [];
-      }
-      drag.final = command;
-      if (drag.type === 'point' && !drag.inFlight && performance.now() - drag.lastSent >= 50) {
-        drag.inFlight = true; drag.lastSent = performance.now();
-        const curDrag = drag;
-        Promise.resolve(store.command(command, drag.tx)).finally(() => { curDrag.inFlight = false; });
+      const [a, b, onHeightPlane] = surfaceDragPlane(drag, p);
+      if (drag.type === 'point') {
+        const delta = b.map((v, i) => v - a[i]);
+        const localDelta = rotateOffset(delta, -store.state.parameters.values[`s${drag.ref.index + 1}az`]);
+        drag.final = { op: 'source.setPointOffset', index: drag.ref.index, channel: drag.ref.channel, offsetM: drag.local.map((n, i) => Math.max(-100, Math.min(100, n + localDelta[i]))) };
+        if (!drag.inFlight && performance.now() - drag.lastSent >= 50) {
+          drag.inFlight = true; drag.lastSent = performance.now();
+          const curDrag = drag;
+          Promise.resolve(store.command(drag.final, drag.tx)).finally(() => { curDrag.inFlight = false; });
+        }
+      } else {
+        updateGeometryDrag(drag, p, e, a, b, onHeightPlane);
       }
     }
     store.view.camera = camera; schedule();
@@ -1065,7 +1063,14 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         store.command({op:'transaction.commit'},tx);endDraft();
       }
     }
-    if (drag?.final) store.command(drag.final, drag.tx); finish();
+    if (drag?.final) {
+      if (drag.type === 'vertex' || drag.type === 'surface') {
+        const p = screen(e);
+        updateGeometryDrag(drag, p, e, ...surfaceDragPlane(drag, p));
+      }
+      store.command(drag.final, drag.tx);
+    }
+    finish();
   });
   onCanvas('pointercancel', () => finish(true)); onCanvas('lostpointercapture', () => finish(true));
   onCanvas('contextmenu', e => e.preventDefault());

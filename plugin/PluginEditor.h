@@ -322,6 +322,8 @@ private:
     int freeSrc = -1, freeCh = -1;  // channel point being dragged (free placement)
     // mix tab: outputs
     juce::ToggleButton showMic{"Show the microphone array to scale"};
+    juce::ComboBox ambisonicsNormBox, ambisonicsLevelBox;
+    juce::Label ambisonicsNormLabel, ambisonicsLevelLabel;
     juce::ComboBox layoutBox, micBox;  // output layout; microphone pattern (omni ... figure-8, human ears)
     juce::Label micLabel;
     juce::Label layoutLabel, outInfoLabel;

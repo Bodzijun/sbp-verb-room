@@ -10,8 +10,11 @@
 #endif
 
 #include <cmath>
+#include <limits>
+#include <locale>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <string>
 
 #include "PluginEditor.h"
@@ -32,6 +35,41 @@ Settings& settings() {
 }
 
 namespace {
+// JUCE's event serializer rounds doubles to 15 decimal places. Keep the usual
+// snapshot object and send just the plan coordinates as exact JSON number text.
+juce::var withExactSceneCorners(juce::var message) {
+    if (message.getProperty("kind", {}).toString() != "snapshot") return message;
+    const auto scene = message.getProperty("payload", {}).getProperty("document", {}).getProperty("scene", {});
+    std::ostringstream points;
+    points.imbue(std::locale::classic());
+    points.precision(std::numeric_limits<double>::max_digits10);
+    points << '[';
+    bool first = true;
+    const auto appendPoint = [&](const juce::var& point) {
+        if (!first) points << ',';
+        first = false;
+        points << '[' << (double)point[0] << ',' << (double)point[1] << ']';
+    };
+    const auto walls = scene.getProperty("walls", {});
+    if (const auto* list = walls.getArray())
+        for (const auto& wall : *list) {
+            appendPoint(wall.getProperty("a", {}));
+            appendPoint(wall.getProperty("b", {}));
+        }
+    for (const char* kind : {"floorZones", "ceilingZones"}) {
+        const auto zones = scene.getProperty(kind, {});
+        if (const auto* list = zones.getArray())
+            for (const auto& zone : *list) {
+                const auto vertices = zone.getProperty("vertices", {});
+                if (const auto* poly = vertices.getArray())
+                    for (const auto& vertex : *poly) appendPoint(vertex);
+            }
+    }
+    points << ']';
+    message.getDynamicObject()->setProperty("exactSceneCorners", juce::String(points.str()));
+    return message;
+}
+
 juce::CriticalSection& diagLock() { static juce::CriticalSection c; return c; }
 juce::String& diagText() { static juce::String s; return s; }
 juce::String& uiErrorText() { static juce::String s; return s; }
@@ -411,7 +449,8 @@ void VerbWebEditor::createBrowser() {
     juce::Component::SafePointer<VerbWebEditor> self(this);
 
     bridge = std::make_unique<EditorBridge>(proc, [self](const juce::String& channel, const juce::var& payload) {
-        if (self != nullptr && self->browser != nullptr && self->mode == Mode::web) self->browser->emitEventIfBrowserIsVisible(channel, finiteJson(payload.clone()));
+        if (self != nullptr && self->browser != nullptr && self->mode == Mode::web)
+            self->browser->emitEventIfBrowserIsVisible(channel, withExactSceneCorners(finiteJson(payload.clone())));
     });
     bridge->setPreferenceLocation(preferenceFile().getSiblingFile("web-preferences.json"));
     bridge->setUiSwitch([self](bool native) {
@@ -444,7 +483,10 @@ void VerbWebEditor::createBrowser() {
         .withResourceProvider(provider)
         .withNativeFunction("verbMessage", [self](const juce::Array<juce::var>& a, Done done) {
             const double start=juce::Time::getMillisecondCounterHiRes();
-            done(self && self->bridge && !a.isEmpty() ? self->bridge->handle(a[0]) : juce::var());
+            auto reply = self && self->bridge && !a.isEmpty() ? self->bridge->handle(a[0]) : juce::var();
+            if (auto* messages = reply.getArray())
+                for (auto& message : *messages) message = withExactSceneCorners(message);
+            done(reply);
             if(self)recordDiagnostics("watchdog: last call verbMessage " + juce::String(juce::Time::getMillisecondCounterHiRes()-start,1) + " ms; max message-thread gap " + juce::String(self->maxTimerGapMs,1) + " ms");
         })
         .withNativeFunction("verbParameters", [self](const juce::Array<juce::var>& a, Done done) {

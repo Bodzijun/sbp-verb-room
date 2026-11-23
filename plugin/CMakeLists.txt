@@ -195,7 +195,7 @@ set_tests_properties(e1_neutral_null PROPERTIES ENVIRONMENT "VERB_E1_NULL=1" WOR
 
 # Path / orientation / Ambisonics / keep-alive suites (E9..E28). Each is selected by an environment variable of VerbPluginTest.
 # Suites that read test scenes from out/ or test/ (not part of a clean checkout) are registered only when those files exist.
-foreach(suite C1 E9 E16 E17 E18 E19 E21 E23 E28 P4 P5 P6 P7 P8)
+foreach(suite C1 E9 E16 E17 E18 E19 E21 E23 E28 F8 P4 P5 P6 P7 P8)
   set(need_fixture FALSE)
   if(suite STREQUAL "E9" AND NOT EXISTS "${CMAKE_SOURCE_DIR}/out/E9b/owner-repro-demo-motion.verbroom")
     set(need_fixture TRUE)
@@ -213,7 +213,9 @@ foreach(suite C1 E9 E16 E17 E18 E19 E21 E23 E28 P4 P5 P6 P7 P8)
     message(STATUS "Test ${suite}_suite not registered: its fixture scene is not in this checkout")
   else()
     add_test(NAME ${suite}_suite COMMAND VerbPluginTest)
-    if(suite STREQUAL "P7")
+    if(suite STREQUAL "F8")
+      set_tests_properties(F8_suite PROPERTIES ENVIRONMENT "VERB_ONLY_F8=1" TIMEOUT 360)
+    elseif(suite STREQUAL "P7")
       set_tests_properties(${suite}_suite PROPERTIES ENVIRONMENT "VERB_ONLY_P7=1;VERB_P7_CTEST=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
     elseif(suite STREQUAL "P8")
       set_tests_properties(${suite}_suite PROPERTIES ENVIRONMENT "VERB_ONLY_P8=1;VERB_P8_CTEST=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)

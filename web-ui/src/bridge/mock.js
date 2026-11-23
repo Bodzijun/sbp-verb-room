@@ -20,8 +20,35 @@ export async function createMockBridge(options = {}) {
   const emptyBake=()=>({state:'notBaked',object:-1,name:'',percent:0,reason:'',done:0,total:0,workers:0,paths:[]});
   const enabledPaths=doc=>(doc.paths||[]).map((path,object)=>({path,object})).filter(x=>x.path?.enabled&&x.path.points.length>=2);
   const pathGroupDriver=(paths,object)=>{const p=paths?.[object],g=p?.group??-1;if(g<0||!p?.enabled||(p.points?.length??0)<2)return object;for(let o=0;o<32;o++)if(paths[o]?.enabled&&paths[o].points?.length>=2&&(paths[o].group??-1)===g)return o;return object;};
-  let bakeStatus=emptyBake(),bakeToken=0;
-  function bakeEvent(){event({event:'status.load',state:state.load.state,status:state.load.status,sceneSerial:state.sceneSerial||'0',loadSerial:state.loadSerial||'0',tailCurrent:state.load.tailCurrent,rebuilding:false,pathBake:bakeStatus});}
+  let bakeStatus=emptyBake(),bakeToken=0,bakeOrigin='none';
+  function bakeInput() {
+    const enabled=enabledPaths(state.document);
+    const paths=state.document.paths || [];
+    const moving=new Set(enabled.map(({object})=>object));
+    const listener=paths[32];
+    const listenerActive=moving.has(32);
+    const groupOf=({object,path})=>(path.group??-1)>=0?1000+path.group:object;
+    const groups=new Set(enabled.map(groupOf));
+    const followsMoving=path=>path?.lookAt&&!path.lookPos&&moving.has(path.lookTarget);
+    const conflict=enabled.find(({object,path})=>followsMoving(path)&&path.lookTarget!==object
+      && ((path.group??-1)<0||path.group!==paths[path.lookTarget]?.group));
+    const listenerRides=!listenerActive&&followsMoving(listener);
+    const drawn=enabled.length>0&&!conflict&&(!(listenerActive||listenerRides)||groups.size===1);
+    const hasRecording=[3,4].includes(bakeStatus.passState)&&bakeStatus.passSamples>=2;
+    return {enabled,groups,listenerActive,listenerRides,conflict,drawn,hasRecording};
+  }
+  function bakeFields(input) {
+    const {enabled,groups,drawn,hasRecording}=input;
+    const group=enabled[0]?.path.group??-1;
+    return {
+      bakeSource:drawn?'drawn':hasRecording?'recorded':'none',
+      ...(drawn&&groups.size===1&&group>=0?{bakeSourceGroup:group+1}:{}),
+      ...(drawn&&hasRecording?{recordingNote:'Recording kept, not used: drawn paths are baked instead. Press Discard if you do not need it.'}:{})
+    };
+  }
+  function bakeEvent(overrides = {}) {
+    event({event:'status.load',state:state.load.state,status:state.load.status,sceneSerial:state.sceneSerial||'0',loadSerial:state.loadSerial||'0',tailCurrent:state.load.tailCurrent,rebuilding:false,pathBake:{...bakeStatus,...bakeFields(bakeInput()),...overrides}});
+  }
   function emit(kind, payload, requestId) {
     const message = { schemaVersion: 1, sessionId, kind, ...(requestId ? { requestId } : {}), payload: clone(payload) };
     validator.assert(message); audit.push({ direction: 'in', message: clone(message) });
@@ -43,9 +70,9 @@ export async function createMockBridge(options = {}) {
   function historyEvent() { event({event:'history.changed',canUndo:history.length>0,undoDepth:history.length,canRedo:false,undoLabel:history.length ? (history.at(-1).undoLabel || 'Scene edit') : '',redoLabel:''}); }
   let clutterSignature = null;
   function clutterEvent(force = false) { const signature = mockClutterSignature(state); if (force || signature !== clutterSignature) { clutterSignature = signature; event(mockClutterEvent(state)); } }
-  function snapshot() { const result = emit('snapshot', state); historyEvent(); clutterEvent(); return result; }
+  function snapshot() { const result = emit('snapshot', state); historyEvent(); clutterEvent(); bakeEvent(); return result; }
   function fresh(name, keepPreferences = false) {
-    const old = state; generation++; stopJobs(); bakeToken++;bakeStatus=emptyBake();tx = null; gestures.clear(); history.length = 0; seen.clear(); resources.clear(); selected = name;
+    const old = state; generation++; stopJobs(); bakeToken++;bakeStatus=emptyBake();bakeOrigin='none';tx = null; gestures.clear(); history.length = 0; seen.clear(); resources.clear(); selected = name;
     clutterSignature = null;
     const fixture = data.get(name === 'error-resync' ? name : `snapshot.${name === 'energy-result' ? 'default-physical' : name}`);
     state = clone(fixture.messages.find(m => m.kind === 'snapshot').payload); state.parameters.descriptors = clone(descriptors);for(const d of descriptors.parameters)state.parameters.values[d.id] ??= d.default;
@@ -57,8 +84,14 @@ export async function createMockBridge(options = {}) {
     validateModel(state, validator);
   }
   function change(next, requestId, paths = ['document', 'host', 'parameters', 'preferences'], editedPathObject = null) {
-    const docChanged=JSON.stringify(next.document)!==JSON.stringify(state.document);
-    const bakeInvalid=docChanged&&(['baking','baked','approximate'].includes(bakeStatus.state)||(Array.isArray(bakeStatus.paths)&&bakeStatus.paths.some(x=>['baking','baked','approximate'].includes(x.state))));
+    // Compare the acoustic document without the format choices. This also keeps
+    // a bake current when output-only changes are undone.
+    const acousticDocument = ({ output, ...document }) => {
+      const { ambisonicsNormalization, ambisonicsLevelDb, ...receivers } = output;
+      return { ...document, output: receivers };
+    };
+    const acousticChange=JSON.stringify(acousticDocument(next.document))!==JSON.stringify(acousticDocument(state.document));
+    const bakeInvalid=acousticChange&&(['baking','baked','approximate'].includes(bakeStatus.state)||(Array.isArray(bakeStatus.paths)&&bakeStatus.paths.some(x=>['baking','baked','approximate'].includes(x.state))));
     const oldPaths=state.document?.paths;
     const fromRevision = state.revision; next.revision = (BigInt(fromRevision) + 1n).toString();
     validateModel(next, validator); state = next;
@@ -77,8 +110,8 @@ export async function createMockBridge(options = {}) {
         updatedPaths=updatedPaths.map(item=>({...item,state:'outdated',percent:0,reason:msg}));
       }
       bakeStatus={...bakeStatus,state:'outdated',percent:0,reason:msg,paths:updatedPaths};
-      bakeEvent();
     }
+    if(bakeInvalid||JSON.stringify(oldPaths)!==JSON.stringify(next.document?.paths)) bakeEvent();
     return state.revision;
   }
   function replayEnergy() {
@@ -127,40 +160,44 @@ export async function createMockBridge(options = {}) {
         if (message.baseRevision && message.baseRevision !== state.revision) reject('staleRevision', 'Mock rejected an obsolete revision; requesting a fresh snapshot');
         const ack = extra => emit('ack', { requestId: message.requestId, revision: state.revision, status: 'accepted', ...extra }, message.requestId);
         let result;
-        if(op==='path.recordPass'||op==='path.recordStop'){
+        if(op==='path.recordPass'||op==='path.recordStop'||op==='path.recordClear'){
           if(op==='path.recordPass'){
-            const outdated=['baked','approximate'].includes(bakeStatus.state);
+            const outdated=bakeOrigin==='recorded'&&['baking','baked','approximate'].includes(bakeStatus.state);
+            if(outdated)bakeToken++;
             bakeStatus={...bakeStatus,...(outdated?{state:'outdated',percent:0,reason:'Room, quality or recorded pass changed - bake again'}:{}),passState:1,passSamples:0};
-          }else{
-            bakeStatus={...bakeStatus,passState:3,passSamples:Math.max(bakeStatus.passSamples||0,16)};
+          }else if(op==='path.recordClear'){
+            if(bakeOrigin==='recorded'){
+              bakeToken++;bakeStatus=emptyBake();bakeOrigin='none';
+            }
+            bakeStatus={...bakeStatus,passState:0,passSamples:0};
+          }else if([1,2].includes(bakeStatus.passState)){
+            const samples=bakeStatus.passSamples??0;
+            bakeStatus={...bakeStatus,passState:samples>=2?3:0,passSamples:samples>=2?samples:0};
           }
           bakeEvent();result=ack();
         }
         else if(op==='path.bakeClear'){
-          bakeToken++;bakeStatus={...emptyBake(),passState:bakeStatus.passState??0,passSamples:bakeStatus.passSamples??0};bakeEvent();result=ack();
+          bakeToken++;bakeOrigin='none';bakeStatus={...emptyBake(),passState:bakeStatus.passState??0,passSamples:bakeStatus.passSamples??0};bakeEvent();result=ack();
         }
         else if(op==='path.bake'||op==='path.bakeCancel'){
           const token=++bakeToken;
           const keepPass={passState:bakeStatus.passState??0,passSamples:bakeStatus.passSamples??0};
           if(op==='path.bakeCancel'){bakeStatus={...bakeStatus,...keepPass,state:'cancelled',percent:0,reason:'Cancelled',paths:(bakeStatus.paths||[]).map(x=>x.state==='baking'?{...x,state:'cancelled',percent:0,reason:'Cancelled'}:x)};bakeEvent();}
           else{
-            const enabled=enabledPaths(state.document);
-            const listenerActive=enabled.some(x=>x.object===32);
-            const keyOf=x=>(x.path.group??-1)>=0?1000+x.path.group:(x.object===32?-1:x.object);
-            const uniqueGroups=new Set(enabled.map(keyOf));
+            const {enabled,groups,listenerActive,listenerRides,conflict,drawn,hasRecording}=bakeInput();
             const object=enabled.length===1?enabled[0].object:-1;
-            const allowed=enabled.length>0&&(!listenerActive||uniqueGroups.size===1);
-            const hasRecorded=keepPass.passState===3&&(keepPass.passSamples??0)>=2;
-            if(!allowed&&!hasRecorded){
+            if(!drawn&&!hasRecording){
               const lGrp=state.document.paths?.[32]?.group??-1;
-              const reason=enabled.length===0?'Enable a path or record a pass before baking':(listenerActive&&lGrp<0?'Cannot bake uncoupled moving listener with sources - assign them to one Group or record a pass':'Cannot bake uncoupled paths alongside a moving listener - couple all moving paths in one Group or record a pass');
+              const reason=enabled.length===0?'Enable a path or record a pass before baking':conflict||listenerRides?'Look at target moves independently: put both paths in one Group or record a pass':(listenerActive&&lGrp<0?'Cannot bake uncoupled moving listener with sources - assign them to one Group or record a pass':'Cannot bake uncoupled paths alongside a moving listener - couple all moving paths in one Group or record a pass');
+              bakeOrigin='none';
               bakeStatus={...emptyBake(),...keepPass,state:'blocked',object,reason,paths:enabled.map(x=>({object:x.object,group:Number.isInteger(x.path.group)?x.path.group:-1,drivenBy:pathGroupDriver(state.document.paths,x.object),state:'blocked',percent:0,reason,done:0,total:0}))};
               bakeEvent();
             }else{
-              const recordedMode=!allowed&&hasRecorded;
+              const recordedMode=!drawn;
+              bakeOrigin=recordedMode?'recorded':'drawn';
               const g0=enabled[0]?.path.group??-1;
-              const name=recordedMode?'Recorded pass':(enabled.length===1?(object===32?'Listener':state.document.sources[object]?.name||`Source ${object+1}`):(uniqueGroups.size===1&&g0>=0?`Group ${g0+1} (${enabled.length} paths)`:`${enabled.length} paths`));
-              const totalStations=64*Math.max(1,recordedMode?1:uniqueGroups.size);
+              const name=recordedMode?'Recorded pass':(enabled.length===1?(object===32?'Listener':state.document.sources[object]?.name||`Source ${object+1}`):(groups.size===1&&g0>=0?`Group ${g0+1} (${enabled.length} paths)`:`${enabled.length} paths`));
+              const totalStations=64*Math.max(1,recordedMode?1:groups.size);
               const items=enabled.map(x=>({object:x.object,group:Number.isInteger(x.path.group)?x.path.group:-1,drivenBy:pathGroupDriver(state.document.paths,x.object),state:'baking',percent:0,reason:'Tracing stations',done:0,total:64}));
               bakeStatus={...keepPass,state:'baking',object:recordedMode?-1:object,name,percent:0,reason:'Tracing stations',done:0,total:totalStations,workers:27,paths:items};
               bakeEvent();
@@ -246,6 +283,7 @@ export async function createMockBridge(options = {}) {
           if (message.transactionId && tx?.id !== message.transactionId) reject('invalid', 'Unknown transaction');
           const next = clone(state), materials = [...data.values()].flatMap(f => f.messages?.find(m => m.kind === 'snapshot')?.payload.document.scene.materials || []);
           const commands = tx && message.transactionId ? [...tx.commands] : null;
+          let details;
           const slot = commands && op === 'surface.translate' ? commands.findIndex(command =>
             command.op === op && JSON.stringify(command.refs) === JSON.stringify(p.refs)) : -1;
           if (slot >= 0) {
@@ -255,27 +293,29 @@ export async function createMockBridge(options = {}) {
             next.parameters.values = clone(tx.initial.parameters.values);
             for (const command of commands) applyMutation(next, command, tx.initial, materials);
           } else {
-            applyMutation(next, p, tx?.initial || state, materials);
+            details = applyMutation(next, p, tx?.initial || state, materials);
             commands?.push(p);
           }
           validateModel(next, validator);
           if (commands) tx.commands = commands;
-          if (JSON.stringify(next) === JSON.stringify(state)) result = ack({ status: 'noChange' });
+          const extra = op === 'scene.joinCorners' ? { details } : {};
+          if (JSON.stringify(next) === JSON.stringify(state)) result = ack({ status: 'noChange', ...extra });
           else {
             if(!tx&&op.startsWith('path.'))history.push({pathObject:p.object,pathBefore:clone(state.document.paths?.[p.object]||{points:[],enabled:true,closed:false,smooth:false,orient:false,laps:1})});
             if (!tx && op === 'output.autoMakeup') history.push({makeupBefore:state.parameters.values.makeup});
+            if (!tx && op === 'output.set') history.push({ transactionDocument: clone(state.document), undoLabel: 'Output settings' });
             if (!tx && op === 'source.setConfig') history.push({ transactionDocument: clone(state.document), undoLabel: 'color' in p ? 'Source colour' : 'Edit source' });
             if (!tx && (op === 'room.scale' || op === 'source.setDirectivity' || op === 'source.setInstrument')) history.push({ transactionDocument: clone(state.document), transactionParams: clone(state.parameters.values) });
-            else if (!tx && (op.startsWith('surface.') || ['room.setHeight', 'room.setOpening', 'room.clear'].includes(op))) history.push(clone(state.document.scene));
+            else if (!tx && (op.startsWith('surface.') || ['room.setHeight', 'room.setOpening', 'room.clear', 'scene.joinCorners'].includes(op))) history.push(clone(state.document.scene));
             history.splice(0, Math.max(0, history.length - 60)); if (tx) tx.changed = true;
             change(next, message.requestId, undefined, op.startsWith('path.') ? p.object : null);
             if (job?.resultId) event({ event: 'analysis.stale', resultId: job.resultId, stale: true });
             if (['surface.delete', 'surface.create', 'source.add', 'source.remove'].includes(op)) { event({ event: 'resync.required', reason: 'structuralChange', currentRevision: state.revision }); snapshot(); }
-            if (/^(surface|room|tail)\./.test(op) || op === 'source.setDirectivity' || op === 'source.setInstrument') scheduleTail(35);
-            result = ack();
+            if (/^(surface|room|scene|tail)\./.test(op) || op === 'source.setDirectivity' || op === 'source.setInstrument') scheduleTail(35);
+            result = ack(extra);
           }
         }
-        if ((/^(history|surface|room|transaction|path)\./.test(op)&&!['path.bake','path.bakeCancel','path.bakeClear'].includes(op)) || op === 'output.autoMakeup' || op === 'source.setDirectivity' || op === 'source.setInstrument' || (op === 'source.setConfig' && !tx)) historyEvent();
+        if ((/^(history|surface|room|scene|transaction|path)\./.test(op)&&!['path.bake','path.bakeCancel','path.bakeClear','path.recordPass','path.recordStop','path.recordClear'].includes(op)) || op === 'output.autoMakeup' || (op === 'output.set' && !tx) || op === 'source.setDirectivity' || op === 'source.setInstrument' || (op === 'source.setConfig' && !tx)) historyEvent();
         seen.set(message.requestId, result); if (seen.size > 512) seen.delete(seen.keys().next().value); return result;
       } catch (error) {
         const result = emit('error', { requestId: message.requestId, code: error.code || 'invalid', message: error.message, currentRevision: state.revision, ...(error.code === 'staleRevision' ? { resync: true } : {}) }, message.requestId);
@@ -311,12 +351,18 @@ export async function createMockBridge(options = {}) {
         raysUsed: state.document.tail.baseRays, rayLimit: state.document.tail.baseRays * 4, baseRays: state.document.tail.baseRays, shared: state.document.sources.length > 8, adaptive: state.document.tail.adaptive, needsMoreRays: false });
     },
     setCpuStatus(cpu) {
-      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: false, pathBake:bakeStatus,...(cpu ? { cpu } : {}) });
+      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: false, pathBake:{...bakeStatus,...bakeFields(bakeInput())},...(cpu ? { cpu } : {}) });
     },
     setRebuilding(rebuilding) {
-      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: !!rebuilding, pathBake: bakeStatus });
+      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: !!rebuilding, pathBake:{...bakeStatus,...bakeFields(bakeInput())} });
     },
-    setBakeStatus(value){bakeToken++;bakeStatus={...emptyBake(),...value};bakeEvent();},
+    setBakeStatus(value){
+      const {bakeSource,bakeSourceGroup,recordingNote,...status}=value;
+      bakeToken++;
+      bakeStatus={...emptyBake(),...status};
+      bakeOrigin=bakeSource??bakeFields(bakeInput()).bakeSource;
+      bakeEvent({...(bakeSource?{bakeSource}:{}),...(bakeSourceGroup?{bakeSourceGroup}:{}),...(recordingNote?{recordingNote}:{})});
+    },
     dispose() { closed = true; stopJobs(); gestures.clear(); listeners.clear(); parameterListeners.clear(); },
     get openGestures() { return [...gestures]; }
   };

@@ -22,7 +22,7 @@ color:var(--text);
 font:var(--font)}
 body{
 min-width:900px;
-min-height:600px}
+min-height:560px}
 button,input,select{
 font:inherit}
 button,summary,input,select{

@@ -53,3 +53,7 @@ Solo/Mute is saved too: before sharing a preset, check that no groups were accid
 - Added a [scene-authoring guide for agents](Scene_authoring_agents_en.md) and a [minimal example](examples/Agent_Hall.txt).
 
 The corrected materials take effect when you reselect the built-in VSL Grand Hall or load a new `.verbroom` file. Previously saved projects retain the geometry stored in them.
+
+## Ambisonics output
+
+Optional attributes on `VerbState/Output` store `ambisonicsNormalization` (0 SN3D, 1 N3D, 2 FuMa) and `ambisonicsLevelDb` (0, −3, −6 dB). Absent attributes imply SN3D and 0 dB. With **Keep I/O** on, both choices stay local. They apply to Ambisonic layouts.

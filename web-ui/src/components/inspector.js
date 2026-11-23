@@ -1,5 +1,5 @@
 import { compilePath, pathId, pathGroupDriver, pathGroupMembers, MIN_WINDOW_GAP, isPointKey, clampPointTime, orientationMode } from '../viewport/movement-path.js';
-import { pathBakeView } from './path-bake.js';
+import { bakeSourceText, pathBakeView } from './path-bake.js';
 import { directivityShape } from '../viewport/marker.js';
 import { element, button, select, check, row, note, unavailable } from './dom.js';
 import { slider, numericField } from './slider.js';
@@ -38,13 +38,21 @@ export function outputParts(ctx) {
   const ambiOrder = effLayout >= 9 && effLayout <= 11 ? effLayout - 8 : 0;  // AmbiX 1st..3rd order: fixed coincident capsules
   const radiusReason = effLayout === 0 ? 'Mono: single point' : ambiOrder ? 'AmbiX: coincident'  : o.micPattern !== 7 && effLayout === 1 ? 'ORTF: fixed 17 cm' : o.micPattern !== 7 && effLayout === 2 ? 'XY: coincident pair' : '';
   const micControl = ambiOrder
-    ? select('Microphone pattern', [[o.micPattern, ambiOrder === 1 ? 'Fixed by layout (W omni, Y/Z/X figure-8)' : 'Fixed by layout (SN3D spherical harmonics)']], o.micPattern, () => {}, { disabled: true, title: 'Fixed by layout for AmbiX (' + ['1st', '2nd', '3rd'][ambiOrder - 1] + ' order)' })
+    ? select('Microphone pattern', [[o.micPattern, ambiOrder === 1 ? 'Fixed by layout (W omni, Y/Z/X figure-8)' : 'Fixed by layout (spherical harmonics)']], o.micPattern, () => {}, { disabled: true, title: 'Fixed by layout for AmbiX (' + ['1st', '2nd', '3rd'][ambiOrder - 1] + ' order)' })
     : select('Microphone pattern', MICS, o.micPattern, n => command({ micPattern: Number(n) }));
   return {
     main: [row('Layout', select('Output layout', LAYOUTS.map((v, i) => [i - 1, v]), o.layout, n => command({ layout: Number(n) }))),
+      ...(ambiOrder ? [
+        row('Ambisonics normalization', select('Ambisonics normalization', ['SN3D', 'N3D', 'FuMa'], o.ambisonicsNormalization ?? 0,
+          value => command({ ambisonicsNormalization: Number(value) }), { title: 'SN3D (AmbiX) and N3D use ACN channel order. N3D raises the higher orders. FuMa uses Furse-Malham channel order and MaxN weighting.' })),
+        row('Ambisonics level', select('Ambisonics level', [[0, '0 dB'], [-3, '−3 dB'], [-6, '−6 dB']], o.ambisonicsLevelDb ?? 0,
+          value => command({ ambisonicsLevelDb: Number(value) }), { title: 'Attenuates all Ambisonic channels equally after normalization. AmbiX uses SN3D at 0 dB.' }))
+      ] : []),
       row('Microphones', micControl),
       check('Show microphone array to scale', !!store.view.showMic, value => store.setView({ showMic: value })),
       slider('Radius', o.radiusM, 0, 1, 0.001, radiusM => command({ radiusM }), 'm', { locked: !!radiusReason, reason: radiusReason }),
+      ...(ambiOrder && o.ambisonicsNormalization === 2 && state.host.outputChannels < (ambiOrder + 1) ** 2
+        ? [note(`FuMa needs ${(ambiOrder + 1) ** 2} host channels for the complete signal. Missing components are silent.`)] : []),
       row('Rendered / host', `${state.host.renderedChannels} / ${state.host.outputChannels} ch`),
       row('Ring channels', `${Math.min(state.host.outputChannels, 16)} · follows host`)],
     extra: [note('Human ears is a microphone model; binaural rendering is unavailable.'), element('div', { className: 'inline' }, [unavailable(state, 'binaural', 'Binaural')]),
@@ -412,45 +420,67 @@ export function pathControls(ctx, object) {
     element('div', { className: 'path-actions' }, actions)
   ]);
   const bakeStatus = element('small', { className: 'path-bake-status', 'aria-live': 'polite' });
+  const bakeSource = element('small', { className: 'path-bake-source', 'aria-live': 'polite' });
+  const recordingNote = element('small', { className: 'path-recording-note' });
+  const afterStop = 'Recorded - now press Bake path to compute the tail';
   const bakeHelp = 'Pre-compute the late tail so it follows the movement before objects stop. Large rooms can take 1–2 minutes. Bake again after changing the room, paths, or materials.';
-  const recordHelp = 'Record movement from DAW automation (X, Y, Z or azimuth), a listener and sources moving outside one group, or a Look at target moving on its own. Press Record pass, play the movement once, press Stop, then press Bake path. Record again if the automation changes. For drawn paths in one group, just press Bake path.';
-  const bakeTarget = hasPath ? object : 'all';
+  const drawnFlow = 'For drawn paths in one group, press Bake path only.';
+  const automationFlow = 'For host automation, press Record automation, play the movement once, press Stop, then press Bake path.';
+  const recordHelp = `${automationFlow} Record again if the automation changes. ${drawnFlow}`;
+  const bakeTarget = hasPath && p.enabled ? object : 'all';
+  const bakeStatusObject = bakeTarget === 'all' ? -1 : object;
   const bakeButton = button('Bake path', () => {
-    const v = pathBakeView(store.telemetry['status.load']?.pathBake, hasPath ? object : -1);
+    const v = pathBakeView(store.telemetry['status.load']?.pathBake, bakeStatusObject);
     store.command({ op: v.running ? 'path.bakeCancel' : 'path.bake', object: bakeTarget });
   }, { 'data-bake-path': String(object) });
-  const recordButton = button('Record pass', () => {
+  const recordButton = button('Record automation', () => {
     const s = store.telemetry['status.load']?.pathBake;
     store.command({ op: [1, 2].includes(s?.passState) ? 'path.recordStop' : 'path.recordPass' });
   }, { 'data-record-pass': String(object) });
+  const clearRecording = button('Discard', () => store.command({ op: 'path.recordClear' }), {
+    'data-clear-recording': String(object), 'aria-label': 'Discard recording', title: 'Stop and discard the recording and any bake made from it. Drawn paths and their bakes stay.'
+  });
   const clearButton = button('Clear bake', () => store.command({ op: 'path.bakeClear' }), {
-    'data-clear-bake': String(object), title: 'Discard all baked tables (paths and recorded pass stay); bake again when needed'
+    'data-clear-bake': String(object), title: 'Discard all baked tables. Drawn paths and the recording stay.'
   });
   const updateBake = () => {
     const pass = store.telemetry['status.load']?.pathBake;
-    const recorded = [3, 4].includes(pass?.passState);
     const samples = pass?.passSamples ?? 0;
+    const recorded = [3, 4].includes(pass?.passState) && samples >= 2;
+    const usesRecording = pass?.bakeSource === 'recorded';
+    const readyToBake = recorded && usesRecording && !['baking', 'baked', 'approximate'].includes(pass.state);
     const [recordLabel, recordTitle] = pass?.passState === 1
       ? ['Armed - Stop', 'Recording starts when the host plays, and you can press Stop to cancel.']
       : pass?.passState === 2
         ? [`Recording ${samples} - Stop`, 'The movement is being recorded as the project plays, so press Stop when the movement ends.']
         : recorded
-          ? [`Recorded ${samples} - Record again`, `${samples} samples ready: press Bake path to compute the tail or Record again to replace this pass.`]
-          : ['Record pass', recordHelp];
+          ? [`Recorded ${samples} - Record again`, readyToBake
+            ? `${samples} samples ready: press Bake path to compute the tail or Record again to replace this recording.`
+            : `${samples} samples kept. Bake source shows what Bake path will use.`]
+          : ['Record automation', recordHelp];
     recordButton.textContent = recordLabel;
     recordButton.title = recordTitle;
-    const v = pathBakeView(pass, hasPath ? object : -1);
-    bakeStatus.textContent = v.text;
-    bakeStatus.title = v.text;
-    bakeStatus.classList.toggle('warn', !!v.warn);
+    clearRecording.disabled = !recorded && ![1, 2].includes(pass?.passState);
+    const v = pathBakeView(pass, bakeStatusObject);
+    bakeStatus.textContent = readyToBake ? `${v.text} · ${afterStop}` : v.text;
+    bakeStatus.classList.toggle('warn', v.warn || readyToBake);
+    bakeSource.textContent = `Bake source: ${bakeSourceText(pass)}`;
+    recordingNote.textContent = pass?.recordingNote || '';
+    recordingNote.hidden = !pass?.recordingNote;
     bakeButton.classList.toggle('warn', !!v.warn);
     bakeButton.textContent = v.label;
-    bakeButton.title = v.running ? 'Stop the current bake.' : `${bakeHelp} ${recorded
-      ? 'Uses the recorded pass.'
-      : 'Uses drawn paths in one group or paths for independent sources. Uses the recording after Record pass.'}`;
+    bakeButton.title = v.running ? 'Stop the current bake.' : `${bakeHelp} ${drawnFlow} ${automationFlow}`;
   };
   updateBake();
-  const bakeActions = element('div', { className: 'path-bake-actions' }, [recordButton, bakeButton, clearButton, bakeStatus]);
+  const bakeRow = (caption, controls) => element('div', { className: 'path-bake-row' }, [
+    element('small', { className: 'path-bake-caption' }, [caption]),
+    element('div', { className: 'path-bake-buttons' }, controls)
+  ]);
+  const bakeActions = element('div', { className: 'path-bake-actions' }, [
+    bakeRow('Host automation', [recordButton, clearRecording]),
+    bakeRow('Bake late tail', [bakeButton, clearButton]),
+    bakeSource, recordingNote, bakeStatus
+  ]);
   block.dispose = store.subscribe(({ reason }) => { if (reason === 'status.load') updateBake(); });
   if (!hasPath) { block.append(bakeActions); return [block]; }
   const flags = element('div', { className: 'path-flags' }, [

@@ -164,6 +164,7 @@ public:
     // Control thread only. Empty or conflicting moving listener + uncoupled sources select the legacy estimator.
     void armRecordedPass(); // control; actual capture happens after setters on audio thread
     void stopRecordedPass();
+    void clearRecordedPass(); // Discards capture and invalidates only tables baked from it.
     void recordPassAudio(bool playing) noexcept;
     struct RecordedPassStats { int state=0,samples=0;bool offPass=false; };
     RecordedPassStats recordedPassStats() const noexcept;
@@ -202,7 +203,9 @@ public:
         int percent=0,discontinuities=0,done=0,total=0;
     };
     struct BakeStats {
+        enum class Source { None, Drawn, Recorded };
         BakeState state=BakeState::NotBaked;
+        Source source=Source::None;
         int percent=0, discontinuities=0,waitReason=0,workers=0,done=0,total=0;
         int restored=0; // P4: 0 = traced this session, 1 = restored from saved state, 2 = restored from the undo cache
         uint64_t hash=0,lookups=0,stations=0,resets=0,cancelled=0;

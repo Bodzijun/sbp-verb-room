@@ -52,7 +52,7 @@ juce::var EditorSession::resyncEvent(const char* reason) {
     return makeObject({{"event", "resync.required"}, {"reason", reason}, {"currentRevision", u64(proc.getRevision())}});
 }
 
-CommandResult EditorSession::ok(const juce::String& requestId, const char* status, std::vector<std::string> changed, bool historyEv, const char* resyncReason) {
+CommandResult EditorSession::ok(const juce::String& requestId, const char* status, std::vector<std::string> changed, bool historyEv, const char* resyncReason, const juce::var& details) {
     CommandResult r;
     r.ok = true;
     r.status = status;
@@ -67,6 +67,7 @@ CommandResult EditorSession::ok(const juce::String& requestId, const char* statu
     po->setProperty("revision", u64(r.revision));
     po->setProperty("status", juce::String(status));
     if (!paths.isEmpty()) po->setProperty("changed", paths);
+    if (details.isObject()) po->setProperty("details", details);
     r.messages.push_back(envelope("ack", requestId, juce::var(po)));
     if (historyEv) r.messages.push_back(envelope("event", {}, historyEvent()));
     if (resyncReason) r.messages.push_back(envelope("event", {}, resyncEvent(resyncReason)));
@@ -310,11 +311,12 @@ CommandResult EditorSession::mutate(const Descriptor& d, const juce::var& payloa
         const uint64_t revBefore = proc.getRevision();
         const Model before = readModel(proc);
         Model cand = before;
-        Fail f = d.mutate(payload, cand, Ctx{proc, before});
+        juce::var details;
+        Fail f = d.mutate(payload, cand, Ctx{proc, before, &details});
         if (!f.bad()) f = normalizeAndValidate(cand, before);
         if (f.bad()) return error(requestId, f);
         auto changes = diffModels(before, cand);
-        if (changes.empty()) return ok(requestId, "noChange", {}, false);
+        if (changes.empty()) return ok(requestId, "noChange", {}, false, nullptr, details);
         Fail af;
         if (!applyChanges(changes, true, af)) {
             Fail ignore;
@@ -325,7 +327,7 @@ CommandResult EditorSession::mutate(const Descriptor& d, const juce::var& payloa
         const auto paths = changedPaths(changes);
         const bool moved = indicesMoved(changes);
         if (d.undoable) pushHistory(d.label(payload), ck, std::move(changes));
-        return ok(requestId, "accepted", paths, d.undoable, moved ? "structuralChange" : nullptr);
+        return ok(requestId, "accepted", paths, d.undoable, moved ? "structuralChange" : nullptr, details);
     }
 
     // ---- inside a transaction: replay all commands of the gesture from its start (last value of the same edit wins; deltas are
@@ -335,10 +337,14 @@ CommandResult EditorSession::mutate(const Descriptor& d, const juce::var& payloa
     TxCmd nc;
     nc.d = &d; nc.payload = payload; nc.ckey = ck;
     auto same = !ck.empty() ? std::find_if(cmds.begin(), cmds.end(), [&](const TxCmd& c) { return c.ckey == ck; }) : cmds.end();
+    const auto sameIndex = static_cast<size_t>(same - cmds.begin());
     if (same != cmds.end()) *same = nc; else cmds.push_back(nc);
     Model cand = t.start;
+    juce::var details;
     for (const auto& c : cmds) {
-        Fail f = c.d->mutate(c.payload, cand, Ctx{proc, t.start});
+        juce::var commandDetails;
+        Fail f = c.d->mutate(c.payload, cand, Ctx{proc, t.start, &commandDetails});
+        if (&c == &cmds[sameIndex]) details = commandDetails;
         if (f.bad()) return error(requestId, f);  // the transaction keeps its previous state
     }
     if (auto f = normalizeAndValidate(cand, t.start); f.bad()) return error(requestId, f);
@@ -359,7 +365,7 @@ CommandResult EditorSession::mutate(const Descriptor& d, const juce::var& payloa
     t.cmds = cmds;
     t.applied = std::move(changes);
     t.lastRevision = proc.getRevision();
-    return ok(requestId, (hadApplied || !t.applied.empty()) ? "accepted" : "noChange", changedPaths(t.applied), false);
+    return ok(requestId, (hadApplied || !t.applied.empty()) ? "accepted" : "noChange", changedPaths(t.applied), false, nullptr, details);
 }
 
 // ============================================================================================ other session ops
@@ -410,9 +416,11 @@ CommandResult EditorSession::dispatch(const juce::var& payload, const juce::Stri
     }
     else if (op == "session.setViewState") r = setViewStateOp(payload, requestId);
     else if (op == "layers.set") r = layersOp(payload, requestId, baseRevision, envelope);
-    else if(op=="path.recordPass"||op=="path.recordStop") {
+    else if(op=="path.recordPass"||op=="path.recordStop"||op=="path.recordClear") {
         if(proc.isRoomLoadPending())return error(requestId,{"notReady","A room is loading",""});
-        proc.recordPathPass(op=="path.recordStop");r=ok(requestId,"accepted",{},false);
+        if(op=="path.recordClear")proc.clearPathRecording();
+        else proc.recordPathPass(op=="path.recordStop");
+        r=ok(requestId,"accepted",{},false);
     }
     else if(op=="path.bake"||op=="path.bakeCancel"||op=="path.bakeClear") {
         // Worker actions are not document edits: no revision, transaction or undo entry.

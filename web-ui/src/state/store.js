@@ -3,7 +3,7 @@ function freeze(value) { if (value && typeof value === 'object' && !Object.isFro
 export function createStore(bridge) {
   const listeners = new Set(), sessionId = `web-${Date.now()}-${Math.random().toString(36).slice(2)}`, transactions = new Map();
   let state = null, serial = 0, queue = Promise.resolve(), ready = false, epoch = 0, queued = 0;
-  let telemetry = {}, error = null;
+  let telemetry = {}, error = null, cornerJoinResult = null;
   const view = { page: 'main', tab: 'decay', projection: 'plan', selection: [], energy: false, rays: false, tool: 'move', snap: true, autoLink: true, bands: [true, true, true, true, true, true, true] };
   const notify = reason => listeners.forEach(fn => fn({ state, telemetry, error, ready, view, reason }));
   let resyncPending = false;
@@ -17,6 +17,7 @@ export function createStore(bridge) {
     const p = message.payload;
     if (message.kind === 'snapshot') {
       const first = state === null;
+      if (state?.loadSerial !== p.loadSerial) cornerJoinResult = null;
       state = freeze(clone(p)); ready = true;
       if (first && p.preferences?.sessionViewState) Object.assign(view, clone(p.preferences.sessionViewState));
       notify('snapshot');
@@ -69,6 +70,16 @@ export function createStore(bridge) {
     mode: bridge.mode,
     get state() { return state; }, get ready() { return ready; }, get view() { return view; }, get telemetry() { return telemetry; }, get error() { return error; },
     get commandSlots() { return 256 - queued; },
+    cornerJoinTolerance: .05,
+    get cornerJoinResult() { return cornerJoinResult; },
+    async joinCorners() {
+      const loadSerial = state.loadSerial;
+      const reply = await store.command({ op: 'scene.joinCorners', toleranceM: store.cornerJoinTolerance });
+      if (reply?.kind === 'ack' && reply.payload.details && loadSerial === state.loadSerial) {
+        cornerJoinResult = reply.payload.details;
+        notify('view');
+      }
+    },
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     async start() { await bridge.send({ schemaVersion: 1, sessionId, kind: 'hello', payload: { supportedVersions: [1], client: 'verb-room-t2', ready: true } }); await store.command({ op: 'telemetry.subscribe', topics: ['meters', 'tail', 'status', 'analysis'] }); if (bridge.mode === 'juce') await store.command({op:'catalogs.list'}); },
     command(payload, transactionId) {

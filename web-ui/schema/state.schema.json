@@ -545,6 +545,16 @@
           "minimum": 0,
           "maximum": 1
         },
+        "ambisonicsNormalization": {
+          "type": "integer",
+          "enum": [0, 1, 2],
+          "default": 0
+        },
+        "ambisonicsLevelDb": {
+          "type": "integer",
+          "enum": [0, -3, -6],
+          "default": 0
+        },
         "micPattern": {
           "type": "integer",
           "minimum": 0,

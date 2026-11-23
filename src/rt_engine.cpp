@@ -4675,16 +4675,27 @@ bool Engine::copyTailForOffline(const Engine& reference) {
 namespace verb {
 void Engine::armRecordedPass(){p_->passCommand.store(1,std::memory_order_release);}
 void Engine::stopRecordedPass(){p_->passCommand.store(2,std::memory_order_release);}
+void Engine::clearRecordedPass() {
+    std::lock_guard<std::mutex> lock(p_->bakeRequestMx);
+    p_->passCommand.store(0,std::memory_order_release);
+    p_->passClearPending.store(true,std::memory_order_release);
+    p_->recordedPaths.clear();
+    auto& cache=p_->bakeCache;
+    cache.erase(std::remove_if(cache.begin(),cache.end(),[](const auto& entry){return entry.table.path.recorded;}),cache.end());
+    p_->applyBakedPathsLocked(p_->declaredPaths);
+}
 void Engine::recordPassAudio(bool playing) noexcept {p_->recordPassAudio(playing);}
 Engine::RecordedPassStats Engine::recordedPassStats() const noexcept {
+    if(p_->passClearPending.load(std::memory_order_acquire))return {};
     RecordedPassStats s;s.state=p_->passState.load(std::memory_order_acquire);s.samples=p_->passCount.load(std::memory_order_acquire);s.offPass=p_->passOff.load(std::memory_order_relaxed);return s;
 }
 Engine::RecordedPassData Engine::exportRecordedPass() const {
     RecordedPassData out;
-    if(p_->passState.load(std::memory_order_acquire)!=3)return out;
+    if(p_->passClearPending.load(std::memory_order_acquire)||p_->passState.load(std::memory_order_acquire)!=3)return out;
     int ready=3;
     if(!p_->passState.compare_exchange_strong(ready,4,std::memory_order_acq_rel))return out;
     struct Release { std::atomic<int>& state;~Release(){state.store(3,std::memory_order_release);} } release{p_->passState};
+    if(p_->passClearPending.load(std::memory_order_acquire))return out;
     const size_t n=(size_t)p_->passCount.load(std::memory_order_acquire);
     const size_t objects=(size_t)p_->S+1,total=n*objects*4;
     if(n<2||n>Impl::passCap||p_->passBuffer.size()<total)return out;
@@ -4879,6 +4890,15 @@ Engine::BakeStats Engine::bakeStats() const {
     BakeStats s;
     std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
     s.state=p_->bakeState.load();s.waitReason=p_->bakeWaitReason.load();s.workers=p_->bakeWorkers.load();
+    if(p_->bakeEnabled.load()&&p_->cfg.motionMode>=2&&!p_->bakePaths.empty()){
+        const auto& path=p_->bakePaths.front();
+        const int passState=p_->passState.load(std::memory_order_acquire);
+        if(!path.recorded)s.source=BakeStats::Source::Drawn;
+        else if((passState==3||passState==4)&&p_->passCount.load(std::memory_order_acquire)>=2
+                &&path.recording==p_->passGeneration.load(std::memory_order_acquire)
+                &&p_->passCommand.load(std::memory_order_acquire)!=1&&!p_->passClearPending.load(std::memory_order_acquire))
+            s.source=BakeStats::Source::Recorded;
+    }
     s.done=p_->bakeDone.load();s.total=p_->bakeTotal.load();s.stations=p_->bakeStations.load();
     s.resets=p_->bakeResets.load();s.cancelled=p_->bakeCancelled.load();s.percent=p_->bakePercent.load();
     const auto action=p_->bakeAction.load();

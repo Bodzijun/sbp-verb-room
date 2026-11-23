@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include "AmbisonicsOutput.h"
 #include <functional>
 
 #include <algorithm>
@@ -274,6 +275,10 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     Bundle& b = *bundle;
     verb::Engine& e = *b.engine;
     const int NS = (int)b.cfg.size(), P = (int)b.points.size(), R = b.R;
+    const int format = b.ambisonic ? ambisonicsFormat.load(std::memory_order_relaxed) : 0;
+    const verbp::AmbisonicsOutput ambisonics(format);
+    const bool reorder = ambisonics.reorders();
+    const int ambisonicChannels = b.ambisonic ? std::min(R, nOut) : 0;
     const double H = sceneHeight.load();
     const double zTop = ceilOpen.load() ? 30.0 : H;  // x/y are free; z stays between floor and ceiling
 
@@ -584,14 +589,16 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             duckReduction.store(e.duckReductionDb(),std::memory_order_relaxed);
         }
         for (int ch = 0; ch < nOut; ++ch) {
-            float* d = buf.getWritePointer(ch) + done;
+            float* raw = buf.getWritePointer(ch) + done;
+            // Mix in ACN first, reusing the engine's channel buffers for FuMa.
+            float* d = reorder && ch < R ? b.out[(size_t)ch].data() : raw;
             bool mapped = false;
             float gate0 = 0.f, gate1 = 0.f;
             for (int s = 0; s < NS; ++s) if (ch >= b.cfg[s].firstIn && ch < b.cfg[s].firstIn + b.cfg[s].effectiveChannels()) {
                 mapped = true; gate0 = std::max(gate0, prevSourceGate[s]); gate1 = std::max(gate1, sourceGate[s]);
             }
             if (!mapped) { gate0 = prevAnySourceSolo ? 0.f : 1.f; gate1 = anySourceSolo ? 0.f : 1.f; }
-            const bool hasDry = ch < nIn && (dryG1 > 0.f || dryG0 > 0.f);  // d still holds this channel's input here
+            const bool hasDry = ch < nIn && (dryG1 > 0.f || dryG0 > 0.f);
             auto wetAt = [&](int i) { return wetG0 + (wetG1 - wetG0) * (float)(done + i + 1) / (float)n; };
             auto dryAt = [&](int i) {
                 const float t = (float)(done + i + 1) / (float)n;
@@ -601,24 +608,32 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 const float* s = b.out[(size_t)ch].data();
                 if (ch == b.lfeOut) {
                     for (int i = 0; i < m; ++i) {
-                        const float dry = hasDry ? (std::fabs(d[i]) < 1e6f ? d[i] : 0.f) * dryAt(i) : 0.f;
+                        const float dry = hasDry ? (std::fabs(raw[i]) < 1e6f ? raw[i] : 0.f) * dryAt(i) : 0.f;
                         d[i] = (s[i] + lfeSoloGain.getNextValue() * b.lfe[(size_t)i]) * outGain * wetAt(i) + dry;
                     }
                 } else {
                     for (int i = 0; i < m; ++i) {
-                        const float dry = hasDry ? (std::fabs(d[i]) < 1e6f ? d[i] : 0.f) * dryAt(i) : 0.f;
+                        const float dry = hasDry ? (std::fabs(raw[i]) < 1e6f ? raw[i] : 0.f) * dryAt(i) : 0.f;
                         d[i] = s[i] * outGain * wetAt(i) + dry;
                     }
                 }
                 for (int i = 0; i < m; ++i) if (!(std::fabs(d[i]) < 1e6f)) d[i] = 0.f;  // last line of defence: never hand NaN/Inf to the host
             } else {
                 for (int i = 0; i < m; ++i) {  // beyond the layout: silent, except for the dry signal
-                    const float dry = hasDry ? (std::fabs(d[i]) < 1e6f ? d[i] : 0.f) * dryAt(i) : 0.f;
+                    const float dry = hasDry ? (std::fabs(raw[i]) < 1e6f ? raw[i] : 0.f) * dryAt(i) : 0.f;
                     d[i] = dry;
                 }
             }
         }
+        if (reorder) for (int ch = 0; ch < ambisonicChannels; ++ch) {
+            auto* destination = buf.getWritePointer(ch) + done;
+            const int source = ambisonics.acn(ch);
+            if (source < ambisonicChannels) juce::FloatVectorOperations::copy(destination, b.out[(size_t)source].data(), m);
+            else juce::FloatVectorOperations::clear(destination, m); // omitted ACN component on a short host bus
+        }
         for(int ch=0;ch<nOut;++ch) juce::FloatVectorOperations::multiply(buf.getWritePointer(ch)+done,makeupGain,m);
+        if (format != 0) for (int ch = 0; ch < ambisonicChannels; ++ch)
+            juce::FloatVectorOperations::multiply(buf.getWritePointer(ch) + done, ambisonics.gain(ch), m);
         done += m;
     }
     prevWet = wetG1;
@@ -707,6 +722,8 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
         out.setProperty("layout", outCfg.layout, nullptr);
         out.setProperty("radius", outCfg.radius, nullptr);
         out.setProperty("micPattern", outCfg.micPattern, nullptr);
+        if (outCfg.ambisonicsNormalization != 0) out.setProperty("ambisonicsNormalization", outCfg.ambisonicsNormalization, nullptr);
+        if (outCfg.ambisonicsLevelDb != 0) out.setProperty("ambisonicsLevelDb", outCfg.ambisonicsLevelDb, nullptr);
         st.appendChild(out, nullptr);
     }
     st.removeChild(st.getChildWithName("MovementPaths"),nullptr);
@@ -882,6 +899,9 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
         outCfg.layout = std::min(std::max(outCfg.layout, -1), (int)verb::Layout::AmbiX3);  // an unknown layout id must not reach the engine
         outCfg.radius = verb::clampTo(out.isValid() ? (double)out.getProperty("radius", 0.1) : 0.1, 0.0, 1.0, 0.1);
         outCfg.micPattern = std::min(std::max(out.isValid() ? (int)out.getProperty("micPattern", 0) : 0, 0), (int)verb::MicPattern::HumanEars);
+        outCfg.ambisonicsNormalization = out.isValid() ? (int)out.getProperty("ambisonicsNormalization", 0) : 0;
+        outCfg.ambisonicsLevelDb = out.isValid() ? (int)out.getProperty("ambisonicsLevelDb", 0) : 0;
+        publishAmbisonicsFormat();
         tailSettings.rays = std::min(std::max((int)st.getProperty("tailRays", 48000), 8000), 384000);
         tailSettings.adaptive = (bool)st.getProperty("adaptiveTail", false);
         syncPatterns();
@@ -1040,13 +1060,14 @@ void VerbProcessor::queueScene(const juce::String& text, const juce::String& nam
 void VerbProcessor::rebuild() {
     std::shared_ptr<verb::Engine> eng;
     { juce::SpinLock::ScopedLockType el(engineLock); if (bundle) eng = bundle->engine; }
-    verb::Engine::RecordedPassData rp;
-    if (eng) rp = eng->exportRecordedPass();
     juce::String t, n;
     uint64_t edits;
     {
         juce::ScopedLock l(dispLock);
-        if (!roomLoadPendingLocked() && rp.samples >= 2) savedRecordedPass = std::move(rp);
+        if (!roomLoadPendingLocked() && eng) {
+            auto pass = eng->exportRecordedPass();
+            if (pass.samples >= 2) savedRecordedPass = std::move(pass);
+        }
         t = sceneText;
         n = sceneName;
         edits = displayEdits;
@@ -1105,7 +1126,7 @@ bool VerbProcessor::editScene(const std::function<void(verb::Scene&)>& fn) {
         tmp.height = std::min(std::max(tmp.height, 1.0), 30.0);
         display = tmp;
         ++displayEdits;
-        sceneText = verb::serializeScene(display);  // the project state keeps the edited room
+        sceneText = verb::serializeScene(display, 6, std::numeric_limits<double>::max_digits10);
         updateBounds(display);
         ++sceneSerial; ++geometryEpoch; ++structRevision;
     }
@@ -1121,7 +1142,7 @@ bool VerbProcessor::editSceneMetadata(const std::function<void(verb::Scene&)>& f
         if (roomLoadPendingLocked()) return false;  // see editScene
         fn(display);
         ++displayEdits;
-        sceneText = verb::serializeScene(display);
+        sceneText = verb::serializeScene(display, 6, std::numeric_limits<double>::max_digits10);
         ++sceneSerial; ++structRevision;
     }
     updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
@@ -1375,16 +1396,30 @@ verbp::OutputCfg VerbProcessor::getOutputCfg() const {
     return outCfg;
 }
 
+void VerbProcessor::publishAmbisonicsFormat() {
+    auto& normalization = outCfg.ambisonicsNormalization;
+    if (normalization < 0 || normalization > 2) normalization = 0;
+    auto& levelDb = outCfg.ambisonicsLevelDb;
+    if (levelDb != -3 && levelDb != -6) levelDb = 0;
+    ambisonicsFormat.store(verbp::AmbisonicsOutput::encode(normalization, levelDb), std::memory_order_relaxed);
+}
+
 void VerbProcessor::setOutputCfg(const verbp::OutputCfg& o) {
+    bool rebuildReceivers;
     {
         juce::ScopedLock l(dispLock);
+        const auto previous = outCfg;
         outCfg = o;
         outCfg.layout = std::min(std::max(outCfg.layout, -1), (int)verb::Layout::AmbiX3);
         outCfg.radius = verb::clampTo(outCfg.radius, 0.0, 1.0, 0.1);
         outCfg.micPattern = std::min(std::max(outCfg.micPattern, 0), (int)verb::MicPattern::HumanEars);
-        ++sceneSerial; ++structRevision;
+        publishAmbisonicsFormat();
+        if (outCfg == previous) return;
+        rebuildReceivers = !outCfg.sameReceivers(previous);
+        if (rebuildReceivers) ++sceneSerial;
+        ++structRevision;
     }
-    rebuild();
+    if (rebuildReceivers) rebuild();
 }
 
 verbp::TailSettings VerbProcessor::getTailSettings() const {
@@ -1550,6 +1585,27 @@ void VerbProcessor::bakeDiagnosticEditorOpened(bool opened) noexcept {
 }
 void VerbProcessor::cancelPathBake(){webBakeStart=-2;webBakeCancel=true;wake.signal();}
 void VerbProcessor::clearPathBake(){webBakeStart=-2;webBakeClear=true;wake.signal();}
+void VerbProcessor::recordPathPass(bool stop) {
+    std::shared_ptr<verb::Engine> engine;
+    { juce::SpinLock::ScopedLockType lock(engineLock); if (bundle) engine = bundle->engine; }
+    if (engine) {
+        if (stop) engine->stopRecordedPass();
+        else engine->armRecordedPass();
+    }
+    wake.signal();
+}
+void VerbProcessor::clearPathRecording() {
+    std::shared_ptr<verb::Engine> engine;
+    { juce::SpinLock::ScopedLockType lock(engineLock); if (bundle) engine = bundle->engine; }
+    if (engine) engine->clearRecordedPass();
+    {
+        juce::ScopedLock lock(dispLock);
+        savedRecordedPass = {};
+        savedBakeTables.erase(std::remove_if(savedBakeTables.begin(), savedBakeTables.end(),
+            [](const auto& table) { return table.path.recorded; }), savedBakeTables.end());
+    }
+    wake.signal();
+}
 juce::var VerbProcessor::pathBakeStatus() const {juce::ScopedLock lock(webBakeLock);return webBakeStatus;}
 void VerbProcessor::publishWebDiagnostics() {
     if (!bundle) { webTailCurrent = false; return; }
@@ -1757,9 +1813,6 @@ void VerbProcessor::publishWebDiagnostics() {
         else for(size_t j=0;j<bundle->points.size();++j)
             if(bundle->points[j].source==o)appendPath(draw,(int)j,eg,o,ptOff[j][0].load(),ptOff[j][1].load(),ptOff[j][2].load(),true);
     }
-    const int passAction=webPassAction.exchange(0);
-    if(passAction==1)bundle->engine->armRecordedPass();
-    if(passAction==2)bundle->engine->stopRecordedPass();
     bundle->engine->setBakeForcedBlock(orientConflict);
     std::vector<verb::BakedYawMatch> recordedYawMatch;
     recordedYawMatch.reserve(bundle->points.size()+1);
@@ -1799,8 +1852,11 @@ void VerbProcessor::publishWebDiagnostics() {
     if(bakeQueued){bake.state=verb::Engine::BakeState::Baking;bake.waitReason=2;bake.percent=0;bake.done=0;bake.total=0;}
     webBakePercent=bake.percent;
     const auto pass=bundle->engine->recordedPassStats();
-    const bool recordedActive=(!bake.groups.empty()&&bake.groups[0].group==2000)||(pass.samples>=2&&(paths.empty()||listenerActive));
-    if(pass.state==0&&bake.groups.empty())webRecordedTouched=false;
+    using BakeSource = verb::Engine::BakeStats::Source;
+    const bool usesRecording=bake.source==BakeSource::Recorded;
+    const bool drawnActive=bake.source==BakeSource::Drawn;
+    const bool recordedActive=!bake.groups.empty()&&bake.groups.front().group==2000;
+    if(pass.state==0)webRecordedTouched=false;
     if((bake.state==verb::Engine::BakeState::Baked||bake.state==verb::Engine::BakeState::Approximate)&&!bake.groups.empty()&&bake.groups[0].group==2000)webRecordedTouched=true;
     bool anyTouched=recordedActive&&webRecordedTouched;
     for(int o:activeObjects)anyTouched|=webBakeTouched[(size_t)o];
@@ -1896,9 +1952,21 @@ void VerbProcessor::publishWebDiagnostics() {
 
     auto* status=new juce::DynamicObject();status->setProperty("state",bakeStateText);status->setProperty("object",object);status->setProperty("name",name);status->setProperty("percent",bake.percent);status->setProperty("reason",reason);status->setProperty("done",bake.done);status->setProperty("total",bake.total);status->setProperty("workers",bake.workers);status->setProperty("paths",perPathArr);
     status->setProperty("passState",pass.state);status->setProperty("passSamples",pass.samples);
-    if(pass.offPass&&(bake.state==verb::Engine::BakeState::Baked||bake.state==verb::Engine::BakeState::Approximate)){
-        status->setProperty("reason","Off recorded pass - motion estimator");
-        for(auto& item:perPathArr)if(auto* o=item.getDynamicObject())o->setProperty("reason","Off recorded pass - motion estimator");
+    status->setProperty("bakeSource",usesRecording?"recorded":drawnActive?"drawn":"none");
+    if(drawnActive&&bake.groups.size()==1&&!activeObjects.empty()){
+        const int group=rawPaths[(size_t)activeObjects.front()].group;
+        if(group>=0&&bake.groups.front().group==engGroupOf(activeObjects.front()))
+            status->setProperty("bakeSourceGroup",group+1);
+    }
+    if(drawnActive&&(pass.state==3||pass.state==4)&&pass.samples>=2)
+        status->setProperty("recordingNote","Recording kept, not used: drawn paths are baked instead. Press Discard if you do not need it.");
+    if(usesRecording&&pass.offPass&&(bake.state==verb::Engine::BakeState::Baked||bake.state==verb::Engine::BakeState::Approximate)){
+        const juce::String warning="Live motion is outside the baked recording - estimating the tail";
+        status->setProperty("reason",reason.isEmpty()?warning:reason+"; "+warning);
+        for(auto& item:perPathArr)if(auto* o=item.getDynamicObject()){
+            const auto previous=o->getProperty("reason").toString();
+            o->setProperty("reason",previous.isEmpty()?warning:previous+"; "+warning);
+        }
     }
     {juce::ScopedLock lock(webBakeLock);webBakeStatus=juce::var(status);}
     if (bakeLogDispatchMs >= 0.) {
@@ -2110,7 +2178,7 @@ void VerbProcessor::run() {
             if (!verb::isAmbisonicLayout(lay))
                 verb::applyMicPattern(es.receivers, (verb::MicPattern)ocfg.micPattern, ocfg.radius);
             if ((int)es.receivers.size() > verbp::kMaxReceivers) es.receivers.resize(verbp::kMaxReceivers);
-            // channels the track cannot carry are not rendered (no CPU for sound nobody hears)
+            // Channels the track cannot carry are not rendered.
             if ((int)es.receivers.size() > hostCh) es.receivers.resize((size_t)hostCh);
             es.hasListener = true;
             es.listenerPos = center;
@@ -2150,6 +2218,7 @@ void VerbProcessor::run() {
                 ++nb->pointCount[(size_t)points[p].source];
             }
             nb->R = nb->engine->numReceivers();
+            nb->ambisonic = verb::isAmbisonicLayout(lay);
             nb->maxBlock = std::max(maxBlock, 128);
             nb->in.assign(points.size(), std::vector<float>((size_t)nb->maxBlock, 0.f));
             nb->out.assign((size_t)nb->R, std::vector<float>((size_t)nb->maxBlock, 0.f));
@@ -2219,7 +2288,7 @@ void VerbProcessor::run() {
             nb.reset();  // old engine destroyed here, off the audio thread
             builtSr = r.sr;
             numPts = (int)points.size();
-            builtOutCh = (int)es.receivers.size();
+            builtOutCh = std::min(hostCh, (int)es.receivers.size());
             builtLayout = (int)lay;
             builtForHostCh = hostCh;
             {
@@ -2406,7 +2475,7 @@ juce::String VerbProcessor::getRoomText() const {
     sc.hasListener = true;
     sc.listenerPos = {pv[verbp::kListener][0]->load(), pv[verbp::kListener][1]->load(), pv[verbp::kListener][2]->load()};
     sc.listenerYaw = pv[verbp::kListener][3]->load();
-    return juce::String(verb::serializeScene(sc));
+    return juce::String(verb::serializeScene(sc, 6, std::numeric_limits<double>::max_digits10));
 }
 
 juce::String VerbProcessor::getRoomPresetText() {
@@ -2576,6 +2645,11 @@ void VerbProcessor::runExport(juce::File dir) {
         auto& eng=*offline.bundle->engine;
         if(!eng.copyTailForOffline(*liveEngine))throw std::runtime_error("room topology changed during export; retry");
         const int R=eng.numReceivers();
+        const int exportedChannels = std::min(R, hostCh);
+        const auto output = offline.getOutputCfg();
+        const bool ambisonic = offline.bundle->ambisonic;
+        const int format = ambisonic ? offline.ambisonicsFormat.load(std::memory_order_relaxed) : 0;
+        const verbp::AmbisonicsOutput conversion(format);
         const size_t total=(size_t)std::ceil(eng.tailSeconds()*sr);
         std::vector<std::vector<float>> pointInput(points.size(),std::vector<float>(512));
         std::vector<const float*> ip;for(const auto& ch:pointInput)ip.push_back(ch.data());
@@ -2610,7 +2684,7 @@ void VerbProcessor::runExport(juce::File dir) {
             // The point IR is driven at the engine-point input (after an optional
             // channel sum); raw bypass goes to that point's corresponding host channel.
             const int rawChannel=c.firstIn+std::max(0,pm.channel);
-            if(enabled&&rawChannel<R&&!solo)out[(size_t)rawChannel][0]+=(float)dry;
+            if(enabled&&rawChannel<exportedChannels&&!solo)out[(size_t)rawChannel][0]+=(float)dry;
             juce::String fname = base + "_" + juce::File::createLegalFileName(juce::String(c.name));
             if (pm.channel >= 0 && c.effectiveChannels() > 1) fname += "_ch" + juce::String(pm.channel + 1);
             for (int k = 2; used.contains(fname); ++k) fname = fname.upToLastOccurrenceOf("_#", false, false) + "_#" + juce::String(k);
@@ -2620,16 +2694,29 @@ void VerbProcessor::runExport(juce::File dir) {
             std::unique_ptr<juce::FileOutputStream> fos(f.createOutputStream());
             if (!fos) throw std::runtime_error("cannot write " + f.getFullPathName().toStdString());
             juce::WavAudioFormat wav;
-            std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(fos.get(), sr, (unsigned)R, 32, {}, 0));
+            std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(fos.get(), sr, (unsigned)exportedChannels, 32, {}, 0));
             if (!w) throw std::runtime_error("cannot create the WAV writer");
             fos.release();  // the writer owns the stream now
-            juce::AudioBuffer<float> ab(R, (int)total);
-            for (int r = 0; r < R; ++r) ab.copyFrom(r, 0, out[(size_t)r].data(), (int)total);
+            juce::AudioBuffer<float> ab(exportedChannels, (int)total);
+            for (int r = 0; r < exportedChannels; ++r) {
+                const int source = conversion.acn(r);
+                if (source >= R) ab.clear(r, 0, (int)total);
+                else {
+                    ab.copyFrom(r, 0, out[(size_t)source].data(), (int)total);
+                    if (format != 0) ab.applyGain(r, 0, (int)total, conversion.gain(r));
+                }
+            }
             w->writeFromAudioSampleBuffer(ab, 0, (int)total);
             w.reset();
             ++written;
         }
-        dir.getChildFile(base + "_room.txt").replaceWithText(offline.getRoomText());
+        auto description = offline.getRoomText();
+        if (ambisonic) {
+            description += "\n# Ambisonics normalization: ";
+            description += verbp::ambisonicsNormalizationNames[(size_t)output.ambisonicsNormalization];
+            description += "\n# Ambisonics level: " + juce::String(output.ambisonicsLevelDb) + " dB\n";
+        }
+        dir.getChildFile(base + "_room.txt").replaceWithText(description);
         setMsg("Exported " + juce::String(written) + " impulse response file(s) and the room to " + dir.getFullPathName());
         exportState = 2;
     } catch (const std::exception& ex) {

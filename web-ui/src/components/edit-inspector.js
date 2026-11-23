@@ -1,6 +1,7 @@
 import { element, button, note, scrollArea } from './dom.js';
 import { sourceParts, listenerParts, surfaceParts, scenePartsRoom, heading } from './inspector.js';
 import { sourceStripColour } from '../viewport/colour.js';
+import { cornerRepair } from '../pages/edit-room.js';
 // Edit-page inspector: two tabs (Selected object / Scene) with accordion sections.
 // Open/closed state and the active tab live in the session view state; only the
 // first section of a tab is open until the user changes it.
@@ -25,7 +26,7 @@ export function editInspector(ctx) {
   const body = [];
   if (tab === 'scene') {
     const p = scenePartsRoom(ctx);
-    body.push(...accordion(store, 'scene', [{ key: 'room', title: 'Room', nodes: p.room }, { key: 'air', title: 'Air', hint: 'temperature · humidity', nodes: p.air }, { key: 'clutter', title: 'Clutter', nodes: p.clutter }, { key: 'rough', title: 'Roughness', nodes: p.roughness }, { key: 'scale', title: 'Scale room', hint: 'one-time command', nodes: p.scale }]));
+    body.push(...accordion(store, 'scene', [{ key: 'room', title: 'Room', nodes: [...p.room, ...cornerRepair(ctx)] }, { key: 'air', title: 'Air', hint: 'temperature · humidity', nodes: p.air }, { key: 'clutter', title: 'Clutter', nodes: p.clutter }, { key: 'rough', title: 'Roughness', nodes: p.roughness }, { key: 'scale', title: 'Scale room', hint: 'one-time command', nodes: p.scale }]));
   } else if (ref?.kind === 'source') {
     const p = sourceParts(ctx, ref.index);
     if (p) body.push(element('div', { className: 'obj-title' }, [element('i', { className: 'source-color-dot', style: `background:${sourceStripColour(p.source, ref.index)}`, 'aria-hidden': 'true' }), `Source ${String(ref.index + 1).padStart(2, '0')} · ${p.source.name}`]), ...accordion(store, 'source', [{ key: 'pos', title: 'Position & level', nodes: p.position }, { key: 'route', title: 'Routing & channels', nodes: [...p.identity, ...p.routing, ...p.level] }, { key: 'points', title: 'Channel points', nodes: p.points }]));

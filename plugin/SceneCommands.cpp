@@ -283,7 +283,7 @@ std::vector<KeyChange> diffModels(const Model& a, const Model& b) {
         for (size_t i = 0; i < a.sources.size(); ++i)
             if (!eqSource(a.sources[i], b.sources[i])) { Key k; k.type = KeyType::Source; k.index = (int)i; add(k, a.sources[i], b.sources[i], true); }
     }
-    if (a.output.layout != b.output.layout || a.output.radius != b.output.radius || a.output.micPattern != b.output.micPattern) {
+    if (!(a.output == b.output)) {
         Key k; k.type = KeyType::Output; add(k, a.output, b.output, true);
     }
     if (a.tail.rays != b.tail.rays || a.tail.adaptive != b.tail.adaptive) { Key k; k.type = KeyType::Tail; add(k, a.tail, b.tail, true); }
@@ -355,7 +355,7 @@ bool snapsEqual(const Snap& a, const Snap& b) {
         for (size_t i = 0; i < x->size(); ++i) if (!eqSource((*x)[i], y[i])) return false;
         return true;
     }
-    if (auto* x = std::get_if<OutputCfg>(&a)) { const auto& y = std::get<OutputCfg>(b); return x->layout == y.layout && x->radius == y.radius && x->micPattern == y.micPattern; }
+    if (auto* x = std::get_if<OutputCfg>(&a)) { const auto& y = std::get<OutputCfg>(b); return *x == y; }
     if (auto* x = std::get_if<TailSettings>(&a)) return x->rays == std::get<TailSettings>(b).rays && x->adaptive == std::get<TailSettings>(b).adaptive;
     if (auto* x = std::get_if<MovementPath>(&a)) return *x==std::get<MovementPath>(b);
     if (auto* x = std::get_if<float>(&a)) return std::fabs(*x - std::get<float>(b)) < 1e-4f;  // parameters are quantised to 0.001
@@ -619,6 +619,36 @@ std::string refsKey(const juce::var& p) { return juce::JSON::toString(p.getPrope
 
 // ============================================================================================ surface commands
 constexpr double wallCornerTolerance = 1e-4;
+using CornerXY = std::pair<double, double>;
+CornerXY wallEnd(const verb::Wall& wall, int vertex) {
+    return vertex == 0 ? CornerXY{wall.ax, wall.ay} : CornerXY{wall.bx, wall.by};
+}
+void setWallEnd(verb::Wall& wall, int vertex, CornerXY xy) {
+    (vertex == 0 ? wall.ax : wall.bx) = xy.first;
+    (vertex == 0 ? wall.ay : wall.by) = xy.second;
+}
+double cornerDistance(CornerXY a, CornerXY b) {
+    return std::hypot(a.first - b.first, a.second - b.second);
+}
+struct CornerRef { SurfaceRef ref; int vertex; CornerXY xy; };
+
+std::optional<CornerRef> parseCorner(Args& a, const char* field, const verb::Scene& scene) {
+    if (!a.has(field)) return {};
+    const auto value = a.get(field);
+    auto ref = parseRef(a, value, scene, field);
+    if (!ref) return {};
+    Args vertexArgs(value);
+    const int vertex = vertexArgs.integer("vertex", 0, 63);
+    if (!vertexArgs.bad()) {
+        if (ref->kind == 1 && vertex < 2) return CornerRef{*ref, vertex, wallEnd(scene.walls[(size_t)ref->index], vertex)};
+        if (ref->kind == 4 || ref->kind == 5) {
+            const auto& zone = (ref->kind == 4 ? scene.floorZones : scene.ceilZones)[(size_t)ref->index];
+            if ((size_t)vertex < zone.poly.size()) return CornerRef{*ref, vertex, zone.poly[(size_t)vertex]};
+        }
+    }
+    a.err("invalid", "Expected an existing wall or zone vertex", field);
+    return {};
+}
 bool linkableWall(const verb::Scene& scene, const verb::Wall& wall) {
     return scene.layerModes[0] == 0 && !wall.editor.hidden && !wall.editor.locked;
 }
@@ -629,12 +659,28 @@ Fail opTranslate(const juce::var& p, Model& m, const Ctx& c) {
     auto d = a.vecProp("deltaM", 2, 3, 1e5);
     const bool groups = a.optBool("includeGroups").value_or(true);
     const bool autoLink = a.optBool("autoLink").value_or(false);
+    const auto& start = c.start.scene;
+    const auto snapFrom = parseCorner(a, "snapFrom", start);
+    const auto snapTarget = parseCorner(a, "snapTarget", start);
     if (a.bad()) return a.f;
     if (auto f = checkLocked(m.scene, refs, groups); f.bad()) return f;
     const auto expanded = groups ? expandSurfaceGroups(m.scene, refs) : refs;
-    const auto& start = c.start.scene;
+    if (snapFrom || snapTarget) {
+        if (!snapFrom || !snapTarget || snapFrom->ref.kind != 1 ||
+            std::find(expanded.begin(), expanded.end(), snapFrom->ref) == expanded.end() ||
+            std::find(expanded.begin(), expanded.end(), snapTarget->ref) != expanded.end())
+            return {"invalid", "Snap needs a moved wall end and a stationary corner", "snapTarget"};
+        const CornerXY delta{snapTarget->xy.first - snapFrom->xy.first, snapTarget->xy.second - snapFrom->xy.second};
+        if (cornerDistance(delta, {d[0], d[1]}) > 1e-9)
+            return {"invalid", "Snap corners do not match the translation", "deltaM"};
+        d[0] = delta.first;
+        d[1] = delta.second;
+    }
     translateSurfaces(m.scene, start, expanded, d[0], d[1], d.size() > 2 ? d[2] : 0.0);
-    if (!autoLink || (d[0] == 0 && d[1] == 0)) return {};
+    if (!autoLink && !snapFrom) return {};
+    const auto exactSnap = [&](const verb::Wall& from, verb::Wall& wall, int vertex) {
+        if (snapFrom && wallEnd(from, vertex) == snapFrom->xy) setWallEnd(wall, vertex, snapTarget->xy);
+    };
 
     std::vector<bool> moved(start.walls.size());
     std::vector<std::pair<double, double>> corners;
@@ -644,8 +690,15 @@ Fail opTranslate(const juce::var& p, Model& m, const Ctx& c) {
         moved[(size_t)r.index] = true;
         corners.emplace_back(wall.ax, wall.ay);
         corners.emplace_back(wall.bx, wall.by);
+        if (snapFrom) {
+            auto& after = m.scene.walls[(size_t)r.index];
+            exactSnap(wall, after, 0);
+            exactSnap(wall, after, 1);
+            if (cornerDistance(wallEnd(after, 0), wallEnd(after, 1)) < wallCornerTolerance)
+                return {"invalid", "the move would make a wall of zero length", "deltaM"};
+        }
     }
-    if (corners.empty()) return {};
+    if (!autoLink || corners.empty() || (d[0] == 0 && d[1] == 0)) return {};
     const auto linked = [&](double x, double y) {
         return std::any_of(corners.begin(), corners.end(), [&](const auto& corner) {
             return std::hypot(x - corner.first, y - corner.second) <= wallCornerTolerance;
@@ -657,15 +710,18 @@ Fail opTranslate(const juce::var& p, Model& m, const Ctx& c) {
         if (moved[i] || !linkableWall(start, from) || !linkableWall(m.scene, wall)) continue;
         const bool moveA = linked(from.ax, from.ay), moveB = linked(from.bx, from.by);
         if (!moveA && !moveB) continue;
-        if (moveA) { wall.ax = from.ax + d[0]; wall.ay = from.ay + d[1]; }
-        if (moveB) { wall.bx = from.bx + d[0]; wall.by = from.by + d[1]; }
+        if (snapTarget && snapTarget->ref.kind == 1 && (size_t)snapTarget->ref.index == i &&
+            (snapTarget->vertex == 0 ? moveA : moveB))
+            return {"invalid", "Snap target moves with auto-link", "snapTarget"};
+        if (moveA) { wall.ax = from.ax + d[0]; wall.ay = from.ay + d[1]; exactSnap(from, wall, 0); }
+        if (moveB) { wall.bx = from.bx + d[0]; wall.by = from.by + d[1]; exactSnap(from, wall, 1); }
         if (std::hypot(wall.bx - wall.ax, wall.by - wall.ay) < wallCornerTolerance)
             return {"invalid", "the move would make a wall of zero length", "deltaM"};
     }
     return {};
 }
 
-Fail opMoveVertex(const juce::var& p, Model& m, const Ctx&) {
+Fail opMoveVertex(const juce::var& p, Model& m, const Ctx& c) {
     Args a(p);
     SurfaceRef ref;
     if (!a.has("ref")) a.err("invalid", "ref is required", "ref");
@@ -673,7 +729,14 @@ Fail opMoveVertex(const juce::var& p, Model& m, const Ctx&) {
     const int vertex = a.integer("vertex", 0, 63);
     auto pos = a.vecProp("positionM", 2, 2, 1e5);
     const bool autoLink = a.optBool("autoLink").value_or(true);
+    const auto snapTarget = parseCorner(a, "snapTarget", c.start.scene);
     if (a.bad()) return a.f;
+    if (snapTarget) {
+        if (cornerDistance(snapTarget->xy, {pos[0], pos[1]}) > 1e-9 ||
+            (snapTarget->ref == ref && snapTarget->vertex == vertex))
+            return {"invalid", "Snap target must be another corner at the requested position", "snapTarget"};
+        pos = {snapTarget->xy.first, snapTarget->xy.second};
+    }
     verb::Scene& s = m.scene;
     if (ref.kind == 1) {
         if (vertex > 1) return {"invalid", "a wall has vertices 0 (a) and 1 (b)", "vertex"};
@@ -689,10 +752,15 @@ Fail opMoveVertex(const juce::var& p, Model& m, const Ctx&) {
                     if (!linkableWall(s, w)) continue;
                     if (std::hypot((e ? w.bx : w.ax) - cx, (e ? w.by : w.ay) - cy) < wallCornerTolerance) ends.push_back({(int)i, e});
                 }
+        if (snapTarget && snapTarget->ref.kind == 1 &&
+            std::find(ends.begin(), ends.end(), std::make_pair(snapTarget->ref.index, snapTarget->vertex)) != ends.end())
+            return {"invalid", "Snap target moves with auto-link", "snapTarget"};
         for (auto& pr : ends) {
             auto& w = s.walls[(size_t)pr.first];
-            (pr.second ? w.bx : w.ax) = pos[0];
-            (pr.second ? w.by : w.ay) = pos[1];
+            setWallEnd(w, pr.second, {pos[0], pos[1]});
+        }
+        for (auto& pr : ends) {
+            const auto& w = s.walls[(size_t)pr.first];
             if (std::hypot(w.bx - w.ax, w.by - w.ay) < wallCornerTolerance) return {"invalid", "the move would make a wall of zero length", "positionM"};
         }
     } else if (ref.kind == 4 || ref.kind == 5) {
@@ -704,6 +772,82 @@ Fail opMoveVertex(const juce::var& p, Model& m, const Ctx&) {
         if (wasSimple && selfIntersects(z.poly)) return {"invalid", "the move would make the zone outline cross itself", "positionM"};
     } else {
         return {"invalid", "only wall and zone vertices can be moved", "ref"};
+    }
+    return {};
+}
+
+Fail opJoinCorners(const juce::var& p, Model& m, const Ctx& c) {
+    Args a(p);
+    const double tolerance = a.optNum("toleranceM", .001, .25).value_or(.05);
+    auto& scene = m.scene;
+    std::vector<bool> included(scene.walls.size(), !a.has("refs"));
+    if (a.has("refs")) {
+        for (auto ref : parseRefs(a, "refs", scene, false)) {
+            if (ref.kind != 1) return {"invalid", "Join corners accepts wall references only", "refs"};
+            included[(size_t)ref.index] = true;
+        }
+    }
+    if (a.bad()) return a.f;
+
+    struct End { size_t wall; int vertex; CornerXY xy; };
+    std::vector<End> ends;
+    if (scene.layerModes[0] == 0)
+        for (size_t i = 0; i < scene.walls.size(); ++i)
+            if (included[i])
+                for (int v = 0; v < 2; ++v) ends.push_back({i, v, wallEnd(scene.walls[i], v)});
+
+    int joined = 0, skipped = 0;
+    const auto count = ends.size();
+    std::vector<bool> visited(count);
+    for (size_t seed = 0; seed < count; ++seed) {
+        if (visited[seed]) continue;
+        std::vector<size_t> cluster{seed};
+        visited[seed] = true;
+        bool nearMiss = false;
+        // Sewn ends travel with their cluster so that a repair cannot reopen that join.
+        for (size_t q = 0; q < cluster.size(); ++q) {
+            const auto& from = ends[cluster[q]];
+            for (size_t j = 0; j < count; ++j) {
+                if (from.wall == ends[j].wall) continue;
+                const double gap = cornerDistance(from.xy, ends[j].xy);
+                if (gap >= tolerance) continue;
+                nearMiss |= gap > wallCornerTolerance;
+                if (!visited[j]) { visited[j] = true; cluster.push_back(j); }
+            }
+        }
+        if (!nearMiss) continue;
+
+        auto anchor = ends[seed].xy;
+        std::optional<CornerXY> lockedAnchor;
+        bool conflict = false;
+        for (auto j : cluster) {
+            const auto& end = ends[j];
+            if (!scene.walls[end.wall].editor.locked) continue;
+            if (lockedAnchor && *lockedAnchor != end.xy) conflict = true;
+            else lockedAnchor = end.xy;
+        }
+        if (lockedAnchor) anchor = *lockedAnchor;
+        if (conflict || std::any_of(cluster.begin(), cluster.end(), [&](size_t j) {
+                return cornerDistance(anchor, ends[j].xy) > tolerance;
+            })) { ++skipped; continue; }
+
+        auto proposed = scene.walls;
+        for (auto j : cluster) {
+            const auto& end = ends[j];
+            if (!proposed[end.wall].editor.locked) setWallEnd(proposed[end.wall], end.vertex, anchor);
+        }
+        if (std::any_of(cluster.begin(), cluster.end(), [&](size_t j) {
+                const auto& wall = proposed[ends[j].wall];
+                return cornerDistance(wallEnd(wall, 0), wallEnd(wall, 1)) < wallCornerTolerance;
+            })) { ++skipped; continue; }
+        scene.walls = std::move(proposed);
+        ++joined;
+    }
+    if (c.details) {
+        auto* details = new juce::DynamicObject();
+        details->setProperty("joined", joined);
+        details->setProperty("skipped", skipped);
+        *c.details = juce::var(details);
     }
     return {};
 }
@@ -1312,9 +1456,14 @@ Fail opOutputSet(const juce::var& p, Model& m, const Ctx&) {
     auto layout = a.optInt("layout", -1, 11);
     auto radius = a.optNum("radiusM", 0, 1);
     auto mic = a.optInt("micPattern", 0, 7);
-    if (!a.bad() && !layout && !radius && !mic) a.err("invalid", "give layout, radiusM and/or micPattern", "layout");
+    auto normalization = a.optInt("ambisonicsNormalization", 0, 2);
+    auto levelDb = a.optInt("ambisonicsLevelDb", -6, 0);
+    if (levelDb && *levelDb % 3 != 0) a.err("invalid", "choose 0, -3 or -6 dB", "ambisonicsLevelDb");
+    if (!a.bad() && !layout && !radius && !mic && !normalization && !levelDb) a.err("invalid", "give at least one output setting", "layout");
     if (a.bad()) return a.f;
     if (layout) m.output.layout = *layout;
+    if (normalization) m.output.ambisonicsNormalization = *normalization;
+    if (levelDb) m.output.ambisonicsLevelDb = *levelDb;
     if (mic) m.output.micPattern = *mic;
     if (radius) m.output.radius = *radius;
     else if (mic && *mic == (int)verb::MicPattern::HumanEars) m.output.radius = 0.0875;  // ears at the head half-width, as the native editor
@@ -1533,6 +1682,7 @@ static const Descriptor kDescriptors[] = {
         [](const juce::var&, Model& m, const Ctx& c)->Fail { float v=0; if(!c.proc.autoMakeupDb(v))return {"notReady","No complete energy result or enabled source", ""}; m.params["makeup"]=v; return {}; }},
     {"surface.translate", true, labelMove, keyRefs, opTranslate},
     {"surface.moveVertex", true, [](const juce::var&) { return lbl("Move corner"); }, keyRef, opMoveVertex},
+    {"scene.joinCorners", true, [](const juce::var&) { return lbl("Join corners"); }, noKey, opJoinCorners},
     {"surface.create", true, labelCreate, noKey, opCreate},
     {"surface.delete", true, labelDelete, noKey, opDelete},
     {"surface.applyPreset", true, [](const juce::var&) { return lbl("Apply material preset"); }, noKey, opApplyPreset},

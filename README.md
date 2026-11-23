@@ -4,9 +4,9 @@
 
 **Download:** Windows x64, macOS Universal and Linux x86_64 packages are on Ko-fi, pay what you want, including zero: [ko-fi.com/s/405ebacfcc](https://ko-fi.com/s/405ebacfcc). Project page with audio demos: [bodzijun.github.io/sbp-verb-room](https://bodzijun.github.io/sbp-verb-room/).
 
-**Latest release: [0.2.2](docs/Release_0.2.2_en.md)** · [українською](docs/Release_0.2.2_uk.md). Version 0.2.2 fixes path baking and improves wall editing and the Sources panel.
+**Latest release: [0.2.3](docs/Release_0.2.3_en.md)** · [українською](docs/Release_0.2.3_uk.md). Version 0.2.3 adds corner snapping and repair, Ambisonics output options and clearer recording and baking controls. See also [0.2.2](docs/Release_0.2.2_en.md) · [українською](docs/Release_0.2.2_uk.md).
 
-**User manual:** [English](docs/Manual_en.md) · [українською](docs/Manual_uk.md), including a guide to baking paths and the Record pass.
+**User manual:** [English](docs/Manual_en.md) · [українською](docs/Manual_uk.md), including a guide to baking paths and recording host automation.
 
 Version 0.1.16 smooths the start of the late tail, adds **Physical / Creative** modes with an Absorption scale and an RT60 target assistant, remembers Walls / Floors / Ceilings / Plates layer locks in projects and presets, and adds pan, zoom-to-cursor and fit-to-view to the 3D view. See the [0.1.16 release notes](docs/Release_0.1.16_en.md); older projects and presets still load. Version 0.1.15 extends the Energy analyzer to 48 / 64 / 96-cell grids and adds 0.5–120 dB colour range with Auto contrast. See the [0.1.15 release notes](docs/Release_0.1.15_en.md) and [analyzer guide](docs/Energy_analyzer_0.1.14_en.md). The background energy map offers source, height, component and octave-band selection. This includes positioned dry sound and the scene Outliner from 0.1.12, plus the 0.1.13 layout fixes; see the [editor guide](docs/Spatial_editor_0.1.12_en.md) and [preset exchange guide](docs/Presets_0.1.10_en.md). Experimental macOS Universal and Linux x86_64 builds use GitHub Actions; see the [cross-platform build guide](docs/Cross_platform_builds_en.md).
 
@@ -17,7 +17,7 @@ Instead of a fixed impulse response, Verb Room traces the sound through a room y
 materials, floor/ceiling zones, lowered ceilings, doorways) and re-solves the geometry as the sources and the
 listener move. Position and orientation of every source and of the listener are **automatable parameters**.
 
-> Status: working alpha (0.2.2). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
+> Status: working alpha (0.2.3). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
 > Windows x64 has been tested in REAPER. Experimental macOS Universal and Linux x86_64 builds are provided by GitHub Actions and need host testing. The default Windows build requires AVX2/FMA; the portable CI builds do not. macOS test builds are ad-hoc signed, not Apple-notarized.
 
 ## What it does

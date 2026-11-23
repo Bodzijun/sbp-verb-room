@@ -2,6 +2,8 @@ import { clone } from './contract.js';
 import { budget, channels, surface, surfaceRefs, layerKey, translatedWallLinks, WALL_CORNER_TOLERANCE } from '../state/selectors.js';
 import { layoutOffset } from '../viewport/transducers.js';
 import { normalizeSourceColor } from '../viewport/colour.js';
+import { cornerXY, movedVertexCorners, sameCorner } from '../viewport/corner-snap.js';
+import { joinCorners } from '../state/join-corners.js';
 export function reject(code, message) { throw Object.assign(new Error(message), { code }); }
 export const tag = () => ({ name: '', group: '', hidden: false, locked: false });
 const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
@@ -54,6 +56,8 @@ export function updateEffective(state) {
 }
 export function updateHost(state) {
   const output = state.document.output;
+  output.ambisonicsNormalization ??= 0;
+  output.ambisonicsLevelDb ??= 0;
   state.host.numPoints = budget(state.document).points;
   const byChannels = { 1: 0, 2: 1, 3: 3, 4: 4, 6: 5, 8: 6, 12: 7 };
   state.host.effectiveLayout = output.layout === -1 ? byChannels[state.host.outputChannels] ?? 8 : output.layout;
@@ -74,40 +78,66 @@ export function applyMutation(state, command, original = state, presetMaterials 
   }
   const assignMaterial = (r, index) => { if (['floor', 'ceiling'].includes(r.kind)) s[`${r.kind}Material`] = index; else surface(s, r).material = index; };
   const objects = refs.map(r => surface(s, r));
+  if (op === 'scene.joinCorners') {
+    if (command.refs?.some(ref => ref.kind !== 'wall')) reject('invalid', 'Join corners accepts wall references only');
+    return joinCorners(s.walls, command.toleranceM ?? .05, d.editorFlags.layerModes?.walls, command.refs);
+  }
   if (op === 'surface.translate') {
-    const start = original.document.scene, delta = command.deltaM;
-    const moveXY = point => point.map((v, i) => v + delta[i]);
+    const start = original.document.scene, delta = command.deltaM.slice();
+    const mode = original.document.editorFlags.layerModes?.walls || d.editorFlags.layerModes?.walls;
+    const links = command.autoLink === true ? translatedWallLinks(start, refs, mode) : new Map();
+    const hasRef = ref => refs.some(r => r.kind === ref.kind && r.index === ref.index);
+    const { snapFrom, snapTarget } = command;
+    let source, target;
+    if (snapFrom || snapTarget) {
+      source = snapFrom && cornerXY(start, snapFrom);
+      target = snapTarget && cornerXY(start, snapTarget);
+      if (!source || !target || snapFrom.kind !== 'wall' || !hasRef(snapFrom) || hasRef(snapTarget) ||
+          (snapTarget.kind === 'wall' && links.get(snapTarget.index)?.includes(['a', 'b'][snapTarget.vertex])))
+        reject('invalid', 'Snap needs a moved wall end and a stationary corner');
+      const exact = target.map((v, i) => v - source[i]);
+      if (distance(exact, delta) > 1e-9) reject('invalid', 'Snap corners do not match the translation');
+      [delta[0], delta[1]] = exact;
+    }
+    const moveXY = (point, wall) => wall && source && distance(source, point) === 0 ? target.slice() : point.map((v, i) => v + delta[i]);
     refs.forEach(r => {
       const obj = surface(s, r), initial = surface(start, r);
       if (!initial || !['wall', 'floorZone', 'ceilingZone'].includes(r.kind)) reject('invalid', 'Base floor / ceiling cannot move');
-      if (r.kind === 'wall') { obj.a = moveXY(initial.a); obj.b = moveXY(initial.b); }
-      else obj.vertices = initial.vertices.map(moveXY);
+      if (r.kind === 'wall') {
+        obj.a = moveXY(initial.a, true); obj.b = moveXY(initial.b, true);
+        if (source && distance(obj.a, obj.b) < WALL_CORNER_TOLERANCE) reject('invalid', 'the move would make a wall of zero length');
+      } else obj.vertices = initial.vertices.map(point => moveXY(point, false));
       if (delta[2]) {
         if (r.kind === 'wall') { obj.zBottomM = initial.zBottomM + delta[2]; obj.zTopM = (initial.zTopM ?? s.heightM) + delta[2]; }
         else if (initial.heightM !== null) obj.heightM = initial.heightM + delta[2];
       }
     });
     if (command.autoLink === true && (delta[0] || delta[1])) {
-      const mode = original.document.editorFlags.layerModes?.walls || d.editorFlags.layerModes?.walls;
-      for (const [index, ends] of translatedWallLinks(start, refs, mode)) {
+      for (const [index, ends] of links) {
         const wall = s.walls[index];
         if (!wall || wall.editor.hidden || wall.editor.locked) continue;
-        for (const end of ends) wall[end] = moveXY(start.walls[index][end]);
+        for (const end of ends) wall[end] = moveXY(start.walls[index][end], true);
         if (distance(wall.a, wall.b) < WALL_CORNER_TOLERANCE) reject('invalid', 'the move would make a wall of zero length');
       }
     }
   }
   else if (op === 'surface.moveVertex') {
-    const obj = surface(s, command.ref), points = obj.vertices || [obj.a, obj.b], old = points[command.vertex];
-    if (!old) reject('invalid', 'Vertex does not exist');
-    if (command.autoLink !== false && command.ref.kind === 'wall') s.walls.forEach(w => ['a', 'b'].forEach(k => {
-      if (distance(w[k], old) < 1e-6) {
-        if (w.editor.locked) reject('locked', 'Linked corner touches a locked wall');
-        w[k] = command.positionM.slice(0, 2);
-      }
-    }));
-    else if (obj.vertices) obj.vertices[command.vertex] = command.positionM.slice(0, 2);
-    else obj[command.vertex === 0 ? 'a' : 'b'] = command.positionM.slice(0, 2);
+    const ref = { ...command.ref, vertex: command.vertex };
+    if (!cornerXY(s, ref)) reject('invalid', 'Vertex does not exist');
+    const moved = movedVertexCorners(s, ref, command.autoLink !== false, d.editorFlags.layerModes?.walls);
+    let position = command.positionM;
+    if (command.snapTarget) {
+      position = cornerXY(original.document.scene, command.snapTarget);
+      if (!position || distance(position, command.positionM) > 1e-9 || moved.some(c => sameCorner(c, command.snapTarget)))
+        reject('invalid', 'Snap target must be a stationary corner at the requested position');
+    }
+    for (const r of moved) {
+      const obj = surface(s, r);
+      if (r.kind === 'wall') obj[['a', 'b'][r.vertex]] = position.slice();
+      else obj.vertices[r.vertex] = position.slice();
+    }
+    if (ref.kind === 'wall' && moved.some(({ index }) => distance(s.walls[index].a, s.walls[index].b) < WALL_CORNER_TOLERANCE))
+      reject('invalid', 'the move would make a wall of zero length');
   } else if (op === 'surface.create') {
     if (command.kind === 'wall') {
       if (!command.a || !command.b) reject('invalid', 'Wall needs two endpoints');
@@ -251,7 +281,7 @@ export function applyMutation(state, command, original = state, presetMaterials 
       while (source.offsetsM.length < channels(source)) source.offsetsM.push([0, 0, 0]);
       source.offsetsM[command.channel] = command.offsetM;
     }
-  } else if (op === 'output.set') { ['layout', 'radiusM', 'micPattern'].forEach(k => { if (k in command) d.output[k] = command[k]; }); if (command.micPattern === 7) d.output.radiusM = 0.0875; }
+  } else if (op === 'output.set') { ['layout', 'radiusM', 'micPattern', 'ambisonicsNormalization', 'ambisonicsLevelDb'].forEach(k => { if (k in command) d.output[k] = command[k]; }); if (command.micPattern === 7) d.output.radiusM = 0.0875; }
   else if(op.startsWith('path.')) {
     const emptyPath=()=>({points:[],enabled:true,closed:false,smooth:false,orient:false,laps:1});
     const validEasings=new Set(['linear','easeIn','easeOut','easeInOut']);

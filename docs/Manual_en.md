@@ -1,4 +1,4 @@
-# Verb Room 0.2.2 user manual
+# Verb Room 0.2.3 user manual
 
 [Українська версія](Manual_uk.md)
 
@@ -22,7 +22,7 @@
 
 ## 1. What Verb Room is
 
-Verb Room is a VST3 reverb that models sound in a room you draw, with sources and a listener you can move. **Physical** plays the modeled room and **Creative** adds controls for shaping its sound. Version 0.2.2 is a working alpha for Windows x64, macOS Universal (Apple silicon and Intel), and Linux x86_64 (classic interface only). Check the [project download page](https://bodzijun.github.io/sbp-verb-room/) for packages and the [cross-platform build guide](Cross_platform_builds_en.md) for experimental CI builds.
+Verb Room is a VST3 reverb that models sound in a room you draw, with sources and a listener you can move. **Physical** plays the modeled room and **Creative** adds controls for shaping its sound. Version 0.2.3 is a working alpha for Windows x64, macOS Universal (Apple silicon and Intel), and Linux x86_64 (classic interface only). Check the [project download page](https://bodzijun.github.io/sbp-verb-room/) for packages and the [cross-platform build guide](Cross_platform_builds_en.md) for experimental CI builds.
 
 <a name="quick-start"></a>
 
@@ -68,17 +68,23 @@ The steps below use the new interface. Windows needs **WebView2 Runtime** for it
 
 ## 4. Rooms and materials
 
-For an enclosed room, start in **Plan**. Use **Draw rectangular room** to drag opposite corners, or **Add wall** to click the two ends of each segment. With **Auto-link corners** on, the next segment starts from the previous corner. Double-click to close the chain, or use Escape or right-click to end it. Since 0.2.2, dragging a whole wall with Auto-link enabled moves the joined ends of neighboring walls as well. The preview shows which ends will move, and one Undo restores the edit.
+For an enclosed room, start in **Plan**. Use **Draw rectangular room** to drag opposite corners, or **Add wall** to click the two ends of each segment. With **Auto-link corners** on, the next segment starts from the previous corner. Double-click to close the chain, or use Escape or right-click to end it.
 
 Draw a patch with **Add floor zone** or **Add ceiling zone** by clicking its vertices and pressing Enter. These zones give areas of the base surfaces their own material. Use **Add raised plate** for a horizontal surface at its own height, such as a platform or canopy. Plates can reflect from both sides. Check the wall's bottom and top heights and the plate's height in the inspector and in **Front** or **Side**. In **Scene → Room**, set the base floor and ceiling and the room height. **Open sky (no ceiling)** is available for an intentionally open layout.
 
-**Snap step** controls drawing. **Auto · follows grid** uses the visible grid step, a fixed step gives repeatable dimensions, and **Off** gives free placement. Alt temporarily bypasses snap when drawing. Existing corners move freely and typed coordinates are exact. Use **Walls**, **Floors**, **Ceilings**, and **Plates** to cycle a layer through shown, locked, and hidden while editing.
+**Snap step** controls grid spacing for drawing and dragging individual corners. **Auto · follows grid** uses the visible grid step, a fixed step gives repeatable dimensions, and **Off** turns off the grid snap. Typed coordinates are exact. Use **Walls**, **Floors**, **Ceilings**, and **Plates** to cycle a layer through shown, locked, and hidden while editing.
 
 Select a surface and use **Material** and its catalog to choose a starting material. Absorption is the fraction of energy absorbed in each of seven octave bands (125, 250, 500, 1,000, 2,000, 4,000, and 8,000 Hz). Transmission loss (TL) describes how much sound is lost passing through the material. A lower TL means more sound passes through. Pick a material appropriate to the intended surface and inspect its transmission before using it on a solid exterior wall. Material changes affect the sound and the bake.
 
 In **Scene → Clutter**, set **Count**, **Min length** / **Max length**, **Min height** / **Max height**, and **Min TL** / **Max TL** for the generated obstacles. With the same scene and settings, **Seed** reproduces their placement. **Randomize** changes the seed. **Source clearance** keeps space around sources and the listener. Use the **Clutter** overlay to see the generated obstacles. In **Scene → Air**, set **Temperature** in °C and **Humidity** as relative humidity. The engine models air absorption across the same seven octave bands.
 
 If a room is meant to be closed, check that every perimeter endpoint meets the next, including the last and first, without duplicated, crossing, or zero-length walls. Check the ceiling and look for unintended openings or wall height gaps. Inspect all source points and the listener above any platform and below the ceiling. An unjoined perimeter can make baking slow. Compare the response to a short impulse, check the decay and any abrupt changes, and reload the saved preset to confirm the result. See the [scene-authoring guide](Scene_authoring_agents_en.md).
+
+### Joining corners
+
+**Auto-link corners** moves already joined wall ends together when you drag a wall or a corner. In **Plan**, select a wall and drag an end near another visible corner to snap onto it. A wall or selection snaps when one of its moving wall ends approaches a stationary corner. The square marks the target and the preview shows the resulting geometry. The corner magnet works with **Snap off**. Hold Alt to bypass snapping, and use one Undo to restore the drag.
+
+In **Scene → Room**, **Open corners** counts groups of wall ends with gaps under 10 cm. Choose a tolerance of 1, 5, or 10 cm and click **Join corners** to close those gaps in one edit. Gaps can leak sound and slow down **Bake path**. A locked wall can anchor a join. The command skips groups with conflicting locked ends, excessive spread, or a wall that would collapse. It repairs wall ends only. T-junctions along a wall and zone vertices require manual edits.
 
 <a name="sources"></a>
 
@@ -118,7 +124,15 @@ Select the listener to set its **X**, **Y**, **Z**, and **Yaw**. In **Settings �
 | AmbiX (2nd order) | 9 | 10 |
 | AmbiX (3rd order) | 16 | 16 |
 
-Use more track channels if the inputs need them. AmbiX uses ACN channel order and SN3D normalization. The W channel is unattenuated, so AmbiX is louder than stereo by design. Meter the decoded output when comparing levels. The AmbiX layout fixes its microphone array.
+Use more track channels if the inputs need them. The Ambisonic layout fixes its microphone array. Match the decoder to **Ambisonics normalization** and give the track enough channels for the selected order.
+
+| Ambisonics normalization | Channel order and gain |
+|---|---|
+| **SN3D** (default) | AmbiX, in ACN order with unattenuated W. |
+| **N3D** | ACN order with each order \(n\) scaled by √(2n + 1). |
+| **FuMa** | Legacy Furse–Malham order WXYZ RSTUV KLMNOPQ with MaxN weights and W at 1/√2. Missing components on a short track bus are silent. |
+
+**Ambisonics level** attenuates every Ambisonic channel equally after normalization. Choose **0 dB** (default), **−3 dB** or **−6 dB**. Meter the decoded signal when comparing with stereo. Project state and room presets store both choices, **Keep I/O** preserves the local settings and IR export uses the selected order and gain.
 
 <a name="controls"></a>
 
@@ -162,7 +176,7 @@ Static source/listener **X**, **Y**, and **Z**, source **Azimuth**, and listener
 
 ## 8. Baking explained
 
-**Bake path** precomputes a late-tail table for motion. Use it if the late reverb needs to follow the movement as it happens. **Record pass** first captures poses from REAPER when your movement cannot be described by a supported set of drawn paths. Recording and baking are two separate button presses.
+**Bake path**, in the **Bake late tail** row, precomputes a late-tail table so the reverb follows movement as it happens. For supported drawn paths, press **Bake path** directly. For movement driven by REAPER, use **Record automation** in the **Host automation** row, play the movement once, press **Stop**, then press **Bake path**.
 
 ### What you hear
 
@@ -180,10 +194,10 @@ flowchart TD
     A -->|Yes| C["Does the late tail need to follow during movement?"]
     C -->|No| B
     C -->|Yes| D["Can enabled paths describe the full motion?"]
-    D -->|No| E["Record pass, then Bake path"]
+    D -->|No| E["Record automation → Play once → Stop → Bake path"]
     D -->|Yes| F["Do the listener and sources move independently, or does a Look at target move independently?"]
     F -->|No| G["Bake path"]
-    F -->|Yes| H["One Group then Bake path, or Record pass then Bake path"]
+    F -->|Yes| H["Use one Group and Bake path, or follow the host automation workflow"]
 ```
 
 | My situation | What to do |
@@ -193,9 +207,9 @@ flowchart TD
 | Several sources move on independent paths and the listener stays put | Enable the paths and press **Bake path**. The bake can compute tables for independent sources. |
 | Only the listener moves on a drawn path | Enable it and press **Bake path**. |
 | The listener and sources move together | Put all moving paths in one **Group**, automate its driver, and press **Bake path**. |
-| The listener moves while sources move on independent paths | Put every moving path in one **Group** or use **Record pass**, then bake. See the two `Cannot bake uncoupled…` messages below. |
-| Motion comes from REAPER XYZ or angle envelopes alone | Use **Record pass**, then **Bake path**. Replay the same movement. |
-| A moving object's **Look at** target moves independently | Put both paths in one **Group** or use **Record pass**, then bake. See `Look at target moves independently: …` below. |
+| The listener moves while sources move on independent paths | Put every moving path in one **Group** and bake, or follow the host automation workflow below. |
+| Motion comes from REAPER XYZ or angle envelopes alone | Use **Record automation**, play once, press **Stop**, then **Bake path**. Replay the same movement. |
+| A moving object's **Look at** target moves independently | Put both paths in one **Group** and bake, or follow the host automation workflow below. |
 | A moving **Manual** object also has angle automation | Bake the path/group, or bake a recording for independently driven motion. Since 0.2.2 the changing manual angle does not drop the table for a moving Manual participant. Direct and early sound still turn live. |
 | AmbiX or a large scene | Choose the workflow by how objects move. Allow more time for tracing, especially with more sources, outputs, or rays. |
 
@@ -208,22 +222,22 @@ flowchart TD
 3. Wait while the bake progresses. **Baked** means the table is ready. **Baked (approx.)** also has a usable table, with intervals outside the error tolerance.
 4. Play the passage and check **Tail** under **Listen · solo** while the objects move. Return to the full mix afterward.
 
-![Bake path, Record pass, and Clear bake controls with Not baked status](images/manual/bake-idle.png)
+![Host automation and Bake late tail rows with Bake source and Not baked](images/manual/bake-idle.png)
 
-*Browser-harness capture with a test path before baking.*
+*Browser-harness capture before baking an independent drawn path. Use Bake path in the Bake late tail row.*
 
-![Path controls after the mock bake, showing Baked](images/manual/bake-status.png)
+![Separate recording and bake controls with the drawn path marked Baked](images/manual/bake-status.png)
 
-*Browser-harness capture after its simulated bake. It shows the control and status text. The harness does not measure acoustics.*
+*Browser-harness capture after a simulated bake of the drawn path.*
 
 ### Record a REAPER pass, then bake it
 
-Use this when live host automation supplies the movement, or when the moving listener or a moving Look at target cannot use the same Group. When the enabled drawn paths can be baked as a set, Bake uses them. It uses the captured pass when the drawn paths are blocked or there are none. For a pass driven by XYZ or angle alone, disable any competing drawn paths. The recorder can capture angle-only changes, but a Manual turn alone does not guarantee that the late tail tracks that angle during playback. Listen to **Tail** after baking if that matters. For independently moving paths that cannot bake directly, keep the paths enabled so REAPER can drive them while recording.
+Use this when live host automation supplies the movement, or when the moving listener or a moving Look at target cannot use the same Group. **Bake source** shows what **Bake path** will use. Bakeable drawn paths take priority. The recording is used when drawn paths are blocked or absent. For a pass driven by XYZ or angle alone, disable competing drawn paths. The recorder can capture angle-only changes. Check **Tail** after baking to hear how closely it follows a Manual turn. Keep independently moving paths enabled when REAPER drives those paths during recording.
 
-1. Park REAPER just before the movement. In the source or listener **Path** section, press **Record pass**. The button changes to **Armed - Stop**.
+1. Park REAPER just before the movement. In the source or listener **Path** section, press **Record automation** in the **Host automation** row. The button changes to **Armed - Stop**.
 2. Press Play in REAPER. Run through the movement once, with the plug-in receiving processing blocks. The button shows **Recording N - Stop** as pose samples accumulate.
 3. At the end press the plug-in's **Stop** on that same recording button. Stop REAPER and check for **Recorded N - Record again**.
-4. Press **Bake path** (or **Bake again** if the button has that label). **Recorded** only means poses were captured. Check that the bake banner identifies **Recorded pass** and wait for **Baked** or **Baked (approx.)**.
+4. Check **Bake source** for `recorded automation (N samples)`. The highlighted `Recorded - now press Bake path to compute the tail` means the capture is ready. Press **Bake path** (or **Bake again** if shown) in the **Bake late tail** row and wait for **Baked** or **Baked (approx.)**.
 5. Return to the start and play the same envelopes and movement. If you change the route or relative timing used in the pass, use **Record again**, play it through, and bake the new recording.
 
 ### After an edit, saving, or stopping a job
@@ -237,7 +251,7 @@ Use this when live host automation supplies the movement, or when the moving lis
 | Live angle in **Manual** on a moving path | Playback can keep using the table. A drawn bake samples Manual at the angle used when requested. A recorded bake uses captured angles. Re-bake or re-record if you want different angles represented in the table. |
 | Undo or reuse an earlier room/path configuration | A compatible table can return from cache. Check the displayed status before baking again. |
 
-**Cancel** stops the ongoing job. **Clear bake** discards all baked tables while keeping drawn paths and the recorded pass. **Bake again** computes a replacement for the current scene and movement. **Clear** in the draw controls removes the selected path.
+**Cancel** stops the ongoing bake. **Clear bake** discards all baked tables and keeps the drawn paths and recording. **Discard** (in the Host automation row) stops any armed or ongoing capture, discards the recorded automation, and removes any bake made from it. Drawn-path bakes are preserved by **Discard**. **Bake again** computes a replacement for the current scene and movement. **Clear** in the draw controls removes the selected path.
 
 A project can restore a matching baked table and its recorded pass. A `.verbroom` can restore compatible tables for drawn paths. Share the project when the recipe depends on a recorded pass, because `.verbroom` omits the captured poses. A table that is too large to store, a table for a different context, or an earlier table for a moving Manual participant may need to be baked again. Tables from 0.2.0 always need one fresh bake. Check the status after reopening.
 
@@ -267,10 +281,14 @@ The inspector shows the path state. The footer adds job-wide progress and reason
 | `Look at target moves independently: OWNER looks at TARGET; put both paths in one Group or record a pass` | The target has independent motion that the drawn bake cannot represent. Couple them or record. |
 | `Bake failed` / `Bake failed - resource or tracing error` | The job could not finish tracing or allocating resources. Try again with a smaller ray budget or scene. Include the reason if it recurs. |
 | `Late energy unavailable - bake could not finish` | Tracing did not supply usable late energy for the table. Check room geometry, heights, and source/listener placement. |
-| `Off recorded pass - motion estimator` | The live poses have left the recorded movement. The estimator takes over there. Replay the original motion or record it again. |
+| `Bake source: drawn paths (Group N)` / `Bake source: drawn paths (independent)` | Bake will use the enabled paths, as a single named group or as independent bake groups. |
+| `Bake source: recorded automation (N samples)` / `Bake source: nothing to bake` | Bake will use the capture in the first case. In the second, draw a supported path or record automation. |
+| `Recording kept, not used: drawn paths are baked instead. Press Discard if you do not need it.` | The capture is still saved with the project. Bake uses the drawn paths. |
+| `Live motion is outside the baked recording - estimating the tail` | Current poses fall outside the baked recording's coverage. The live estimator takes over there. Replay the original motion or record it again. |
+| `Recorded - now press Bake path to compute the tail` | A recording is ready and selected as the bake source. Start the bake manually. |
 | `Armed - Stop` | The recorder is armed. Start playback to capture motion, or press its Stop to cancel. |
 | `Recording N - Stop` | Poses are being captured. Press the plug-in's Stop at the end of the movement. |
-| `Recorded N - Record again` | A capture is ready to bake or replace. Press **Bake path** to compute the table. |
+| `Recorded N - Record again` | A capture exists. Check **Bake source** before baking it, or click the recording button to replace it. |
 
 | Waiting message | Meaning and action |
 | --- | --- |
@@ -307,18 +325,18 @@ These are practice setups. Distances and times are example values. The browser f
 
    *Browser-harness capture with test paths. Compare the distinct starts in the [Group timeline figure](#movement).*
 
-4. **Record DAW automation.** Disable the path for a mono source and automate **Source 1 X** from 1 m to 5 m over two seconds with Y and Z held constant. Give the listener its own independent Y envelope if desired. Press **Record pass**, start REAPER, run the envelopes once, press the plug-in's **Stop**, and then press **Bake path**. Replay the same envelopes and check for `Off recorded pass - motion estimator` if you alter them.
+4. **Record DAW automation.** Disable the path for a mono source and automate **Source 1 X** from 1 m to 5 m over two seconds with Y and Z held constant. Give the listener its own independent Y envelope if desired. Press **Record automation**, play the envelopes once, then press the plug-in's **Stop**. Check the highlighted hint and press **Bake path**. Replay the same envelopes. If you change them, check for `Live motion is outside the baked recording - estimating the tail`.
 
 <a name="bake-faq"></a>
 
 ### Baking FAQ
 
-- **Bake does nothing or stays at 0%.** Read the reason. Check that a path is enabled or that **Recorded** shows a usable pass. Finish room edits, stop scrubbing, and wait for the rebuild. On 0.2.2 a room edit or replacement can bake with transport stopped. If a small, closed room never starts tracing, report the exact banner and the edits that preceded it.
+- **Bake does nothing or stays at 0%.** Read the reason. Check that a path is enabled or that **Recorded** shows a usable pass. Finish room edits, stop scrubbing, and wait for the rebuild. On 0.2.3 a room edit or replacement can bake with transport stopped. If a small, closed room never starts tracing, report the exact banner and the edits that preceded it.
 - **Outdated all the time.** Check for live changes to geometry, size, absorption, quality, route, or stationary participants. Choose the final settings before baking. Check for a table from an earlier build after opening a project or preset. For a recording, verify that the pass still represents the motion.
 - **The tail changes when movement stops.** One accurate rebuild at the settled position is expected. In a development test of one scene, the broadband change was about **+0.4 dB** with either bake workflow and **−8.6 dB** without one. Those values describe that scene and measurement. A conspicuous change with Bake warrants checking table use and the recorded-pass status.
-- **The baked tail ignores my azimuth turn.** The table uses the angle sampled when baking a drawn path or captured during a recorded pass. Direct and early sound use the live turn. For a moving Manual participant in 0.2.2, changing the angle does not drop the table.
+- **The baked tail ignores my azimuth turn.** The table uses the angle sampled when baking a drawn path or captured during a recorded pass. Direct and early sound use the live turn. For a moving Manual participant, changing the angle does not drop the table.
 - **Baking is very slow.** Bake time grows with the size of the room. In practice, rooms assembled from overlapping or unjoined volumes take noticeably longer, so check that a room intended to be enclosed has joined corners and no unintended openings. Large scenes, high ray budgets, many outputs, and background CPU load can all increase the wait. Try **Preview** quality while checking the setup and bake at the final quality for the mix.
-- **Clear bake, Cancel, or Bake again?** Use **Clear bake** to discard tables while keeping paths and the capture, **Cancel** to stop a running job, and **Bake again** to compute a new table after an edit.
+- **How do I clear or replace a bake or a recording?** **Discard** removes the capture and its bake. **Clear bake** clears tables and keeps paths and the recording. **Cancel** stops a running bake. **Bake again** computes a new table after an edit.
 - **Do I have to bake?** For a static room, play it normally. For motion, listen to the live estimate and bake when the late tail needs to track the passage more closely.
 
 <a name="presets"></a>
@@ -363,7 +381,7 @@ xattr -dr com.apple.quarantine "$HOME/Library/Audio/Plug-Ins/VST3/Verb Room.vst3
 
 With more than four sources, early reflections update in batches and glide between updates during motion. The geometry is **2.5D**, with vertical walls and horizontal surfaces. Low-frequency wave modes are outside this model. The late tail is a statistical estimate, and the Energy analyzer shows modeled coverage with unit excitation. Treat the readouts as model diagnostics and audition the scene in the session.
 
-Windows is the REAPER-tested platform. A community tester tried 0.2.0 on a real Mac. The 0.2.2 release notes list macOS testing of 0.2.1 and 0.2.2 as open, and Linux as build and automated test coverage only. Live performance on older four-core machines still needs checks. See the [0.2.2 release notes](Release_0.2.2_en.md).
+Windows was tested in REAPER. A community tester tried 0.2.0 on a real Mac. Versions 0.2.1, 0.2.2 and 0.2.3 await Mac testing. Linux builds and passes CI tests with the classic interface and awaits testing in a real host. Live performance on older four-core machines still needs checks. See the [0.2.3 release notes](Release_0.2.3_en.md).
 
 <a name="reporting"></a>
 

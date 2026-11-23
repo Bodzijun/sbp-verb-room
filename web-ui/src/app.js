@@ -317,7 +317,7 @@ async function init() {
     if (['snapshot','patch','parameters','view','resync','catalogs.list'].includes(reason)) {
       const state = store.state;
       const viewKey = ['view', 'snapshot', 'resync'].includes(reason)
-        ? JSON.stringify({ ...store.view, camera: undefined, previewCamera: undefined, pathDraft: undefined }) : rendered?.viewKey;
+        ? JSON.stringify({ ...store.view, camera: undefined, previewCamera: undefined, pathDraft: undefined, cornerJoinResult: store.cornerJoinResult }) : rendered?.viewKey;
       const docSig = rendered && rendered.document === state.document ? rendered.docSig : JSON.stringify(state.document);
       const prefsSig = rendered && rendered.preferences === state.preferences ? rendered.prefsSig : JSON.stringify({ ...(state.preferences || {}), sessionViewState: undefined });
       // Host channel counts / layout feed the inspector and the source budget text: a host change must rebuild them.

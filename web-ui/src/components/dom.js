@@ -23,7 +23,13 @@ export function select(label, values, value, change, attrs = {}) {
   const labelOf = key => items.find(i => i.key === key)?.text ?? placeholder;
   const caption = element('span', { className: 'dd-text', text: labelOf(current) }), caret = element('i', { className: 'dd-caret', 'aria-hidden': 'true' });
   const root = element('button', { type: 'button', className: 'dd', role: 'combobox', 'aria-label': label, 'aria-haspopup': 'listbox', 'aria-expanded': 'false', ...attributes }, [caption, caret]);
-  Object.defineProperty(root, 'value', { get: () => current, set: v => { current = String(v); caption.textContent = labelOf(current); } });
+  function setValue(value) {
+    current = String(value);
+    caption.textContent = labelOf(current);
+    if (!attributes.title) root.title = caption.textContent;
+  }
+  setValue(value);
+  Object.defineProperty(root, 'value', { get: () => current, set: setValue });
   const visible = () => popup ? [...popup.querySelectorAll('[role=option]:not([hidden])')] : [];
   function paint() { visible().forEach((o, i) => o.classList.toggle('hl', i === highlighted)); const o = visible()[highlighted]; o?.scrollIntoView?.({ block: 'nearest' }); }
   function close() {
@@ -31,7 +37,7 @@ export function select(label, values, value, change, attrs = {}) {
     document.removeEventListener('pointerdown', outside, true); window.removeEventListener('blur', close); window.removeEventListener('resize', close);
   }
   function outside(e) { if (!popup?.contains(e.target) && !root.contains(e.target)) close(); }
-  function choose(key) { close(); if (key === current && !reselect) return; current = key; caption.textContent = labelOf(key); change(key); }
+  function choose(key) { close(); if (key === current && !reselect) return; setValue(key); change(key); }
   function open() {
     closeDropdowns(); if (root.disabled) return;
     popup = element('div', { className: 'dd-popup', role: 'listbox', 'aria-label': label });

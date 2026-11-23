@@ -703,7 +703,7 @@ inline void compactMaterials(Scene& s) {
 }
 
 // Text form of a scene that parseScene() reads back (every referenced material is written once; names are tokens).
-inline std::string serializeScene(const Scene& s,int significantDigits=6) {
+inline std::string serializeScene(const Scene& s,int significantDigits=6,int coordinateDigits=0) {
     std::ostringstream o;
     o.precision(significantDigits);
     auto tok = [](std::string n) {
@@ -752,11 +752,15 @@ inline std::string serializeScene(const Scene& s,int significantDigits=6) {
         for (auto& z : ceiling ? s.ceilZones : s.floorZones) {
             o << "zone " << (ceiling ? "ceiling " : "floor ") << (z.mat < 0 ? std::string("open") : name[z.mat]);
             if (z.z >= 0) o << " at " << z.z;
+            if (coordinateDigits > 0) o.precision(coordinateDigits);
             for (auto& p : z.poly) o << ' ' << p.first << ' ' << p.second;
+            o.precision(significantDigits);
             o << "\n";
         }
     for (auto& w : s.walls) {
+        if (coordinateDigits > 0) o.precision(coordinateDigits);
         o << "wall " << w.ax << ' ' << w.ay << ' ' << w.bx << ' ' << w.by << ' ' << name[w.mat];
+        o.precision(significantDigits);
         if (w.z0 != 0 || w.z1 < 1e8) o << ' ' << w.z0 << ' ' << std::min(w.z1, 1e6);  // only when the wall is not full height
         o << "\n";
     }

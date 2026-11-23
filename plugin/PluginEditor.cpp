@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "AmbisonicsOutput.h"
 
 #if VERB_WEB_UI_ENABLED
 #include "VerbWebEditor.h"
@@ -607,7 +608,8 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     targetCancel.onClick = [this] { proc.cancelTargetRT60(); };
     // ---- mix tab ----
     for (auto* c : std::initializer_list<juce::Component*>{&gainSlider, &earlySlider, &diffSlider, &dopplerSlider, &mixSlider, &tailSlider, &gainLabel, &earlyLabel, &diffLabel,
-                                                           &dopplerLabel, &mixLabel, &tailLabel, &layoutBox, &layoutLabel, &micBox, &micLabel, &outInfoLabel})
+                                                           &dopplerLabel, &mixLabel, &tailLabel, &layoutBox, &layoutLabel, &micBox, &micLabel, &outInfoLabel,
+                                                           &ambisonicsNormBox, &ambisonicsNormLabel, &ambisonicsLevelBox, &ambisonicsLevelLabel})
         addAndMakeVisible(*c);
     for (auto* s : {&gainSlider, &earlySlider, &diffSlider, &dopplerSlider, &mixSlider, &tailSlider}) {
         s->setSliderStyle(juce::Slider::LinearHorizontal);
@@ -674,6 +676,24 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
         o.layout = id == 1000 ? -1 : id - 1;
         proc.setOutputCfg(o);  // the engine is rebuilt in the background
     };
+    ambisonicsNormLabel.setText("Ambisonics normalization", juce::dontSendNotification);
+    ambisonicsLevelLabel.setText("Ambisonics level", juce::dontSendNotification);
+    for (int i = 0; i < 3; ++i) {
+        ambisonicsNormBox.addItem(verbp::ambisonicsNormalizationNames[(size_t)i], i + 1);
+        ambisonicsLevelBox.addItem(juce::String(-3 * i) + " dB", i + 1);
+    }
+    ambisonicsNormBox.setTooltip("SN3D and N3D use ACN channel order. FuMa uses Furse-Malham channel order and MaxN weighting.");
+    ambisonicsLevelBox.setTooltip("Attenuates all Ambisonic channels equally after normalization. AmbiX uses SN3D at 0 dB.");
+    auto commitAmbisonics = [this] {
+        if (updatingUI) return;
+        auto output = proc.getOutputCfg();
+        output.ambisonicsNormalization = ambisonicsNormBox.getSelectedId() - 1;
+        output.ambisonicsLevelDb = -3 * (ambisonicsLevelBox.getSelectedId() - 1);
+        proc.setOutputCfg(output);
+        refreshOutputs();
+    };
+    ambisonicsNormBox.onChange = commitAmbisonics;
+    ambisonicsLevelBox.onChange = commitAmbisonics;
     auto commitRadius = [this] {
         if (updatingUI) return;
         verbp::OutputCfg o = proc.getOutputCfg();
@@ -826,7 +846,10 @@ void VerbEditor::updateObjectsVisibility() {
         c->setVisible(src);
     // the listener owns the output configuration: layout, microphone radius, what the track carries
     const bool lis = o && selected == verbp::kListener;
-    for (auto* c : std::initializer_list<juce::Component*>{&layoutBox, &layoutLabel, &micBox, &micLabel, &outInfoLabel, &radiusRow.label, &radiusRow.slider, &showMic}) c->setVisible(lis);
+    const bool ambisonic = verb::isAmbisonicLayout((verb::Layout)proc.effectiveLayout());
+    for (auto* c : std::initializer_list<juce::Component*>{&layoutBox, &layoutLabel, &outInfoLabel, &showMic}) c->setVisible(lis);
+    for (auto* c : std::initializer_list<juce::Component*>{&micBox, &micLabel, &radiusRow.label, &radiusRow.slider}) c->setVisible(lis && !ambisonic);
+    for (auto* c : std::initializer_list<juce::Component*>{&ambisonicsNormBox, &ambisonicsNormLabel, &ambisonicsLevelBox, &ambisonicsLevelLabel}) c->setVisible(lis && ambisonic);
     chBox.setVisible(src && uiRing);
     chLabel.setVisible(src && uiRing);
     sumToggle.setVisible(src && uiMulti);
@@ -933,11 +956,15 @@ void VerbEditor::refreshOutputs() {
                         " out: the inputs only carry the sources and do not decide the output. " + juce::String(proc.numPoints()) + " source point(s).";
     if (o.layout >= 0 && verb::layoutDefs()[(size_t)std::min((size_t)o.layout, verb::layoutDefs().size() - 1)].channels > trackOut)
         info += "\nThe layout has more channels than the track can carry: only the first " + juce::String(trackOut) + " are rendered.";
+    if (verb::isAmbisonicLayout((verb::Layout)proc.effectiveLayout()) && o.ambisonicsNormalization == 2
+        && defs[(size_t)proc.effectiveLayout()].channels > trackOut)
+        info += "\nFuMa requires a bus wide enough for all components. Missing components are silent.";
     outInfoLabel.setText(info, juce::dontSendNotification);
-    const bool am = verb::isAmbisonicLayout((verb::Layout)proc.effectiveLayout());
-    micBox.setEnabled(!am);
-    radiusRow.slider.setEnabled(!am);
+    ambisonicsNormBox.setSelectedId(o.ambisonicsNormalization + 1, juce::dontSendNotification);
+    ambisonicsLevelBox.setSelectedId(1 - o.ambisonicsLevelDb / 3, juce::dontSendNotification);
     updatingUI = false;
+    updateObjectsVisibility();
+    resized();
 }
 
 void VerbEditor::selectObject(int obj) {
@@ -1925,12 +1952,20 @@ void VerbEditor::resized() {
             layoutLabel.setBounds(a.removeFromTop(16));
             layoutBox.setBounds(a.removeFromTop(26));
             a.removeFromTop(6);
-            micLabel.setBounds(a.removeFromTop(16));
-            micBox.setBounds(a.removeFromTop(26));
-            a.removeFromTop(6);
-            auto rr = a.removeFromTop(24);
-            radiusRow.label.setBounds(rr.removeFromLeft(80));
-            radiusRow.slider.setBounds(rr);
+            if (verb::isAmbisonicLayout((verb::Layout)proc.effectiveLayout())) {
+                ambisonicsNormLabel.setBounds(a.removeFromTop(16));
+                ambisonicsNormBox.setBounds(a.removeFromTop(24));
+                a.removeFromTop(4);
+                ambisonicsLevelLabel.setBounds(a.removeFromTop(16));
+                ambisonicsLevelBox.setBounds(a.removeFromTop(24));
+            } else {
+                micLabel.setBounds(a.removeFromTop(16));
+                micBox.setBounds(a.removeFromTop(26));
+                a.removeFromTop(6);
+                auto rr = a.removeFromTop(24);
+                radiusRow.label.setBounds(rr.removeFromLeft(80));
+                radiusRow.slider.setBounds(rr);
+            }
             a.removeFromTop(4);
             showMic.setBounds(a.removeFromTop(24));
             a.removeFromTop(6);

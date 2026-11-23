@@ -1,4 +1,4 @@
-import { element, check, note, row } from './dom.js';
+import { element, check, note, row, scrollArea } from './dom.js';
 import { BANDS } from '../state/selectors.js';
 const colours = ['#dcaa7e', '#d9ba89', '#c3bd80', '#a5bd9c', '#80bbbd', '#a49bd0', '#c695bd'];
 const MAX_HORIZON_S = 20;
@@ -65,7 +65,7 @@ export function decayPanel(ctx) {
   const legend = element('div', { className: 'inline octave-legend' }, BANDS.map((b, i) => { const item = check(b >= 1000 ? `${b / 1000}k` : `${b}`, store.view.bands[i], visible => { const bands = store.view.bands.slice(); bands[i] = visible; store.setView({ bands }); }); item.style.setProperty('--band-colour', colours[i]); item.title = `${b} Hz`; return item; }));
   const canvas = element('canvas', { 'aria-label': `Seven octave tail decay curves${ctx.bridge.mode === 'mock' ? '; synthetic mock telemetry' : '; engine model'}` });
   graph.append(legend, canvas, element('span', { className: 'updating-label', text: 'Updating…' }), note(`${ctx.bridge.mode === 'mock' ? 'SYNTHETIC · ' : ''}solid reliable / dashed extrapolated / faint physical`));
-  const side = element('div', { className: 'decay-side scroll' }, [element('h3', { text: 'Decay by band' }), ...['decayLow', 'decayMid', 'decayHigh'].map((id, i) => param(id, { label: ['Low 125–250 Hz', 'Mid 500–2k Hz', 'High 4k–8k Hz'][i] })), element('details', { className: 'decay-effective' }, [element('summary', { text: 'Effective / diagnostics' }), element('div', { className: 'decay-diagnostics' })])]);
+  const side = scrollArea([element('h3', { text: 'Decay by band' }), ...['decayLow', 'decayMid', 'decayHigh'].map((id, i) => param(id, { label: ['Low 125–250 Hz', 'Mid 500–2k Hz', 'High 4k–8k Hz'][i] })), element('details', { className: 'decay-effective' }, [element('summary', { text: 'Effective / diagnostics' }), element('div', { className: 'decay-diagnostics' })])], { rootClass: 'decay-side', className: 'decay-side-view' });
   root.append(graph, side);
   function draw() {
     const d = store.telemetry['diagnostics.tail'], rect = canvas.getBoundingClientRect(), w = Math.max(1, rect.width), h = Math.max(1, rect.height), dpr = window.devicePixelRatio || 1;

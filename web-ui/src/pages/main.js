@@ -207,7 +207,8 @@ export function sourcesPanel(ctx) {
 export function mixPanel(ctx) {
   const { param } = ctx;
   const block = (title, cls, children) => element('div', { className: `mix-block ${cls}` }, [heading(title), element('div', { className: 'mix-block-body' }, children)]);
-  return element('div', { className: 'mix-panel' }, [
+  // Scrolls vertically when the window is too low to show every control (small screens).
+  return scrollArea(element('div', { className: 'mix-panel' }, [
     element('div', { className: 'mix-columns' }, [
       block('Early', 'mix-early', [param('early', { knob: true, label: 'Early level' }), param('diffusion', { knob: true, label: 'Early diffusion' })]),
       block('Tail & motion', 'mix-tail', [param('tail', { knob: true, label: 'Tail level' }), param('doppler', { knob: true, label: 'Doppler' })]),
@@ -222,7 +223,7 @@ export function mixPanel(ctx) {
         param('duckRelease', { knob: true, label: 'Release' })
       ])
     ])
-  ]);
+  ]), { className: 'mix-scroll-view' });
 }
 export function outputPanel(ctx) {
   const { store } = ctx, state = store.state, tail = state.document.tail, o = outputParts(ctx);

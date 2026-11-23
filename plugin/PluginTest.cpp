@@ -178,6 +178,8 @@ static int testSpatialEditorSuite();
 static int testPresetsSuite();
 static int testVslHallSuite();
 
+#include "F8Test.h"
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
@@ -191,6 +193,7 @@ int main() {
         {"VERB_ONLY_E17", testE17Plugin},
         {"VERB_ONLY_E18", testE18Plugin},
         {"VERB_ONLY_E23", testE23Plugin},
+        {"VERB_ONLY_F8", testF8},
         {"VERB_ONLY_E21", testE21Plugin},
         {"VERB_E21_MEASURE", testE21Measure},
         {"VERB_ONLY_E19", +[]() { return testE19Plugin() | testE19Audio() | testE19Bake() | testE19Blocked() | testE19Commands(); }},
@@ -1016,12 +1019,14 @@ static int testVslHallSuite() {
 
 static int runRemainingSuites() {
     if(std::getenv("VERB_EXPORT_LIVE_ONLY")) {
-        VerbProcessor p;p.setPlayConfigDetails(2,2,48000,256);p.prepareToPlay(48000,256);
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;p.setPlayConfigDetails(2,2,48000,256);p.prepareToPlay(48000,256);
         check(waitReady(p,90),"export test processor loads");stage2ExportAndLoader(p);return fails?1:0;
     }
     if (std::getenv("VERB_STAGE2_CAPTURE")) return captureStage2Legacy();
     if (std::getenv("VERB_SOURCE_SWITCHES_ONLY")) {
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(2, 2, 48000, 256); p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "source switch room loads");
         auto cfg = p.getSources(); cfg.resize(2); cfg[0].firstIn = 0; cfg[1].firstIn = 1;
@@ -1070,7 +1075,8 @@ static int runRemainingSuites() {
         return fails ? 1 : 0;
     }
     if (std::getenv("VERB_MIXER_ONLY")) {
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(32, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "mixer test room loads");
@@ -1126,7 +1132,8 @@ static int runRemainingSuites() {
         return fails ? 1 : 0;
     }
     if (std::getenv("VERB_ROUTING_ONLY")) {
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         check(p.getTailLengthSeconds() >= 20.0, "host sees the full possible tail before asynchronous room loading");
         p.setPlayConfigDetails(8, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
@@ -1154,7 +1161,8 @@ static int runRemainingSuites() {
             check(std::abs(out.radius - 0.23) < 1e-6 && out.micPattern == 1, "listener output survives preset change");
             juce::MemoryBlock state;
             p.getStateInformation(state);
-            VerbProcessor restored;
+            auto restoredStorage = std::make_unique<VerbProcessor>();
+            auto& restored = *restoredStorage;
             restored.setStateInformation(state.getData(), (int)state.getSize());
             check(restored.keepRoutingEnabled(), "routing lock survives project state restore");
             p.setKeepRoutingEnabled(false);
@@ -1170,7 +1178,8 @@ static int runRemainingSuites() {
         const auto rooms = verbp::builtinRooms();
         for (auto& r : rooms) {
             if (r.name.find(std::getenv("VERB_MEMPROBE")) == std::string::npos) continue;
-            VerbProcessor p;
+            auto pStorage = std::make_unique<VerbProcessor>();
+            auto& p = *pStorage;
             p.setPlayConfigDetails(32, 2, 48000, 512);
             p.prepareToPlay(48000, 512);
             waitReady(p, 60);
@@ -1209,7 +1218,8 @@ static int runRemainingSuites() {
     }
     std::printf("Plugin processor test\n");
     {
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(4, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "built-in scene loads in the background");
@@ -1324,7 +1334,8 @@ static int runRemainingSuites() {
         check(std::fabs(10 * std::log10(eLow / eOpenRoom)) < 3.0, "a low partition is passed over by sound at ear height");
         setP(p,"soloDirect",0);setP(p,"soloEarly",0);
         {
-            VerbProcessor q2;
+            auto q2Storage = std::make_unique<VerbProcessor>();
+            auto& q2 = *q2Storage;
             q2.setPlayConfigDetails(4, 2, 48000, 256);
             q2.prepareToPlay(48000, 256);
             q2.setStateInformation(edited.getData(), (int)edited.getSize());
@@ -1385,7 +1396,8 @@ static int runRemainingSuites() {
         // state round trip
         juce::MemoryBlock mb;
         p.getStateInformation(mb);
-        VerbProcessor q;
+        auto qStorage = std::make_unique<VerbProcessor>();
+        auto& q = *qStorage;
         q.setPlayConfigDetails(4, 2, 48000, 256);
         q.prepareToPlay(48000, 256);
         q.setStateInformation(mb.getData(), (int)mb.getSize());
@@ -1396,7 +1408,8 @@ static int runRemainingSuites() {
             p.setInputMetersEnabled(false);
             juce::MemoryBlock mb2;
             p.getStateInformation(mb2);
-            VerbProcessor q2;
+            auto q2Storage = std::make_unique<VerbProcessor>();
+            auto& q2 = *q2Storage;
             q2.setPlayConfigDetails(4, 2, 48000, 256);
             q2.prepareToPlay(48000, 256);
             q2.setStateInformation(mb2.getData(), (int)mb2.getSize());
@@ -1406,7 +1419,8 @@ static int runRemainingSuites() {
     }
     if (std::getenv("VERB_CORE_ONLY")) return fails ? 1 : 0;
     {   // orientation, scaling, free channel points, space (air, clutter)
-        VerbProcessor r;
+        auto rStorage = std::make_unique<VerbProcessor>();
+        auto& r = *rStorage;
         r.setPlayConfigDetails(8, 2, 48000, 256);
         r.prepareToPlay(48000, 256);
         check(waitReady(r, 60), "setup for orientation / scaling / free points loads");
@@ -1473,7 +1487,8 @@ static int runRemainingSuites() {
         juce::Thread::sleep(300);
         juce::MemoryBlock sm;
         r.getStateInformation(sm);
-        VerbProcessor r2;
+        auto r2Storage = std::make_unique<VerbProcessor>();
+        auto& r2 = *r2Storage;
         r2.setPlayConfigDetails(8, 2, 48000, 256);
         r2.prepareToPlay(48000, 256);
         r2.setStateInformation(sm.getData(), (int)sm.getSize());
@@ -1518,7 +1533,8 @@ static int runRemainingSuites() {
         }
     }
     {   // many sources, formats and a 7.1.4 output
-        VerbProcessor q;
+        auto qStorage = std::make_unique<VerbProcessor>();
+        auto& q = *qStorage;
         q.setPlayConfigDetails(32, 12, 48000, 256);
         q.prepareToPlay(48000, 256);
         check(waitReady(q, 60), "setup with 12 output channels loads");
@@ -1630,7 +1646,8 @@ static int runRemainingSuites() {
         }
     }
     {
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(4, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         waitReady(p, 60);
@@ -1646,7 +1663,8 @@ static int runRemainingSuites() {
     }
     {   // source directivity and Doppler strength: live controls, saved in the project
         std::printf("Directivity and Doppler controls\n");
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(4, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "scene loads");
@@ -1677,7 +1695,8 @@ static int runRemainingSuites() {
         check(p.getSources()[0].pattern == 0.5, "the directivity is part of the source configuration");
         juce::MemoryBlock mb;
         p.getStateInformation(mb);
-        VerbProcessor q;
+        auto qStorage = std::make_unique<VerbProcessor>();
+        auto& q = *qStorage;
         q.setPlayConfigDetails(4, 2, 48000, 256);
         q.prepareToPlay(48000, 256);
         q.setStateInformation(mb.getData(), (int)mb.getSize());
@@ -1688,7 +1707,8 @@ static int runRemainingSuites() {
     }
     {   // floor and ceiling zones through the plugin: they change the sound, survive the project state, and the editor draws them
         std::printf("Floor and ceiling zones\n");
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(4, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "scene loads");
@@ -1728,7 +1748,8 @@ static int runRemainingSuites() {
         check(sc.floorZones.size() == 1 && sc.ceilZones.size() == 1 && sc.ceilZones[0].mat < 0, "the zones are part of the scene");
         juce::MemoryBlock mb;
         p.getStateInformation(mb);
-        VerbProcessor q;
+        auto qStorage = std::make_unique<VerbProcessor>();
+        auto& q = *qStorage;
         q.setPlayConfigDetails(4, 2, 48000, 256);
         q.prepareToPlay(48000, 256);
         q.setStateInformation(mb.getData(), (int)mb.getSize());
@@ -1844,7 +1865,8 @@ receiver R 0 0 1.5 0 0
         // updatePeriod > 0: the position is written only every `updatePeriod` samples, not at every block start (what a mouse
         // drag or sparse automation does); dy: closest distance of the pass
         auto runPass = [&](int blockSize, double speed, int updatePeriod = 0, double dyIn = 3.0) {
-            VerbProcessor p;
+            auto pStorage = std::make_unique<VerbProcessor>();
+            auto& p = *pStorage;
             p.setPlayConfigDetails(2, 2, 48000, blockSize);
             p.prepareToPlay(48000, blockSize);
             p.loadSceneText(freeField, "free.txt", true);
@@ -1951,7 +1973,8 @@ receiver R 0 0 1.5 0 0
             int channels = 0;
             for (auto& c : car->setup) channels += c.effectiveChannels();
             check(car->setup.size() == nSrc && channels == nPts, "sources and engine points as designed (4 wide sources carry 2 points)");
-            VerbProcessor p;
+            auto pStorage = std::make_unique<VerbProcessor>();
+            auto& p = *pStorage;
             p.setPlayConfigDetails(48, 2, 48000, 256);
             p.prepareToPlay(48000, 256);
             check(waitReady(p, 60), "the plugin starts");
@@ -2139,7 +2162,8 @@ receiver R 0 0 1.5 0 0
         const auto rooms = verbp::builtinRooms();
         for (auto& r : rooms) {
             if (r.name.find("Concert hall") == std::string::npos) continue;
-            VerbProcessor p;
+            auto pStorage = std::make_unique<VerbProcessor>();
+            auto& p = *pStorage;
             p.setPlayConfigDetails(1, 2, 48000, 512);
             p.prepareToPlay(48000, 512);
             waitReady(p, 60);
@@ -2261,7 +2285,8 @@ receiver R 0 0 1.5 0 0
             }
             std::printf("  %s: %zu groups, %d plates, listener (%.1f, %.1f, %.2f)\n", r.name.c_str(), r.setup.size(), plates, sc.listenerPos.x, sc.listenerPos.y, sc.listenerPos.z);
             check(inputsOk && above && plates >= 3 && plates <= verb::kMaxPlates && std::fabs(sc.listenerYaw - 90.0) < 1e-6, "the hall has its stage, risers, one mono input per group and the listener facing the orchestra from below");
-            VerbProcessor p;
+            auto pStorage = std::make_unique<VerbProcessor>();
+            auto& p = *pStorage;
             p.setPlayConfigDetails(32, 2, 48000, 256);
             p.prepareToPlay(48000, 256);
             check(waitReady(p, 60), "the plugin starts");
@@ -2313,7 +2338,8 @@ receiver R 0 0 1.5 0 0
     }
     {   // listener microphone pattern: human ears
         std::printf("Listener microphone pattern\n");
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(2, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "scene loads");
@@ -2334,7 +2360,8 @@ receiver R 0 0 1.5 0 0
         check(fin && en > 1e-9, "the human-ear listener renders finite sound");
         juce::MemoryBlock mb;
         p.getStateInformation(mb);
-        VerbProcessor q;
+        auto qStorage = std::make_unique<VerbProcessor>();
+        auto& q = *qStorage;
         q.setPlayConfigDetails(2, 2, 48000, 256);
         q.prepareToPlay(48000, 256);
         q.setStateInformation(mb.getData(), (int)mb.getSize());
@@ -2355,7 +2382,8 @@ receiver R 0 0 1.5 0 0
     }
     {   // dry/wet
         std::printf("Dry/wet mix\n");
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(2, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "scene loads");
@@ -2393,7 +2421,8 @@ receiver R 0 0 1.5 0 0
             }
         }
         check(allParse, "every built-in room parses (walls, a source and a listener)");
-        VerbProcessor p;
+        auto pStorage = std::make_unique<VerbProcessor>();
+        auto& p = *pStorage;
         p.setPlayConfigDetails(4, 2, 48000, 256);
         p.prepareToPlay(48000, 256);
         check(waitReady(p, 60), "scene loads");

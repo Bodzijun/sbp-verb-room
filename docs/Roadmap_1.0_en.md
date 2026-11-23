@@ -50,7 +50,7 @@ need testers.
 
 ## Where we are
 
-**Latest release: [0.2.2](Release_0.2.2_en.md)** for Windows x64, macOS Universal and Linux x86_64. Downloads are posted on the project's [Ko-fi page](https://ko-fi.com/s/405ebacfcc).
+**Latest release: [0.2.3](Release_0.2.3_en.md)** for Windows x64, macOS Universal and Linux x86_64. Downloads are posted on the project's [Ko-fi page](https://ko-fi.com/s/405ebacfcc).
 
 - **A new interface:** resizable, with a 3D room editor, material inspector, dimensions and scale, outliner, decay
   curves, energy map and a CPU load meter. The classic interface stays available. On macOS this is its first release
@@ -106,6 +106,12 @@ We would like to call the next major version 1.0 when the following is in place.
 
 **3. More automation**
 - Automatable reflection controls (absorption per band, scattering).
+- A position automation range that fits the room: the X / Y / Z parameters now span ±200 m (Z 0–30 m), so a room of a few
+  metres uses about 1% of an automation lane and the envelope is hard to draw. Add an option to fit the range to the
+  scene, set by an explicit button so that existing automation is never rescaled silently. Automation can reach outside the
+  room (a car arriving from far away), so the bounding box has to be chosen with care: walls, sources, the listener and
+  path points plus a margin, and possibly a box the user can edit by hand.
+  The default stays as it is, so old projects keep sounding the same.
 - Automation slots for materials: assign a slot to a material or a group of surfaces and automate it.
 
 **4. More realism**
@@ -113,10 +119,8 @@ We would like to call the next major version 1.0 when the following is in place.
 - Ambisonics output: **AmbiX up to 3rd order is in 0.2.0**; binaural output is still to come.
 - Directivity profiles act on the direct sound and the early reflections. The late tail treats every source as
   omnidirectional; a directional tail is not planned for 1.0.
-- Ambisonics normalization option: AmbiX output uses ACN channel order with SN3D normalization now. Add the other common
-  conventions (N3D, and FuMa for older material) as a selectable option.
-- Ambisonics output level: AmbiX output is louder than the same source through stereo. Add an optional gain
-  compensation, selectable, so the level can be matched to stereo.
+- **Done in 0.2.3**. Ambisonics normalization option. Choose SN3D (default), N3D or FuMa.
+- **Done in 0.2.3**. Ambisonics output level. Choose 0, −3 or −6 dB.
 - Low-frequency room modes.
 
 **5. Easier room drawing**
@@ -126,6 +130,7 @@ We would like to call the next major version 1.0 when the following is in place.
 - **Done in 0.2.2:** a Randomize button next to the Clutter seed; auto-link of corners when a whole wall is moved; in the
   Sources panel, a Sum button for each source, "All formats…" for the channel format of all sources at once and Sum on or
   off for all of them at once.
+- **Done in 0.2.3**. Corner snapping while dragging and Join corners to close small gaps.
 - After 1.0: full 3D meshes with sloped surfaces.
 
 **6. Product basics**

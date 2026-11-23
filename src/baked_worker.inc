@@ -1,7 +1,13 @@
-    // Audio is sole writer. Ready -> reading CAS excludes re-arming while control copies.
+    // Audio writes the samples. Ready -> reading CAS excludes arm and clear while control copies.
     static constexpr size_t passCap=4096;
     std::vector<double> passBuffer;
     std::atomic<int> passCommand{0},passState{0},passCount{0}; // 0 empty,1 armed,2 recording,3 ready,4 reading
+    std::atomic<bool> passClearPending{false};
+    std::atomic_flag passWrite = ATOMIC_FLAG_INIT;
+    struct PassWriteRelease {
+        std::atomic_flag& flag;
+        ~PassWriteRelease() { flag.clear(std::memory_order_release); }
+    };
     std::atomic<uint64_t> passGeneration{0};
     uint64_t passConsumed=0;
     std::vector<BakedPath> recordedPaths,declaredPaths;
@@ -12,7 +18,21 @@
     std::atomic<bool> passOff{false};
     uint32_t passProjectTick=0;
     void applyBakedPathsLocked(const std::vector<BakedPath>& declared);
+    bool finishPassClear() noexcept {
+        // Caller owns passWrite. Defer if exportRecordedPass is reading the buffer.
+        int expected=passState.load(std::memory_order_acquire);
+        if(expected==4||!passState.compare_exchange_strong(expected,4,std::memory_order_acq_rel))return false;
+        passCount.store(0,std::memory_order_relaxed);
+        passOff.store(false,std::memory_order_relaxed);
+        passGeneration.fetch_add(1,std::memory_order_acq_rel);
+        passState.store(0,std::memory_order_release);
+        passClearPending.store(false,std::memory_order_release);
+        return true;
+    }
     void recordPassAudio(bool playing) noexcept {
+        if(passWrite.test_and_set(std::memory_order_acquire))return;
+        const PassWriteRelease release{passWrite};
+        if(passClearPending.load(std::memory_order_acquire)&&!finishPassClear())return;
         if(passState.load(std::memory_order_acquire)==4)return;
         int cmd=passCommand.load(std::memory_order_acquire);
         if(cmd==1){
@@ -52,6 +72,13 @@
     }
     // Caller must hold bakeRequestMx.
     void consumeRecordedPass(){
+        if(passClearPending.load(std::memory_order_acquire)){
+            if(!passWrite.test_and_set(std::memory_order_acquire)){
+                const PassWriteRelease release{passWrite};
+                if(passClearPending.load(std::memory_order_acquire))finishPassClear();
+            }
+            if(passClearPending.load(std::memory_order_acquire))return;
+        }
         const uint64_t gen=passGeneration.load(std::memory_order_acquire);
         if(gen==passConsumed&&!recordedYawMatchChanged)return;
         const int st=passState.load(std::memory_order_acquire);
@@ -191,7 +218,7 @@
     bool bakeContextTable(const BakedTable& t,bool requirePublishedU=true) const noexcept {
         if(requirePublishedU && t.u.size()<2)return false;
         if(t.estimator!=kBakeEstimatorVersion)return false; // P3: tables from another estimator are stale, never played back
-        if(t.path.recorded&&(t.path.recording!=passGeneration.load(std::memory_order_acquire)||passCommand.load(std::memory_order_acquire)==1||passState.load(std::memory_order_acquire)==1||passState.load(std::memory_order_acquire)==2))return false;
+        if(t.path.recorded&&(passClearPending.load(std::memory_order_acquire)||t.path.recording!=passGeneration.load(std::memory_order_acquire)||passCommand.load(std::memory_order_acquire)==1||passState.load(std::memory_order_acquire)==1||passState.load(std::memory_order_acquire)==2))return false;
         if(t.geometry!=geomSerial.load(std::memory_order_relaxed)||t.quality!=qualitySerial.load(std::memory_order_relaxed))return false;
         if(t.objRevisions.size()!=t.movingPaths.size())return false;
         for(size_t i=0;i<t.movingPaths.size();++i){

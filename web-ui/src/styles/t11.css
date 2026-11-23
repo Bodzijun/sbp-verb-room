@@ -55,9 +55,12 @@
 .footer:has(.cpu-warning:not([hidden])) { grid-template-columns:minmax(0,1fr) 103px auto minmax(0,1fr) auto; }
 .cpu-warning { display:inline-flex; align-items:center; gap:5px; padding:1px 7px; border-radius:2px; font-size:11px; line-height:14px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:560px; }
 .cpu-warning[hidden] { display:none!important; }
-.path-bake-actions {display:flex;align-items:center;gap:8px;margin:6px 0;}
-.path-bake-actions>button {flex:none;white-space:nowrap;}
-.path-bake-status {min-width:0;line-height:1.4;}
+.path-bake-actions {display:grid;gap:5px;margin:6px 0;min-width:0;}
+.path-bake-row {display:grid;gap:3px;padding:4px 0;border-top:1px solid var(--line);}
+.path-bake-caption {font-weight:600;}
+.path-bake-buttons {display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;}
+.path-bake-buttons>button {max-width:100%;white-space:normal;}
+.path-bake-actions>small {min-width:0;line-height:1.4;overflow-wrap:anywhere;}
 .footer-bake,.footer-analysis {display:flex;align-items:center;gap:6px;min-width:0;}
 .footer-bake[hidden],.footer-bake-cancel[hidden],.footer-analysis[hidden] {display:none!important;}
 .footer-bake-text,.footer-analysis-text {white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
@@ -206,6 +209,8 @@
  .main-context:has(.has-selection) > .selected-card { border-left:0; }
 }
 @media(max-height:700px) {
+ .selected-card .pose-column { overflow-y:auto; overflow-x:hidden; }
+ .selected-card .card-grid .pose-column > .path-section { flex:none; overflow:visible; }
  .selected-card .card-grid .pose-column > .slider-row { min-height:19px; }
  .selected-card .path-section { gap:2px; }
  .selected-card .path-actions button { min-height:18px; height:20px; }
@@ -249,7 +254,6 @@ body::after { content:''; position:fixed; inset:0; pointer-events:none; z-index:
 .macro-row .macro-target .cancel-target { top:4px; }
 /* the RT60 caption is a button: give it the same box as .parameter-name so the text sits on the same line */
 .macro-row .macro-target>button:not(.cancel-target) { height:11px; min-height:0; line-height:11px; padding:0; margin:0; }
-.path-bake-actions { flex-wrap:wrap; }
 /* E19 polish: merged rows (no taller inspector) */
 .check-pair { display:flex; gap:4px; min-width:0; }
 .check-pair .check { flex:1 1 0; min-width:0; padding-left:4px; padding-right:4px; }
@@ -276,5 +280,15 @@ body::after { content:''; position:fixed; inset:0; pointer-events:none; z-index:
 .viewport-rebuilding { position:absolute; top:28px; left:50%; transform:translateX(-50%); z-index:9; display:inline-flex; align-items:center; gap:8px; padding:6px 14px; border-radius:999px; border:1.5px solid var(--warning,#e3af72); background:color-mix(in srgb,var(--warning,#e3af72) 20%,rgba(18,15,10,.94)); color:color-mix(in srgb,var(--warning,#e3af72) 50%,#fff4d6); font-size:12px; font-weight:600; letter-spacing:.03em; line-height:16px; white-space:nowrap; box-shadow:0 4px 16px rgba(0,0,0,.55),0 0 0 1px rgba(0,0,0,.35); pointer-events:none; user-select:none; }
 .viewport-rebuilding[hidden] { display:none!important; }
 .viewport-rebuilding-dot { width:8px; height:8px; flex:none; border-radius:50%; background:var(--warning,#e3af72); box-shadow:0 0 8px var(--warning,#e3af72); animation:rebuild-banner-pulse .9s ease-in-out infinite alternate; }
+/* Mix tab: the controls keep their natural height and the tab scrolls when the window is too low. */
+.mix-scroll-view>.mix-panel { height:auto; min-height:100%; }
+.mix-scroll-view .mix-columns { flex:1 0 auto; }
 @keyframes rebuild-banner-pulse { from { opacity:.45; transform:scale(.85); } to { opacity:1; transform:scale(1.1); } }
 @media (prefers-reduced-motion:reduce) { .viewport-rebuilding-dot { animation:none; opacity:1; } }
+
+.decay-side-view { padding-right: 7px; }
+
+@media (max-width:1000px) {
+  .edit-inspector .tabs button { flex:1 1 0; min-width:0; }
+  .edit-inspector .tabs .inspector-clear { position:static; flex:0 0 auto; align-self:center; padding:0 5px; }
+}

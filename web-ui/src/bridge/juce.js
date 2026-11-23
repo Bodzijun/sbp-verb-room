@@ -1,6 +1,21 @@
 import { clone, loadContract } from './contract.js';
 import { canonical } from './parameters.js';
 
+export function decodeMessage(value) {
+  if (value?.kind !== 'snapshot' || !Object.hasOwn(value, 'exactSceneCorners')) return value;
+  const { exactSceneCorners, ...message } = value;
+  const points = JSON.parse(exactSceneCorners), scene = message.payload.document.scene;
+  let i = 0;
+  for (const wall of scene.walls) {
+    wall.a = points[i++];
+    wall.b = points[i++];
+  }
+  for (const zone of [...scene.floorZones, ...scene.ceilingZones])
+    zone.vertices = zone.vertices.map(() => points[i++]);
+  if (i !== points.length) throw new Error('Invalid scene corner count');
+  return message;
+}
+
 // One native call per structural request, one ordered batch per parameter turn.
 // Values/texts come from C++; incoming automation is never sent back to the host.
 export function createJuceBridge(options = {}) {
@@ -17,7 +32,7 @@ export function createJuceBridge(options = {}) {
   }
   const deliver=(callbacks,value)=>{for(const fn of callbacks)try{fn(value);}catch(error){reportError(error);}};
   function receive(message) {
-    try { receiveMessage(message); } catch(error) { reportError(error); }
+    try { receiveMessage(decodeMessage(message)); } catch(error) { reportError(error); }
   }
   function receiveMessage(message) {
     if (closed) return;
@@ -106,6 +121,7 @@ export function createJuceBridge(options = {}) {
       try {
         messages = await native('verbMessage')(message);
         if (!Array.isArray(messages)) throw new Error('Invalid native bridge reply');
+        messages = messages.map(decodeMessage);
         for (const reply of messages) receive(reply);
       } catch (error) {
         if (waiter) { clearTimeout(waiter.timer); snapshotWaiters.delete(waiter); waiter.resolve(null); }

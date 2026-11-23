@@ -99,6 +99,7 @@ bool indicesMoved(const std::vector<KeyChange>&);  // a list changed length (sur
 struct Ctx {
     VerbProcessor& proc;
     const Model& start;  // the model a transaction started from (== the current model for a plain command)
+    juce::var* details = nullptr;
 };
 struct Descriptor {
     const char* op;

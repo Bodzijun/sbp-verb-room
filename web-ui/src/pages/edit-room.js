@@ -2,6 +2,7 @@ import { element, button, check, select, note, unavailable } from '../components
 import { SNAP_STEPS, snapSetting, snapFace, stepLabel } from '../viewport/snap.js';
 import { historyButtons } from '../components/history.js';
 import { icon, decorateIcon } from '../components/icons.js';
+import { openCornerCount } from '../state/join-corners.js';
 export function editTools(ctx) {
   const { store } = ctx;
   const refs = () => store.view.selection.filter(r => !['source', 'listener'].includes(r.kind)).map(({ kind, index }) => ({ kind, index }));
@@ -17,9 +18,25 @@ export function snapControl(ctx) {
   const items = [['auto', 'Auto · follows grid'], ...SNAP_STEPS.map(step => [String(step), stepLabel(step)]), ['off', 'Off']];
   const control = select('Snap step', items, setting === 'off' || setting === 'auto' ? setting : String(setting), key => {
     if (key === 'off') store.setView({ snap: false }); else if (key === 'auto') store.setView({ snap: true, snapStep: 'auto' }); else store.setView({ snap: true, snapStep: Number(key) });
-  }, { className: 'dd snap-dd', title: 'Snap step for drawing walls, zones and rooms. Alt = no snap. Moving existing corners stays free; typed values are exact.' });
+  }, { className: 'dd snap-dd', title: 'Grid step for drawing and moving corners. Nearby corners take priority, even with Snap off. Alt = no snap. Typed values are exact.' });
   control.querySelector('.dd-text').textContent = snapFace(store.view, ctx.snapStep());
   return control;
+}
+
+export function cornerRepair({ store }) {
+  const { scene, editorFlags } = store.state.document;
+  const count = openCornerCount(scene.walls, editorFlags.layerModes?.walls);
+  const result = store.cornerJoinResult;
+  const title = 'Moves nearly touching wall ends onto one point. A room with open corners bakes slowly and leaks sound.';
+  return [
+    ...(count > 0 ? [
+      element('p', { className: 'note', text: `Open corners: ${count}` }),
+      select('Corner tolerance', [[.01, '1 cm'], [.05, '5 cm'], [.10, '10 cm']], store.cornerJoinTolerance,
+        value => { store.cornerJoinTolerance = Number(value); }),
+      button('Join corners', () => store.joinCorners(), { title })
+    ] : []),
+    ...(result ? [element('p', { className: 'note', role: 'status', text: `Joined ${result.joined}, skipped ${result.skipped}` })] : [])
+  ];
 }
 // T6 B3: Outliner first, then the four layer filters; Snap and Auto-link on the right.
 export function layerBar(ctx) {

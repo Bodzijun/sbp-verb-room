@@ -1379,6 +1379,16 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 4096
+        },
+        "bakeSource": {
+          "enum": ["none", "drawn", "recorded"]
+        },
+        "bakeSourceGroup": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "recordingNote": {
+          "type": "string"
         }
       },
       "required": [

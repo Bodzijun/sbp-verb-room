@@ -146,6 +146,7 @@ int main() {
         {"source.setPointOffset", R"({"op":"source.setPointOffset","index":0,"channel":1,"offsetM":[0.25,0.5,0.125]})"},
         {"source.remove", R"({"op":"source.remove","index":1})"},
         {"output.set", R"({"op":"output.set","layout":2,"micPattern":7})"},
+        {"output.set (Ambisonics format)", R"({"op":"output.set","ambisonicsNormalization":2,"ambisonicsLevelDb":-6})"},
         {"tail.setQuality", R"({"op":"tail.setQuality","baseRays":12000,"adaptive":true})"},
         {"listener.set", R"({"op":"listener.set","xM":2,"yM":2.5,"yawDeg":45})"},
         {"surface.delete", R"({"op":"surface.delete","refs":[{"kind":"wall","index":4}]})"},
@@ -661,7 +662,9 @@ int main() {
         eval("document.querySelector('.viewport').frameAll();'ok'");juce::MessageManager::getInstance()->runDispatchLoopUntil(100);
         if((int)p.getDisplayScene().walls.size()>wallCount){
             const auto wallBefore=p.getDisplayScene().walls[(size_t)wallCount];const auto moveCamera=juce::JSON::toString(prop(p.getEditorSession().viewState(),"camera"),true);
-            eval("(()=>{const c=document.querySelector('.viewport canvas'),r=c.getBoundingClientRect(),p=window.__t4Project(["+juce::String(wallBefore.ax,6)+","+juce::String(wallBefore.ay,6)+",0],"+moveCamera+",r.width,r.height),capture=c.setPointerCapture;c.setPointerCapture=()=>{};try{for(const [type,dx] of [['pointerdown',0],['pointermove',9],['pointerup',9]])c.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId:1,button:0,clientX:r.x+p[0]+dx,clientY:r.y+p[1]}));}finally{c.setPointerCapture=capture;}})();'ok'");
+            // This assertion exercises free movement. A 9 px drag can now remain
+            // at the starting grid coordinate, so hold Alt explicitly.
+            eval("(()=>{const c=document.querySelector('.viewport canvas'),r=c.getBoundingClientRect(),p=window.__t4Project(["+juce::String(wallBefore.ax,6)+","+juce::String(wallBefore.ay,6)+",0],"+moveCamera+",r.width,r.height),capture=c.setPointerCapture;c.setPointerCapture=()=>{};try{for(const [type,dx] of [['pointerdown',0],['pointermove',9],['pointerup',9]])c.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId:1,button:0,altKey:true,clientX:r.x+p[0]+dx,clientY:r.y+p[1]}));}finally{c.setPointerCapture=capture;}})();'ok'");
             const auto movedUntil=juce::Time::getMillisecondCounterHiRes()+4000;while(p.getDisplayScene().walls[(size_t)wallCount].ax==wallBefore.ax&&juce::Time::getMillisecondCounterHiRes()<movedUntil)juce::MessageManager::getInstance()->runDispatchLoopUntil(20);
             const auto moved=p.getDisplayScene().walls[(size_t)wallCount];
             check(moved.ax!=wallBefore.ax && moved.bx==wallBefore.bx && moved.by==wallBefore.by, "Move corner viewport drag sends canonical surface.moveVertex transaction");

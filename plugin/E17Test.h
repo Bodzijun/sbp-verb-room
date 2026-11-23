@@ -20,6 +20,7 @@ static int testE17Plugin() {
     };
 
     juce::MemoryBlock persistedState;
+    juce::MemoryBlock clearedState;
     int savedSamples = 0;
 
     {
@@ -52,6 +53,41 @@ static int testE17Plugin() {
         auto engine = E9bAccess::engine(p);
         const auto revision = p.getRevision();
         const auto undo = p.getEditorSession().undoDepth();
+        auto clear = [&] {
+            return p.getEditorSession().run(juce::JSON::parse(R"({"op":"path.recordClear"})")).ok
+                && waitStatus([](const juce::var& st) {
+                    return (int)st["passState"] == 0 && (int)st["passSamples"] == 0
+                        && st["bakeSource"].toString() == "none";
+                })
+                && engine->exportRecordedPass().samples == 0;
+        };
+        auto arm = [&] {
+            return p.getEditorSession().run(juce::JSON::parse(R"({"op":"path.recordPass"})")).ok
+                && waitStatus([](const juce::var& st) { return (int)st["passState"] == 1; });
+        };
+        check(clear(), "F9 clear while idle is a no-op");
+        check(arm() && clear(), "F9 clear while armed cancels before playback");
+        check(arm(), "F9 arm for running-clear regression");
+        ph.playing = true;
+        tick();
+        setP(p, "s1x", 1.5);
+        tick();
+        check(engine->recordedPassStats().state == 2 && clear(), "F9 clear stops and discards while playing");
+        tick();
+        check(engine->recordedPassStats().state == 0, "F9 playback cannot restart cleared capture");
+        ph.playing = false;
+        check(arm(), "F9 arm for unbaked recording-clear regression");
+        ph.playing = true;
+        for (int i = 0; i < 8; ++i) {
+            setP(p, "s1x", 1.5 + 0.1 * i);
+            tick();
+        }
+        check(p.getEditorSession().run(juce::JSON::parse(R"({"op":"path.recordStop"})")).ok
+              && waitStatus([](const juce::var& st) {
+                  return (int)st["passState"] == 3 && st["bakeSource"].toString() == "recorded";
+              }), "F9 explicit Stop leaves a recording ready before Bake");
+        ph.playing = false;
+        check(p.pathBakePercent() == 0 && clear(), "F9 clear discards a finished recording before Bake");
 
         // DAW automation only: NO MovementPaths defined on any object!
         check(p.getEditorSession().run(juce::JSON::parse(R"({"op":"path.recordPass"})")).ok, "E17 record command accepted");
@@ -77,6 +113,9 @@ static int testE17Plugin() {
         check(stage2AudioAllocations == alloc, "E17 zero audio allocations while recording");
         check(p.getRevision() == revision && p.getEditorSession().undoDepth() == undo, "E17 record action does not edit document/undo");
         check(p.pathBakePercent() == 0 && engine->bakeStats().state == verb::Engine::BakeState::NotBaked, "E17 recording does not auto-bake");
+        check(waitStatus([](const juce::var& st) {
+            return st["bakeSource"].toString() == "recorded" && st["recordingNote"].isVoid();
+        }), "F9 recorded source available before Bake");
 
         // Persistence checks: state XML includes <RecordedPass>, .verbroom preset does NOT
         p.getStateInformation(persistedState);
@@ -112,22 +151,29 @@ static int testE17Plugin() {
         });
         check(diagOk, "E17 pathBakeStatus reports Recorded pass baked cleanly in pure ASCII");
 
-        // Move off recorded pass -> status reports Off recorded pass
+        // Move outside the table's joint pose coverage.
         setP(p, "lx", 8.5);
         setP(p, "ly", 8.5);
         const bool offOk = waitStatus([&](const juce::var& st) {
-            return st["reason"].toString().contains("Off recorded pass")
+            return st["reason"].toString().contains("Live motion is outside the baked recording - estimating the tail")
                 && isPureAscii(st["reason"].toString());
         });
-        check(offOk, "E17 pathBakeStatus reports Off recorded pass warning in pure ASCII");
+        check(offOk, "F9 live motion mismatch warning is pure ASCII");
 
-        // Verify persisted state XML preserves RecordedPass when loaded AFTER baking too, with no auto-bake
+        setP(p, "lx", 3.7);
+        setP(p, "ly", 3.2);
+        check(waitStatus([](const juce::var& st) {
+            return st["state"].toString() == "baked" && st["reason"].toString().isEmpty();
+        }), "F9 recorded playback re-enters table coverage");
         p.getStateInformation(persistedState);
+        auto bakedXml = juce::AudioProcessor::getXmlFromBinary(persistedState.getData(), (int)persistedState.getSize());
+        check(bakedXml && bakedXml->getChildByName("RecordedPass") && bakedXml->getChildByName("BakeCache"),
+              "F9 state persists both recorded poses and baked table");
         p.setPlayHead(nullptr);
         p.releaseResources();
     }
 
-    // Reload persisted project state into fresh processor: pass preserved, NO auto-bake, manually bakeable
+    // Reload the actual saved table and render an impulse through it.
     {
         auto qPtr = std::make_unique<VerbProcessor>();
         auto& q = *qPtr;
@@ -140,20 +186,21 @@ static int testE17Plugin() {
         auto engQ = E9bAccess::engine(q);
         const auto ps = engQ->recordedPassStats();
         check(ps.state == 3 && ps.samples == savedSamples, "E17 reloaded project restores RecordedPass samples");
-        check(q.pathBakePercent() == 0 && engQ->bakeStats().state == verb::Engine::BakeState::NotBaked && !engQ->bakedTableSnapshot(),
-              "E17 reloaded project does NOT save table or auto-bake");
-
-        check(q.startPathBake(-1), "E17 reloaded project allows explicit Bake without re-recording");
         juce::AudioBuffer<float> b(2, 128);
         juce::MidiBuffer midi;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
-        while (q.pathBakePercent() < 100 && std::chrono::steady_clock::now() < deadline) {
+        auto pump = [&] {
             b.clear();
             stage2Process(q, b, midi);
             juce::MessageManager::getInstance()->runDispatchLoopUntil(5);
-            juce::Thread::sleep(2);
-        }
-        check(q.pathBakePercent() == 100, "E17 reloaded RecordedPass bakes cleanly to 100%");
+        };
+        auto await = [&](auto pred, int seconds = 6) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+            while (!pred() && std::chrono::steady_clock::now() < deadline) pump();
+            return pred();
+        };
+        check(await([&] { return q.pathBakePercent() == 100; }) && engQ->bakeStats().restored == 1
+              && q.pathBakeStatus()["bakeSource"].toString() == "recorded",
+              "F9 reloaded project restores recorded table and bake source");
         // Verify on-pass pose audio and faster-than-real-time non-realtime bounce in plugin
         setP(q, "s1x", 2.75);
         setP(q, "s1y", 2.40);
@@ -181,6 +228,66 @@ static int testE17Plugin() {
         }
         check(allFinite && energySum > 1e-8, "E17 baked table produces finite audio in faster-than-real-time non-realtime mode after reload");
         q.setNonRealtime(false);
+        std::printf("F9 restored recorded impulse energy %.9g\n", energySum);
+
+        const auto revision = q.getRevision();
+        const auto undo = q.getEditorSession().undoDepth();
+        const auto clearRecording = [&] {
+            return q.getEditorSession().run(juce::JSON::parse(R"({"op":"path.recordClear"})")).ok;
+        };
+        const auto pass = engQ->exportRecordedPass();
+        juce::MemoryBlock beforeClear;
+        q.getStateInformation(beforeClear);
+        check(clearRecording(), "F9 clear a recording with baked tables");
+        q.getStateInformation(clearedState); // Also covers save immediately after command acknowledgement.
+        check(await([&] { return q.pathBakeStatus()["bakeSource"].toString() == "none"; })
+              && !engQ->bakedTableSnapshot() && engQ->recordedPassStats().samples == 0,
+              "F9 clears recorded tables and no longer offers a recording source");
+        check(q.getRevision() == revision && q.getEditorSession().undoDepth() == undo,
+              "F9 clear is revision- and undo-neutral");
+        auto beforeXml = juce::AudioProcessor::getXmlFromBinary(beforeClear.getData(), (int)beforeClear.getSize());
+        auto afterXml = juce::AudioProcessor::getXmlFromBinary(clearedState.getData(), (int)clearedState.getSize());
+        check(afterXml && !afterXml->getChildByName("RecordedPass") && !afterXml->getChildByName("BakeCache"),
+              "F9 immediate save omits cleared poses and table");
+        if (beforeXml && afterXml) {
+            beforeXml->deleteAllChildElementsWithTagName("RecordedPass");
+            beforeXml->deleteAllChildElementsWithTagName("BakeCache");
+            check(beforeXml->isEquivalentTo(afterXml.get(), true), "F9 unrelated saved scene and parameters remain identical");
+        }
+
+        check(engQ->importRecordedPass(pass), "F9 test restores a kept recording before editing drawn paths");
+        verbp::MovementPath drawn;
+        drawn.enabled = true;
+        drawn.group = 0;
+        drawn.points = {{{2.75, 2.4, 1.5}}, {{3.2, 2.4, 1.5}}};
+        check(q.setMovementPath(0, drawn), "F9 test draws a grouped path");
+        check(await([&] {
+            const auto status = q.pathBakeStatus();
+            const auto note = status["recordingNote"].toString();
+            return status["bakeSource"].toString() == "drawn" && (int)status["bakeSourceGroup"] == 1
+                && note == "Recording kept, not used: drawn paths are baked instead. Press Discard if you do not need it."
+                && isPureAscii(note);
+        }), "F9 grouped path wins over the kept recording with a distinct ASCII message");
+        check(q.startPathBake(0) && await([&] { return q.pathBakePercent() == 100; }, 90), "F9 drawn path bakes with a recording kept");
+        const auto drawnTable = engQ->bakedTableSnapshot();
+        check(clearRecording() && drawnTable && !drawnTable->path.recorded
+              && await([&] { return (int)q.pathBakeStatus()["passState"] == 0; })
+              && engQ->bakedTableSnapshot() && engQ->bakedTableSnapshot()->hash() == drawnTable->hash(),
+              "F9 clear unused recording preserves the drawn table");
+        q.releaseResources();
+    }
+
+    {
+        auto processor = std::make_unique<VerbProcessor>();
+        auto& q = *processor;
+        q.setPlayConfigDetails(2, 2, 48000, 128);
+        q.prepareToPlay(48000, 128);
+        q.setStateInformation(clearedState.getData(), (int)clearedState.getSize());
+        check(waitReady(q, 90), "F9 project reloads after Discard");
+        auto engine = E9bAccess::engine(q);
+        check(engine->recordedPassStats().state == 0 && !engine->bakedTableSnapshot()
+              && q.pathBakeStatus()["bakeSource"].toString() == "none",
+              "F9 second reload leaves recording and its table cleared");
         q.releaseResources();
     }
 
@@ -190,6 +297,7 @@ static int testE17Plugin() {
         check(legacyXml != nullptr, "E17 cloned state XML valid");
         if (legacyXml) {
             while (auto* ch = legacyXml->getChildByName("RecordedPass")) legacyXml->removeChildElement(ch, true);
+            legacyXml->deleteAllChildElementsWithTagName("BakeCache");
             juce::MemoryBlock legacyBin;
             juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacyBin);
             auto rPtr = std::make_unique<VerbProcessor>();

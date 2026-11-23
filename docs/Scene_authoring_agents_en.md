@@ -84,6 +84,8 @@ The `clutter` line is `count minLen maxLen tlMin tlMax seed hMin hMax [minDist]`
 
 `source` and `receiver` take `NAME x y z azimuth pattern gainDb elevationDeg`; the final four numbers are optional. `pattern`: 0 = omni, 0.5 = cardioid, 1 = figure-8. `listener` takes `x y z yaw`. In the plug-in, output receivers are generated from the Output layout and listener position. The file's `receiver` coordinates are also used by the CLI and do not replace the plug-in's Output configuration.
 
+In a full preset, the optional `Output` attributes `ambisonicsNormalization` and `ambisonicsLevelDb` follow Keep I/O with the rest of the output configuration. In a geometry `.txt`, the output format comes from the plug-in.
+
 ## 4. Materials and acoustics
 
 The band order is always **125, 250, 500, 1000, 2000, 4000, 8000 Hz**. `alpha` is the absorbed energy fraction, `tau` is the transmitted fraction, and the reflected fraction is `1-alpha-tau`. For every band, `0 <= alpha,tau <= 1` and `alpha+tau <= 1`. `transmit` is specified in dB: `tau = 10^(-TL/10)`. A value of 0 dB means full transmission, not an opaque surface.

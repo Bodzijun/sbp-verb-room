@@ -111,7 +111,7 @@ private:
     void revertApplied(Tx& t);
     Fail checkBase(const juce::String& baseRevision, bool envelope, bool requiredForEnvelope);
     // result builders
-    CommandResult ok(const juce::String& requestId, const char* status, std::vector<std::string> changed, bool historyEvent, const char* resyncReason = nullptr);
+    CommandResult ok(const juce::String& requestId, const char* status, std::vector<std::string> changed, bool historyEvent, const char* resyncReason = nullptr, const juce::var& details = {});
     CommandResult error(const juce::String& requestId, const Fail& f, bool resync = false);
     juce::var envelope(const char* kind, const juce::String& requestId, juce::var payload) const;
     juce::var historyEvent();

@@ -37,6 +37,16 @@ struct OutputCfg {
     int layout = (int)verb::Layout::StereoORTF;
     double radius = 0.1;  // distance of the virtual microphones from the listener centre, metres
     int micPattern = 0;   // verb::MicPattern: 0 = the layout's own (cardioid per channel), omni ... figure-8, human ears
+    int ambisonicsNormalization = 0; // 0 SN3D, 1 N3D, 2 FuMa
+    int ambisonicsLevelDb = 0;       // 0, -3, -6 dB
+
+    bool sameReceivers(const OutputCfg& other) const {
+        return layout == other.layout && radius == other.radius && micPattern == other.micPattern;
+    }
+    bool operator==(const OutputCfg& other) const {
+        return sameReceivers(other) && ambisonicsNormalization == other.ambisonicsNormalization
+            && ambisonicsLevelDb == other.ambisonicsLevelDb;
+    }
 };
 
 struct TailSettings {
@@ -163,7 +173,8 @@ public:
     bool startPathBake(int object=-1);
     void cancelPathBake();
     void clearPathBake();
-    void recordPathPass(bool stop=false) {webPassAction=stop?2:1;wake.signal();}
+    void recordPathPass(bool stop=false);
+    void clearPathRecording();
     juce::var pathBakeStatus() const;
     double webAppliedSize() const {return engineSize.load();}
     float webDuckReductionDb() const {return duckReduction.load();}
@@ -270,6 +281,7 @@ private:
         std::vector<float> lfe;                   // summed LFE inputs for the block
         double constructionSize=100.;
         int R = 0, lfeOut = -1, maxBlock = 512;
+        bool ambisonic = false;
     };
     void run() override;
     void runExport(juce::File dir);
@@ -301,7 +313,6 @@ private:
     std::atomic<int> bakeLogEditors{0};
     uint64_t bakeLogStartBlocks = 0;
     int bakeLogWaitReason = 0;
-    std::atomic<int> webPassAction{0};
     mutable juce::CriticalSection webBakeLock;
     juce::var webBakeStatus;
     std::array<bool,33> webBakeTouched{};
@@ -329,6 +340,8 @@ private:
     juce::String sceneText, sceneName;
     std::vector<verbp::SourceCfg> srcCfg;
     verbp::OutputCfg outCfg;
+    std::atomic<int> ambisonicsFormat{0}; // both output choices published as one lock-free value
+    void publishAmbisonicsFormat(); // under dispLock
     verbp::TailSettings tailSettings;
     verb::Engine::RecordedPassData savedRecordedPass;
     std::vector<verb::BakedTable> savedBakeTables; // P4: BakeCache tables parsed from the state being loaded (dispLock)

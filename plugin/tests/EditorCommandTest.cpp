@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <random>
@@ -381,6 +382,7 @@ static void testEveryCommandApplyUndoRedo(Rig& r) {
         {"source.remove", R"({"op":"source.remove","index":1})"},
         {"output.set", R"({"op":"output.set","layout":2,"micPattern":7})"},
         {"output.set (AmbiX 3rd order)", R"({"op":"output.set","layout":11})"},
+        {"output.set (normalization and level)", R"({"op":"output.set","ambisonicsNormalization":2,"ambisonicsLevelDb":-3})"},
         {"tail.setQuality", R"({"op":"tail.setQuality","baseRays":12000,"adaptive":true})"},
         {"listener.set", R"({"op":"listener.set","xM":2,"yM":2.5,"yawDeg":45})"},
         {"surface.delete", R"({"op":"surface.delete","refs":[{"kind":"wall","index":4}]})"},
@@ -595,6 +597,8 @@ static void testRejections(Rig& r) {
     expectErr("invalid: removing a source that does not exist", R"({"op":"source.remove","index":9})", "invalid");
     expectErr("invalid: only a ceiling can be opened (ref = floor)", R"({"op":"room.setOpening","ref":{"kind":"floor","index":0},"open":true})", "invalid");
     expectErr("invalid: no fields", R"({"op":"room.setAir"})", "invalid");
+    expectErr("invalid: Ambisonics normalization", R"({"op":"output.set","ambisonicsNormalization":3})", "invalid");
+    expectErr("invalid: Ambisonics level step", R"({"op":"output.set","ambisonicsLevelDb":-4})", "invalid");
     expectErr("invalid: output layout after the last format", R"({"op":"output.set","layout":12})", "invalid");
     expectErr("invalid: baseRevision missing in a mutation", R"({"op":"room.setHeight","heightM":3})", "invalid", "-");
     expectErr("unsupported: unknown op", R"({"op":"room.explode"})", "unsupported");
@@ -1111,6 +1115,178 @@ static void testWallPresetImpulse(Rig& r) {
           "F1 reloaded render is finite, non-silent and within 0.0001 dB of the original");
 }
 
+static std::pair<int, int> joinCounts(const juce::var& details) {
+    return {(int)details.getProperty("joined", -1), (int)details.getProperty("skipped", -1)};
+}
+
+static void testCornerRepairClusters(Rig& r) {
+    const auto* command = verbp::findDescriptor("scene.joinCorners");
+    const auto model = [&](std::initializer_list<double> xs) {
+        Model m = r.model();
+        m.scene.walls.clear();
+        for (double x : xs) {
+            const auto i = m.scene.walls.size();
+            m.scene.walls.push_back(verb::Wall{x, 0, 1.0 + i, 2, m.scene.floorMat});
+        }
+        return m;
+    };
+    const auto join = [&](Model& m, const char* args = "{}") {
+        const Model before = m;
+        juce::var details;
+        const auto failure = command->mutate(J(args), m, {r.p, before, &details});
+        return failure.bad() ? std::pair<int, int>{-1, -1} : joinCounts(details);
+    };
+    for (auto xs : {std::initializer_list<double>{0, .03}, {0, .04, -.04}, {0, .04, -.04, -.02}}) {
+        auto m = model(xs);
+        check(join(m) == std::make_pair(1, 0) &&
+              std::all_of(m.scene.walls.begin(), m.scene.walls.end(), [](const auto& w) { return w.ax == 0; }),
+              "F7 cluster with " + std::to_string(xs.size()) + " ends uses the first wall as anchor");
+    }
+    auto m = model({0, .04, .08});
+    m.scene.walls[1].editor.locked = true;
+    m.scene.walls[2].editor.hidden = true;
+    check(join(m) == std::make_pair(1, 0) && m.scene.walls[0].ax == .04 && m.scene.walls[1].ax == .04 &&
+          m.scene.walls[2].ax == .04 && m.scene.walls[2].editor.hidden, "F7 locked anchor retains a transitive cluster and includes a hidden wall");
+    m = model({0, .03, .04});
+    m.scene.walls[0].editor.locked = m.scene.walls[1].editor.locked = true;
+    check(join(m) == std::make_pair(0, 1) && m.scene.walls[2].ax == .04, "F7 distinct locked ends skip the cluster");
+    m = model({0, .04, .08});
+    check(join(m) == std::make_pair(0, 1) && m.scene.walls[1].ax == .04, "F7 transitive radius beyond tolerance is skipped");
+    m = model({0, .02});
+    m.scene.walls[0].bx = .04;
+    m.scene.walls[0].by = 0;
+    check(join(m) == std::make_pair(0, 1) && m.scene.walls[0].bx == .04 && m.scene.walls[1].ax == .02,
+          "F7 collapsing a wall skips the entire cluster");
+    m = model({0, .03, .03});
+    check(join(m) == std::make_pair(1, 0) && m.scene.walls[1].ax == 0 && m.scene.walls[2].ax == 0,
+          "F7 an already sewn pair moves together when added to a repair cluster");
+    m = model({0, .03, .04});
+    check(join(m, R"({"refs":[{"kind":"wall","index":1},{"kind":"wall","index":2}]})") == std::make_pair(1, 0) &&
+          m.scene.walls[0].ax == 0 && m.scene.walls[1].ax == .03 && m.scene.walls[2].ax == .03,
+          "F7 refs restrict both the anchor and moved ends");
+    for (int mode : {1, 2}) {
+        m = model({0, .03});
+        m.scene.layerModes[0] = mode;
+        check(join(m) == std::make_pair(0, 0) && m.scene.walls[1].ax == .03, "F7 noneditable wall layer is excluded");
+    }
+    r.validateCommands = false;
+    for (auto args : {R"({"op":"scene.joinCorners","toleranceM":0})", R"({"op":"scene.joinCorners","toleranceM":0.5})"}) {
+        const auto result = r.send(args);
+        check(!result.ok && result.code == "invalid" && result.field == "toleranceM", "F7 tolerance bounds reject " + std::string(args));
+    }
+    r.validateCommands = true;
+}
+
+static bool sameCornerBits(const verb::Scene& a, const verb::Scene& b) {
+    if (a.walls.size() != b.walls.size()) return false;
+    for (size_t i = 0; i < a.walls.size(); ++i) {
+        const auto& u = a.walls[i];
+        const auto& v = b.walls[i];
+        const double coordsA[]{u.ax, u.ay, u.bx, u.by, u.z0, u.z1};
+        const double coordsB[]{v.ax, v.ay, v.bx, v.by, v.z0, v.z1};
+        if (std::memcmp(coordsA, coordsB, sizeof(coordsA)) != 0) return false;
+    }
+    return true;
+}
+
+static void testCornerSnapPrecision(Rig& r) {
+    const auto* translate = verbp::findDescriptor("surface.translate");
+    const auto* moveVertex = verbp::findDescriptor("surface.moveVertex");
+    Model before = r.model();
+    before.scene = parseText(boxText(5, 4, 3));
+    const double x = 0.12345678901234567;
+    before.scene.walls.push_back(verb::Wall{x, 1, 2, 3, before.scene.floorMat});
+    Model after = before;
+    const auto target = R"("snapTarget":{"kind":"wall","index":4,"vertex":0})";
+    auto f = translate->mutate(J(translateWall(0, x - 5, 1, (std::string(R"(,"autoLink":true,"snapFrom":{"kind":"wall","index":0,"vertex":1},)") + target).c_str())),
+                               after, {r.p, before});
+    // The existing test helper prints a six-decimal delta. The real command must send the exact delta.
+    check(f.bad(), "F7 rounded delta for a target reference is rejected");
+    std::ostringstream args;
+    args.precision(17);
+    args << R"({"op":"surface.translate","refs":[{"kind":"wall","index":0}],"autoLink":true,"deltaM":[)"
+         << x - 5 << R"(,1],"snapFrom":{"kind":"wall","index":0,"vertex":1},)" << target << '}';
+    after = before;
+    f = translate->mutate(J(args.str()), after, {r.p, before});
+    check(!f.bad() && after.scene.walls[0].bx == x && after.scene.walls[1].ax == x &&
+          after.scene.walls[0].by == 1 && after.scene.walls[1].ay == 1, "F7 translation and linked end copy exact target bits");
+    after = before;
+    f = moveVertex->mutate(J(std::string(R"({"op":"surface.moveVertex","ref":{"kind":"wall","index":0},"vertex":1,"positionM":[0.12345678901234567,1],"autoLink":false,)") + target + "}"),
+                           after, {r.p, before});
+    check(!f.bad() && after.scene.walls[0].bx == x && after.scene.walls[0].by == 1 &&
+          after.scene.walls[1].ax == 5, "F7 vertex snaps exactly with auto-link disabled");
+}
+
+static void testCornerRepairImpulse(Rig& r) {
+    auto gap = parseText(boxText(5, 4, 3));
+    const double x = 5.1234567890123457;
+    gap.walls[0].bx = gap.walls[1].ax = gap.walls[1].bx = gap.walls[2].ax = x;
+    gap.walls[1].ay = .03;
+    const auto text = verb::serializeScene(gap, 6, 17);
+    Rig unsealed;
+    if (!r.load(text, "F7 3 cm corner gap") || !unsealed.load(text, "F7 3 cm corner gap") || !waitForImpulseRoom(unsealed.p)) {
+        check(false, "F7 gapped test room settles");
+        return;
+    }
+    check(openCorners(r.p.getDisplayScene()) == 1 && sameCornerBits(r.p.getDisplayScene(), gap), "F7 precisely one 3 cm gap before repair");
+    const auto result = r.send(R"({"op":"scene.joinCorners"})");
+    const auto repaired = r.p.getDisplayScene();
+    check(result.ok && joinCounts(result.messages.front().getProperty("payload", {}).getProperty("details", {})) == std::make_pair(1, 0) &&
+          openCorners(repaired) == 0 && repaired.walls[1].ax == x && repaired.walls[1].ay == 0,
+          "F7 one repaired cluster seals the room and reports one join");
+    if (!waitForImpulseRoom(r.p)) { check(false, "F7 sealed room settles"); return; }
+
+    Rig restored;
+    restored.p.setKeepRoutingEnabled(false);
+    const auto file = juce::File("F7-joined-room.verbroom");
+    juce::String why;
+    if (!file.replaceWithText(r.p.getRoomPresetText()) || !restored.p.loadRoomPresetText(file.loadFileAsString(), why) ||
+        !waitForImpulseRoom(restored.p)) { check(false, "F7 preset reload: " + why.toStdString()); return; }
+    check(sameCornerBits(repaired, restored.p.getDisplayScene()), "F7 preset keeps every wall coordinate bit-identical");
+    check(sameCornerBits(repaired, parseText(stateSceneText(r.p))), "F7 host state preserves the exact coordinates of edited walls");
+
+    std::vector<float> gappedAudio, sealedAudio, restoredAudio;
+    const auto gapped = impulse(unsealed.p, 0, &gappedAudio);
+    const auto sealed = impulse(r.p, 0, &sealedAudio);
+    const auto replay = impulse(restored.p, 0, &restoredAudio);
+    const auto late = [](const std::vector<float>& audio) {
+        double energy = 0;
+        for (size_t block = 0; block < audio.size() / 512; ++block)
+            for (size_t i = 0; i < 512; ++i)
+                if (block * 256 + i % 256 >= 4800) {
+                    const double v = audio[block * 512 + i];
+                    energy += v * v;
+                }
+        return energy;
+    };
+    const double lateGap = late(gappedAudio), lateSealed = late(sealedAudio), lateReplay = late(restoredAudio);
+    const double reloadDb = 10 * std::log10(replay.energy / sealed.energy);
+    double maxDelta = 0;
+    for (size_t i = 0; i < sealedAudio.size(); ++i)
+        maxDelta = std::max(maxDelta, std::abs(double(sealedAudio[i]) - restoredAudio[i]));
+    std::printf("    F7 48 kHz stereo, 2 s; total energies gap/sealed/reloaded %.12g / %.12g / %.12g\n", gapped.energy, sealed.energy, replay.energy);
+    std::printf("    F7 late [0.1, 2] s gap/sealed/reloaded %.12g / %.12g / %.12g; sealed vs gap %+.9g dB\n",
+                lateGap, lateSealed, lateReplay, 10 * std::log10(lateSealed / lateGap));
+    std::printf("    F7 reload: total delta %+.9g dB, peak %.9g -> %.9g, max sample delta %.9g\n", reloadDb, sealed.peak, replay.peak, maxDelta);
+    check(gapped.finite && sealed.finite && replay.finite && lateGap > 0 && lateSealed > 0 && lateReplay > 0,
+          "F7 all three real-engine impulses are finite with nonzero late energy");
+    check(std::abs(reloadDb) <= 0.0001 && maxDelta <= 1e-6, "F7 reloaded impulse level and samples match the repaired room");
+    check(r.session().undoDepth() == 1 && r.session().undo().ok && !r.session().canUndo() &&
+          sameCornerBits(r.p.getDisplayScene(), gap), "F7 one undo restores the complete gapped room exactly");
+
+    juce::MemoryBlock currentState, legacyState;
+    r.p.getStateInformation(currentState);
+    auto legacy = juce::AudioProcessor::getXmlFromBinary(currentState.getData(), (int)currentState.getSize());
+    const auto legacyText = boxText(5.125, 4, 3);
+    if (legacy) {
+        legacy->setAttribute("sceneText", juce::String(legacyText));
+        juce::AudioProcessor::copyXmlToBinary(*legacy, legacyState);
+        restored.p.setStateInformation(legacyState.getData(), (int)legacyState.getSize());
+    }
+    check(legacy && waitReady(restored.p, 90) && sameCornerBits(restored.p.getDisplayScene(), parseText(legacyText)),
+          "F7 pre-change VerbState with six-digit geometry loads unchanged");
+}
+
 static void testSourceFormatImpulse() {
     Rig r(64);
     const auto room = verbp::vslGrandHall(false);
@@ -1240,6 +1416,9 @@ int main() {
         timed("C1", testC1SourceColors);
         timed("F1 translation", testWallTranslation);
         timed("F1 preset impulse", testWallPresetImpulse);
+        timed("F7 clusters", testCornerRepairClusters);
+        timed("F7 snap precision", testCornerSnapPrecision);
+        timed("F7 repair impulse", testCornerRepairImpulse);
     } catch (const std::exception& e) { std::printf("  [FAIL] unexpected exception: %s\n", e.what()); ++fails; }
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("\neditor_commands: %d PASS, %d FAIL, %.1f s\n", passes, fails, sec);

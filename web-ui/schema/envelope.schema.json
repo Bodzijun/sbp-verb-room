@@ -221,6 +221,7 @@
                     "enum": [
                       "surface.translate",
                       "surface.moveVertex",
+                      "scene.joinCorners",
                       "surface.create",
                       "surface.delete",
                       "surface.applyPreset",
