@@ -138,6 +138,22 @@ We would like to call the next major version 1.0 when the following is in place.
 - Installers, signing, a manual, more ready-made rooms.
 - Other plug-in formats (CLAP, AU) if there is demand.
 
+**7. Creative tools (candidates after the basics above)**
+- **Motion modulation:** a matrix that lets movement drive sound. Drivers: distance to the listener, to a point or to
+  the nearest wall, angle, height, speed, position on the path (later also how much the direct sound is blocked).
+  Targets: source level, source filters, Early / Tail level, Doppler, Width, Duck, directivity amount. Each route has a
+  multi-segment curve and smoothing. Planned for 0.3.0 together with the azimuth keys on the timeline.
+- **Path LFO and orbits:** an LFO that moves a source back and forth along its path, or round the listener on a
+  closed path, with a speed limit that keeps the Doppler physical.
+- **Animated geometry:** doors, hatches and walls that open and close on the timeline (transmission, height and
+  position as automation), tied to the material automation slots above.
+- **Swarm and granular clouds:** a source cloned over a volume or a surface (a limited number of voices for the direct
+  sound and early reflections, one shared tail), moving, or re-placed grain by grain.
+- **Reactive room:** the level of the input sound drives the size, absorption or position of an object.
+- **Coupled volumes:** the tail of the next room heard through a door.
+- **A learned tail denoiser (research):** a small model that cleans the noisy tail estimate from few rays, to speed up
+  Preview and Mix; Render keeps the full ray tracing as the reference.
+
 ## How you can help
 
 - **Test and report.** Other hosts than REAPER, macOS and Linux, large sessions, odd buffer sizes. A bug report with
