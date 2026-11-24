@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Verb Room — фізично змодельований кімнатний ревербератор VST3. Намалюйте кімнату й послухайте, як вона звучить під час руху джерел і слухача.">
-  <title>Verb Room 0.2.3 — Фізично змодельований кімнатний ревербератор</title>
+  <title>Verb Room 0.3.0 — Фізично змодельований кімнатний ревербератор</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230a121b%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%273%27 fill=%27%2318b0ca%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%209%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%272.2%27 opacity=%27.7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2713.5%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%271.6%27 opacity=%27.4%27/%3E%3C/svg%3E">
   <link rel="stylesheet" href="../style.css">
   <link rel="alternate" hreflang="en" href="../index.html">
@@ -16,6 +16,7 @@
       <a class="brand" href="index.html">Verb Room</a>
       <nav class="section-nav" aria-label="На цій сторінці">
         <a href="#room-details">Деталі кімнати</a>
+        <a href="#modulation">Модуляція</a>
         <a href="#comparison">Порівняння</a>
       </nav>
       <nav class="languages" aria-label="Мова">
@@ -29,7 +30,7 @@
     <section class="hero" aria-labelledby="title">
       <div class="wrap hero-grid">
         <div class="hero-copy">
-          <p class="release">VST3 · 0.2.3 альфа</p>
+          <p class="release">VST3 · 0.3.0 альфа</p>
           <h1 id="title">Намалюйте кімнату.<br><em>Почуйте її в русі.</em></h1>
           <p class="lead">Фізично змодельований ревербератор. Побудуйте простір зі стін і матеріалів та рухайте в ньому джерела звуку й слухача.</p>
           <div class="hero-actions">
@@ -384,6 +385,47 @@
       </div>
     </section>
 
+    <section class="section modulation-section" id="modulation" aria-labelledby="modulation-title">
+      <div class="wrap video-grid">
+        <div>
+          <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+          <h2 id="modulation-title">Нехай рух формує звук</h2>
+          <p>У режимі Creative відстань, швидкість чи кут між джерелом і слухачем можуть керувати тим, як звучить це джерело й кімната. Оберіть, за чим стежити, намалюйте криву й виберіть, що вона змінює.</p>
+          <ul class="chips" role="list">
+            <li>Маршрути з редактором кривої</li>
+            <li>Гучність, фільтри, шельфи, рівні кімнати</li>
+            <li>LFO шляху</li>
+            <li>16 виходів для інших плагінів</li>
+          </ul>
+        </div>
+        <figure class="detail-figure">
+          <img src="../assets/modulation-editor.webp" width="865" height="537" loading="lazy" alt="Вкладка Modulation із маршрутом від відстані до слухача до фільтра низьких частот, редактором плавної кривої та живими значеннями керувальника й частоти фільтра">
+          <figcaption>Вкладка Modulation: відстань до слухача закриває фільтр низьких частот на джерелі.</figcaption>
+        </figure>
+      </div>
+      <div class="wrap">
+        <div class="features">
+          <div>
+            <h3>За чим стежити</h3>
+            <p>Відстань до слухача, до точки чи до найближчої стіни; азимут і висота кута; X, Y і Z; швидкість і швидкість наближення; позиція на шляху.</p>
+          </div>
+          <div>
+            <h3>Що змінювати</h3>
+            <p>Гучність джерела, фільтри низьких і високих частот, низький і високий шельфи або рівні кімнати: ранні відбиття, хвіст і мікс. Атака й спад згладжують кожен рух, а стартові пресети дають маршрут одним кліком.</p>
+          </div>
+          <div>
+            <h3>LFO шляху</h3>
+            <p>Додайте до позиції на шляху синусоїдальне, трикутне, пилкоподібне, прямокутне чи плавно випадкове коливання до 8 Гц, щоб джерело гойдалось, кружляло чи тріпотіло.</p>
+          </div>
+          <div>
+            <h3>Керуйте іншими плагінами</h3>
+            <p>Шістнадцять параметрів Mod Out несуть результат ваших маршрутів. У REAPER прив’яжіть до будь-якого з них параметр будь-якого плагіна через Link from FX parameter, і ручка рухатиметься за правилами вашої сцени.</p>
+          </div>
+        </div>
+        <p class="note">Модуляція працює в режимі Creative і нічого не робить у Physical. Редактор є частиною веб-інтерфейсу; збірка для Linux має класичний інтерфейс без нього.</p>
+      </div>
+    </section>
+
     <section class="section audio-section" aria-labelledby="hear">
       <div class="wrap">
         <h2 id="hear">Послухайте, як звучить кімната</h2>
@@ -479,7 +521,7 @@
 
     <section class="section" id="download" aria-labelledby="download-title">
       <div class="wrap">
-        <h2 id="download-title">Завантажити Verb Room 0.2.3</h2>
+        <h2 id="download-title">Завантажити Verb Room 0.3.0</h2>
         <p class="narrow">Windows x64, macOS Universal і Linux x86_64. Суму визначаєте ви, можна завантажити за нуль. Платежі підтримують розробку.</p>
         <div class="download-actions">
           <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Завантажити Verb Room на Ko-fi</a>
@@ -519,16 +561,16 @@
         <h3 class="checksum-title">SHA-256 пакетів</h3>
         <dl class="hashes">
           <div>
-            <dt>VerbRoom-0.2.3-win64.zip</dt>
-            <dd><code>6beae3f287356f922f8176984f94453c9a0c9ed9239c3ba2dc129ee44efc190c</code></dd>
+            <dt>VerbRoom-0.3.0-win64.zip</dt>
+            <dd><code>c2b4321fdd3994e8f8a4f5003bc3a1dbf4c060faad82556ce0160dae10587a50</code></dd>
           </div>
           <div>
-            <dt>VerbRoom-0.2.3-macos-universal.zip</dt>
-            <dd><code>1fe0eea2f782fcefdfcdd7ddf9438f788de077447325da6fcfd052a06da29c86</code></dd>
+            <dt>VerbRoom-0.3.0-macos-universal.zip</dt>
+            <dd><code>32b1b93e26aa1b67cd35b2c7504bc5b2b8ec340447ffec8ce8ca60c2ce6455f8</code></dd>
           </div>
           <div>
-            <dt>VerbRoom-0.2.3-linux-x86_64.tar.gz</dt>
-            <dd><code>f92cf89b0c5a9b5f2dde2fdbef84eac8de8e535850ac5eb5e9c915f600b8eaba</code></dd>
+            <dt>VerbRoom-0.3.0-linux-x86_64.tar.gz</dt>
+            <dd><code>20f9e08408686292bba9c1ba3d7f9bc3588f4c74e3c6d6d24d7039bd215433b0</code></dd>
           </div>
         </dl>
       </div>
@@ -561,7 +603,7 @@
         <h2 id="limits">Відомі обмеження</h2>
         <ul>
           <li>Verb Room — альфа-версія. Плагін тестували в REAPER під Windows. Автоматизовані перевірки продуктивності охоплюють сцени з багатьма джерелами. Прослуховування в реальних сесіях і тести продуктивності на старіших чотириядерних системах ще попереду.</li>
-          <li>Версію 0.2.0 перевіряв на реальному Mac тестувальник зі спільноти; 0.2.1, 0.2.2 і 0.2.3 на Mac ще не перевіряли. Щоб скористатися командами хоста, яких редактор macOS не обробляє, клацніть поза вікном плагіна. Збірка для Linux має лише класичний інтерфейс, і в реальному хості її ще не пробували.</li>
+          <li>Версію 0.2.0 перевіряв на реальному Mac тестувальник зі спільноти; 0.2.1–0.3.0 на Mac ще не перевіряли. Щоб скористатися командами хоста, яких редактор macOS не обробляє, клацніть поза вікном плагіна. Збірка для Linux має лише класичний інтерфейс, і в реальному хості її ще не пробували.</li>
           <li>Геометрія 2,5D обмежена вертикальними стінами й горизонтальними підлогами, стелями та плитами. Модель ґрунтується на геометричній акустиці без низькочастотних кімнатних мод. Пізній хвіст оцінюється статистично.</li>
           <li>Великі сцени можуть відчутно навантажувати процесор, особливо з AmbiX третього порядку в Creative. Для таких проєктів спробуйте Physical. Запікання шляху у великій сцені може тривати близько 1–2 хвилин залежно від сцени, процесора й навантаження.</li>
           <li>Наявні пресети, сцени й проєкти завантажуються. Для рухомих об’єктів у режимі Manual із таблицями з попередніх збірок може знадобитися повторний Bake path. Для таблиць, запечених у 0.2.0, повторне запікання досі обов’язкове.</li>
@@ -571,15 +613,16 @@
 
     <section class="section" aria-labelledby="changes">
       <div class="wrap split">
-        <h2 id="changes">Що змінилося у 0.2.3</h2>
+        <h2 id="changes">Що змінилося у 0.3.0</h2>
         <div>
           <ul>
-            <li><strong>Магніт і ремонт кутів.</strong> Під час перетягування кута чи стіни найближчі кути притягують їх (з Alt перетягування вільне). <strong>Open corners</strong> рахує щілини між кінцями стін, а <strong>Join corners</strong> їх закриває, бо відкриті кути можуть пропускати звук і сповільнювати Bake.</li>
-            <li><strong>Вихід Ambisonics.</strong> Можна вибрати нормалізацію (SN3D, N3D або FuMa) і рівень (0, −3 або −6 дБ). Експортовані WAV збігаються з живим виходом.</li>
-            <li><strong>Запис і запікання.</strong> Блок Path тепер має ряд <strong>Host automation</strong> (Record automation, Discard) і ряд <strong>Bake late tail</strong> (Bake path, Clear bake), рядок із тим, що використає Bake, і зрозуміліші повідомлення.</li>
-            <li><strong>Малі вікна.</strong> Вкладки Mix і Decay прокручуються, виправлено кілька обрізаних елементів на малих екранах.</li>
+            <li><strong>Ключі азимуту.</strong> Орієнтацію рухомого джерела чи слухача можна задавати ключами на таймлайні шляху, з плавністю й режимом Hold. У viewport правий перетяг повертає вибраний ключ.</li>
+            <li><strong>Діапазон автоматизації під кімнату.</strong> <strong>Fit to scene</strong> звужує діапазон параметрів позиції з ±200 м до вашої кімнати, тож доріжка автоматизації хоста використовує всю висоту. Звук не змінюється.</li>
+            <li><strong>Модуляція руху.</strong> Маршрути стежать за відстанню, швидкістю, кутом чи позицією на шляху й керують гучністю джерела, фільтрами, шельфами та рівнями кімнати (режим Creative). LFO шляху додає коливання позиції вздовж шляху.</li>
+            <li><strong>Mod Out 1–16.</strong> Шістнадцять параметрів хоста несуть результат ваших маршрутів, тож до них можна прив’язувати інші плагіни (у REAPER: Link from FX parameter).</li>
+            <li><strong>Інтерфейс.</strong> Секції, що згортаються, в головному інспекторі, вкладка Modulation із відокремлюваним редактором і вікно About із порадами та посиланнями на підтримку.</li>
           </ul>
-          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.2.3_uk.md">Повні нотатки випуску 0.2.3</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_uk.md">Дорожня карта до 1.0</a></p>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.3.0_uk.md">Повні нотатки випуску 0.3.0</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_uk.md">Дорожня карта до 1.0</a></p>
           <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Manual_uk.md">Посібник користувача</a>, зокрема про запікання шляхів.</p>
         </div>
       </div>
@@ -597,7 +640,7 @@
       </div>
     </section>
   </main>
-  <footer class="footer"><div class="wrap"><p>Verb Room 0.2.3 · SBP</p><div class="footer-links"><a href="#support" data-support-open>Підтримати проєкт</a><a lang="en" hreflang="en" href="../index.html">English version</a></div></div></footer>
+  <footer class="footer"><div class="wrap"><p>Verb Room 0.3.0 · SBP</p><div class="footer-links"><a href="#support" data-support-open>Підтримати проєкт</a><a lang="en" hreflang="en" href="../index.html">English version</a></div></div></footer>
   <dialog class="support-dialog" id="support-dialog" aria-labelledby="support-dialog-title">
     <div class="support-dialog-panel">
       <div class="support-dialog-head">

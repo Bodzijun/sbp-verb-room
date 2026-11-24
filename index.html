@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Verb Room is a physically based room reverb for VST3 hosts. Draw a room and listen as sources and the listener move through it.">
-  <title>Verb Room 0.2.3 – Physically based room reverb</title>
+  <title>Verb Room 0.3.0 – Physically based room reverb</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230a121b%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%273%27 fill=%27%2318b0ca%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%209%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%272.2%27 opacity=%27.7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2713.5%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%271.6%27 opacity=%27.4%27/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
   <link rel="alternate" hreflang="uk" href="uk/index.html">
@@ -16,6 +16,7 @@
       <a class="brand" href="index.html">Verb Room</a>
       <nav class="section-nav" aria-label="On this page">
         <a href="#room-details">Room details</a>
+        <a href="#modulation">Modulation</a>
         <a href="#comparison">Compare</a>
       </nav>
       <nav class="languages" aria-label="Language">
@@ -29,7 +30,7 @@
     <section class="hero" aria-labelledby="title">
       <div class="wrap hero-grid">
         <div class="hero-copy">
-          <p class="release">VST3 · 0.2.3 alpha</p>
+          <p class="release">VST3 · 0.3.0 alpha</p>
           <h1 id="title">Draw the room.<br><em>Hear it move.</em></h1>
           <p class="lead">A physically based room reverb. Build a space from walls and materials, then move sound sources and the listener through it.</p>
           <div class="hero-actions">
@@ -384,6 +385,47 @@
       </div>
     </section>
 
+    <section class="section modulation-section" id="modulation" aria-labelledby="modulation-title">
+      <div class="wrap video-grid">
+        <div>
+          <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+          <h2 id="modulation-title">Let motion shape the sound</h2>
+          <p>In Creative mode, the distance, speed or angle between a source and the listener can control how that source and the room sound. Pick what to follow, draw a curve, choose what it changes.</p>
+          <ul class="chips" role="list">
+            <li>Routes with a curve editor</li>
+            <li>Gain, filters, shelves, room levels</li>
+            <li>Path LFO</li>
+            <li>16 outputs for other plug-ins</li>
+          </ul>
+        </div>
+        <figure class="detail-figure">
+          <img src="assets/modulation-editor.webp" width="865" height="537" loading="lazy" alt="The Modulation tab with a route from distance to listener to a low-pass filter, a smooth curve editor, and a live readout of the driver and the filter frequency">
+          <figcaption>The Modulation tab: distance to the listener closes a low-pass filter on a source.</figcaption>
+        </figure>
+      </div>
+      <div class="wrap">
+        <div class="features">
+          <div>
+            <h3>Choose what to follow</h3>
+            <p>Distance to the listener, to a point, or to the nearest wall; azimuth and elevation; X, Y and Z; speed and approach speed; position on the path.</p>
+          </div>
+          <div>
+            <h3>Choose what it changes</h3>
+            <p>Source gain, low-pass and high-pass filters, low and high shelves, or the room’s early level, tail level and mix. Attack and release smooth every move, and starter presets give you a route in one click.</p>
+          </div>
+          <div>
+            <h3>Path LFO</h3>
+            <p>Add a sine, triangle, saw, square or smooth random wobble to the position along a path, up to 8 Hz, for sources that sway, circle or flutter.</p>
+          </div>
+          <div>
+            <h3>Drive other plug-ins</h3>
+            <p>Sixteen Mod Out parameters carry the result of your routes. In REAPER, link any plug-in parameter to one with Link from FX parameter, so a knob moves by the rules of your scene.</p>
+          </div>
+        </div>
+        <p class="note">Modulation works in Creative mode and does nothing in Physical mode. The editor is part of the web interface; the Linux build uses the classic interface without it.</p>
+      </div>
+    </section>
+
     <section class="section audio-section" aria-labelledby="hear">
       <div class="wrap">
         <h2 id="hear">Hear the room</h2>
@@ -479,7 +521,7 @@
 
     <section class="section" id="download" aria-labelledby="download-title">
       <div class="wrap">
-        <h2 id="download-title">Download Verb Room 0.2.3</h2>
+        <h2 id="download-title">Download Verb Room 0.3.0</h2>
         <p class="narrow">Windows x64, macOS Universal and Linux x86_64. Pay what you want, including zero. Payments support development.</p>
         <div class="download-actions">
           <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Get Verb Room on Ko-fi</a>
@@ -519,16 +561,16 @@
         <h3 class="checksum-title">Package SHA-256</h3>
         <dl class="hashes">
           <div>
-            <dt>VerbRoom-0.2.3-win64.zip</dt>
-            <dd><code>6beae3f287356f922f8176984f94453c9a0c9ed9239c3ba2dc129ee44efc190c</code></dd>
+            <dt>VerbRoom-0.3.0-win64.zip</dt>
+            <dd><code>c2b4321fdd3994e8f8a4f5003bc3a1dbf4c060faad82556ce0160dae10587a50</code></dd>
           </div>
           <div>
-            <dt>VerbRoom-0.2.3-macos-universal.zip</dt>
-            <dd><code>1fe0eea2f782fcefdfcdd7ddf9438f788de077447325da6fcfd052a06da29c86</code></dd>
+            <dt>VerbRoom-0.3.0-macos-universal.zip</dt>
+            <dd><code>32b1b93e26aa1b67cd35b2c7504bc5b2b8ec340447ffec8ce8ca60c2ce6455f8</code></dd>
           </div>
           <div>
-            <dt>VerbRoom-0.2.3-linux-x86_64.tar.gz</dt>
-            <dd><code>f92cf89b0c5a9b5f2dde2fdbef84eac8de8e535850ac5eb5e9c915f600b8eaba</code></dd>
+            <dt>VerbRoom-0.3.0-linux-x86_64.tar.gz</dt>
+            <dd><code>20f9e08408686292bba9c1ba3d7f9bc3588f4c74e3c6d6d24d7039bd215433b0</code></dd>
           </div>
         </dl>
       </div>
@@ -561,7 +603,7 @@
         <h2 id="limits">Known limitations</h2>
         <ul>
           <li>Verb Room is alpha software. Windows is the platform tested in REAPER. Automated performance checks cover multi-source scenes. Live listening and performance on older four-core systems remain open.</li>
-          <li>Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1, 0.2.2 and 0.2.3 have yet to be tested on a Mac. When the macOS editor has focus, click outside it to use host shortcuts the editor does not handle. The Linux build has the classic interface only and has not been tried in a real host yet.</li>
+          <li>Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 through 0.3.0 have yet to be tested on a Mac. When the macOS editor has focus, click outside it to use host shortcuts the editor does not handle. The Linux build has the classic interface only and has not been tried in a real host yet.</li>
           <li>Geometry is 2.5D: vertical walls and horizontal floors, ceilings, and plates. The model covers geometric acoustics without low-frequency room modes. The tail is a statistical estimate.</li>
           <li>Large scenes can be CPU-intensive, especially with third-order AmbiX in Creative mode. Try Physical mode for large sessions. A large-scene path bake can take about 1–2 minutes depending on the scene, CPU, and system load.</li>
           <li>Existing presets, scenes, and projects still load. Moving objects in Manual mode with tables baked in an earlier build may need one fresh Bake path. Tables baked in 0.2.0 still require a fresh bake.</li>
@@ -571,15 +613,16 @@
 
     <section class="section" aria-labelledby="changes">
       <div class="wrap split">
-        <h2 id="changes">What changed in 0.2.3</h2>
+        <h2 id="changes">What changed in 0.3.0</h2>
         <div>
           <ul>
-            <li><strong>Corner snapping and repair.</strong> While you drag a corner or a wall, nearby corners act as a magnet (hold Alt to drag freely). <strong>Open corners</strong> counts gaps between wall ends, and <strong>Join corners</strong> closes them, because open corners can leak sound and slow down Bake.</li>
-            <li><strong>Ambisonics output.</strong> Choose the normalization (SN3D, N3D or FuMa) and the level (0, −3 or −6 dB). Exported WAV files match the live output.</li>
-            <li><strong>Recording and baking.</strong> The Path block now has a <strong>Host automation</strong> row (Record automation, Discard) and a <strong>Bake late tail</strong> row (Bake path, Clear bake), with a line showing what Bake will use and clearer messages.</li>
-            <li><strong>Small windows.</strong> The Mix and Decay tabs scroll, and several clipped controls on small screens are fixed.</li>
+            <li><strong>Azimuth keys.</strong> Key the orientation of a moving source or the listener on the Path timeline, with easing and Hold. In the viewport, right-drag rotates the selected key.</li>
+            <li><strong>Automation range that fits the room.</strong> <strong>Fit to scene</strong> narrows the range of the position parameters from ±200 m to your room, so a host automation lane uses its full height. Audio does not change.</li>
+            <li><strong>Motion modulation.</strong> Routes follow distance, speed, angle or path position and drive source gain, filters, shelves and room levels (Creative mode). A Path LFO adds a wobble to the position along a path.</li>
+            <li><strong>Mod Out 1–16.</strong> Sixteen host parameters carry the result of your routes, so you can link other plug-ins to them (in REAPER: Link from FX parameter).</li>
+            <li><strong>Interface.</strong> Collapsible sections in the main inspector, a Modulation tab with a detachable editor, and an About dialog with tips and support links.</li>
           </ul>
-          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.2.3_en.md">Read the 0.2.3 release notes</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_en.md">See the roadmap to 1.0</a></p>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.3.0_en.md">Read the 0.3.0 release notes</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_en.md">See the roadmap to 1.0</a></p>
           <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Manual_en.md">Read the user manual</a>, including a guide to baking paths.</p>
         </div>
       </div>
@@ -597,7 +640,7 @@
       </div>
     </section>
   </main>
-  <footer class="footer"><div class="wrap"><p>Verb Room 0.2.3 · SBP</p><div class="footer-links"><a href="#support" data-support-open>Support the project</a><a lang="uk" hreflang="uk" href="uk/index.html">Українська версія</a></div></div></footer>
+  <footer class="footer"><div class="wrap"><p>Verb Room 0.3.0 · SBP</p><div class="footer-links"><a href="#support" data-support-open>Support the project</a><a lang="uk" hreflang="uk" href="uk/index.html">Українська версія</a></div></div></footer>
   <dialog class="support-dialog" id="support-dialog" aria-labelledby="support-dialog-title">
     <div class="support-dialog-panel">
       <div class="support-dialog-head">
