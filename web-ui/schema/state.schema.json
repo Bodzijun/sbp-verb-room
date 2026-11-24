@@ -392,6 +392,47 @@
               "maxItems": 2
             }
           }
+        },
+        "automationRange": {
+          "type": "object",
+          "properties": {
+            "xM": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": -200,
+                "maximum": 200
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "yM": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": -200,
+                "maximum": 200
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "zM": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 30
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "xM",
+            "yM",
+            "zM"
+          ]
         }
       },
       "additionalProperties": false,
@@ -679,6 +720,9 @@
         "editorFlags": {
           "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/EditorFlags"
         },
+        "modulation": {
+          "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/ModulationConfig"
+        },
         "paths": {
           "type": "array",
           "items": {
@@ -780,6 +824,43 @@
                   ]
                 },
                 "maxItems": 64
+              },
+              "azKeys": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "t": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "az": {
+                      "type": "number",
+                      "minimum": -180,
+                      "maximum": 180
+                    },
+                    "easing": {
+                      "enum": [
+                        "linear",
+                        "easeIn",
+                        "easeOut",
+                        "easeInOut",
+                        "hold"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "t",
+                    "az",
+                    "easing"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 128
+              },
+              "lfo": {
+                "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/PathLfo"
               }
             },
             "required": [
@@ -1127,6 +1208,118 @@
         "load"
       ],
       "description": "descriptors may be null when the client already holds the list of the same contractVersion/pluginVersion."
+    },
+    "PathLfo": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "shape": { "enum": ["sine", "triangle", "saw", "square", "smoothRandom"] },
+        "rateHz": { "type": "number", "minimum": 0, "maximum": 8 },
+        "depth": { "type": "number", "minimum": 0, "maximum": 1 },
+        "phaseDeg": { "type": "number", "minimum": 0, "maximum": 360 },
+        "seed": { "type": "integer", "minimum": 1, "maximum": 999999 }
+      },
+      "required": ["enabled", "shape", "rateHz", "depth", "phaseDeg", "seed"],
+      "additionalProperties": false
+    },
+    "ModDriver": {
+      "enum": [
+        "distanceToListener",
+        "distanceToPoint",
+        "azimuthToListener",
+        "elevation",
+        "x",
+        "y",
+        "z",
+        "speed",
+        "radialSpeed",
+        "pathPosition",
+        "distanceToNearestWall"
+      ]
+    },
+    "ModTarget": {
+      "enum": [
+        "sourceGain",
+        "sourceLowPass",
+        "sourceHighPass",
+        "sourceLowShelf",
+        "sourceHighShelf",
+        "earlyLevel",
+        "tailLevel",
+        "mix",
+        "none"
+      ]
+    },
+    "CurveNode": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "smooth": { "type": "boolean" }
+      },
+      "required": ["x", "y"],
+      "additionalProperties": false
+    },
+    "ModCurve": {
+      "type": "object",
+      "properties": {
+        "inputRange": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "outputRange": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "invert": { "type": "boolean" },
+        "clamp": { "type": "boolean" },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/CurveNode" },
+          "minItems": 2,
+          "maxItems": 8
+        }
+      },
+      "required": ["inputRange", "outputRange", "invert", "clamp", "nodes"],
+      "additionalProperties": false
+    },
+    "ModRoute": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "object": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "driver": { "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/ModDriver" },
+        "point": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -200, "maximum": 200 },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "curve": { "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/ModCurve" },
+        "targetObject": { "type": "integer", "minimum": -1, "maximum": 31 },
+        "target": { "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/ModTarget" },
+        "hostOut": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "attackMs": { "type": "number", "minimum": 0, "maximum": 2000 },
+        "releaseMs": { "type": "number", "minimum": 0, "maximum": 5000 }
+      },
+      "required": ["enabled", "object", "driver", "curve", "targetObject", "target", "attackMs", "releaseMs"],
+      "additionalProperties": false
+    },
+    "ModulationConfig": {
+      "type": "object",
+      "properties": {
+        "routes": {
+          "type": "array",
+          "items": { "$ref": "https://verbroom.invalid/web-ui/schema/state.schema.json#/$defs/ModRoute" },
+          "maxItems": 64
+        }
+      },
+      "required": ["routes"],
+      "additionalProperties": false
     }
   }
 }

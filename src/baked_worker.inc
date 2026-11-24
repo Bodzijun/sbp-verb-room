@@ -805,7 +805,7 @@
             bool allAtSelected=jb.raysDecided;
             if(allAtSelected)for(const auto&kv:jb.raysAt)if(kv.second<jb.selectedRays){allAtSelected=false;break;}
             if(jb.initialAt==jb.initial.size()&&allAtSelected){
-                if(jb.segments.empty())for(size_t j=1;j<jb.nodes.size();++j)jb.segments.push_back({jb.nodes[j-1],jb.nodes[j]});
+                if(jb.segments.empty())for(size_t j=1;j<jb.nodes.size();++j)if(jb.nodes[j]-jb.nodes[j-1]>1e-6)jb.segments.push_back({jb.nodes[j-1],jb.nodes[j]});
                 while(jb.segmentAt<jb.segments.size()){
                     auto ab=jb.segments[jb.segmentAt];double mid=(ab.first+ab.second)*.5;auto found=jb.cache.find(mid);
                     if(found==jb.cache.end())break;

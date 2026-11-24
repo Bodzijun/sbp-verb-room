@@ -1,6 +1,7 @@
 import { clone, loadContract } from './contract.js';
 import { canonical } from './parameters.js';
-import { applyMutation, validateModel, updateEffective, updateHost, reject } from './mock-model.js';
+import { applyMutation, validateModel, updateEffective, updateHost, reject, isDefaultAutomationRange, syncDescriptorsWithRange, expandRangeWithPoint, sanitiseAutomationRange } from './mock-model.js';
+import { computeModulationTelemetry } from '../components/modulation-model.js';
 import { makeSyntheticEnergy } from '../viewport/energy-layer.js';
 import { mockClutterEvent, mockClutterSignature } from './mock-clutter.js';
 export const FIXTURES = ['default-physical', 'legacy-creative', 'small-room', 'large-hall', 'energy-result', 'error-resync'];
@@ -21,6 +22,7 @@ export async function createMockBridge(options = {}) {
   const enabledPaths=doc=>(doc.paths||[]).map((path,object)=>({path,object})).filter(x=>x.path?.enabled&&x.path.points.length>=2);
   const pathGroupDriver=(paths,object)=>{const p=paths?.[object],g=p?.group??-1;if(g<0||!p?.enabled||(p.points?.length??0)<2)return object;for(let o=0;o<32;o++)if(paths[o]?.enabled&&paths[o].points?.length>=2&&(paths[o].group??-1)===g)return o;return object;};
   let bakeStatus=emptyBake(),bakeToken=0,bakeOrigin='none';
+  let modTickTimer = null, modEpochMs = Date.now(), lastModSig = '';
   function bakeInput() {
     const enabled=enabledPaths(state.document);
     const paths=state.document.paths || [];
@@ -46,8 +48,45 @@ export async function createMockBridge(options = {}) {
       ...(drawn&&hasRecording?{recordingNote:'Recording kept, not used: drawn paths are baked instead. Press Discard if you do not need it.'}:{})
     };
   }
+  const hasActiveModLfo = () => {
+    const paths = state?.document?.paths || [];
+    if ((state?.parameters?.values?.mode ?? 0) < 0.5) return false;
+    return paths.some((p, o) => {
+      if (!p?.enabled || (p.points?.length ?? 0) < 2) return false;
+      const drv = pathGroupDriver(paths, o);
+      const lfo = paths[drv]?.lfo;
+      return !!(lfo?.enabled && lfo.depth > 0);
+    });
+  };
+  const modFields = () => {
+    const routes = state?.document?.modulation?.routes;
+    if (!routes?.length) return {};
+    const elapsed = (Date.now() - modEpochMs) / 1000;
+    const t = computeModulationTelemetry(state, elapsed);
+    return { modulation: { routes: t.routes } };
+  };
   function bakeEvent(overrides = {}) {
-    event({event:'status.load',state:state.load.state,status:state.load.status,sceneSerial:state.sceneSerial||'0',loadSerial:state.loadSerial||'0',tailCurrent:state.load.tailCurrent,rebuilding:false,pathBake:{...bakeStatus,...bakeFields(bakeInput()),...overrides}});
+    event({event:'status.load',state:state.load.state,status:state.load.status,sceneSerial:state.sceneSerial||'0',loadSerial:state.loadSerial||'0',tailCurrent:state.load.tailCurrent,rebuilding:false,pathBake:{...bakeStatus,...bakeFields(bakeInput()),...overrides},...modFields()});
+  }
+  function emitModIfChanged(force = false) {
+    const mf = modFields();
+    const sig = mf.modulation ? JSON.stringify(mf.modulation) : '';
+    if (!force && sig === lastModSig) return;
+    lastModSig = sig;
+    if (!closed && state) bakeEvent();
+  }
+  function scheduleModTick() {
+    if (modTickTimer) { clearTimeout(modTickTimer); timers.delete(modTickTimer); modTickTimer = null; }
+    if (closed || !state?.document?.modulation?.routes?.length || !hasActiveModLfo()) return;
+    const gen = generation;
+    const id = setTimeout(() => {
+      timers.delete(id);
+      if (modTickTimer === id) modTickTimer = null;
+      if (closed || generation !== gen) return;
+      emitModIfChanged(true);
+      scheduleModTick();
+    }, 100);
+    modTickTimer = id; timers.add(id);
   }
   function emit(kind, payload, requestId) {
     const message = { schemaVersion: 1, sessionId, kind, ...(requestId ? { requestId } : {}), payload: clone(payload) };
@@ -66,16 +105,16 @@ export async function createMockBridge(options = {}) {
     const id = setTimeout(() => { timers.delete(id); if (tailTimer === id) tailTimer = null; if (!closed && generation === gen) bridge.emitSyntheticTail(); }, ms);
     tailTimer = id; timers.add(id);
   }
-  function stopJobs() { timers.forEach(clearTimeout); timers.clear(); tailTimer = null; job = null; meterToken++; }
+  function stopJobs() { timers.forEach(clearTimeout); timers.clear(); tailTimer = null; modTickTimer = null; modEpochMs = Date.now(); lastModSig = ''; job = null; meterToken++; }
   function historyEvent() { event({event:'history.changed',canUndo:history.length>0,undoDepth:history.length,canRedo:false,undoLabel:history.length ? (history.at(-1).undoLabel || 'Scene edit') : '',redoLabel:''}); }
   let clutterSignature = null;
   function clutterEvent(force = false) { const signature = mockClutterSignature(state); if (force || signature !== clutterSignature) { clutterSignature = signature; event(mockClutterEvent(state)); } }
-  function snapshot() { const result = emit('snapshot', state); historyEvent(); clutterEvent(); bakeEvent(); return result; }
+  function snapshot() { const mf = modFields(); lastModSig = mf.modulation ? JSON.stringify(mf.modulation) : ''; const result = emit('snapshot', state); historyEvent(); clutterEvent(); bakeEvent(); scheduleModTick(); return result; }
   function fresh(name, keepPreferences = false) {
     const old = state; generation++; stopJobs(); bakeToken++;bakeStatus=emptyBake();bakeOrigin='none';tx = null; gestures.clear(); history.length = 0; seen.clear(); resources.clear(); selected = name;
     clutterSignature = null;
     const fixture = data.get(name === 'error-resync' ? name : `snapshot.${name === 'energy-result' ? 'default-physical' : name}`);
-    state = clone(fixture.messages.find(m => m.kind === 'snapshot').payload); state.parameters.descriptors = clone(descriptors);for(const d of descriptors.parameters)state.parameters.values[d.id] ??= d.default;
+    state = clone(fixture.messages.find(m => m.kind === 'snapshot').payload); state.parameters.descriptors = clone(descriptors);for(const d of descriptors.parameters)state.parameters.values[d.id] ??= d.default;syncDescriptorsWithRange(state);
     state.capabilities = state.capabilities || {};
     state.capabilities.features = state.capabilities.features || {};
     state.capabilities.features['colours.source'] = { available: true, status: 'available' };
@@ -86,11 +125,16 @@ export async function createMockBridge(options = {}) {
   function change(next, requestId, paths = ['document', 'host', 'parameters', 'preferences'], editedPathObject = null) {
     // Compare the acoustic document without the format choices. This also keeps
     // a bake current when output-only changes are undone.
-    const acousticDocument = ({ output, ...document }) => {
+    const acousticDocument = ({ output, scene, modulation, paths, ...document }) => {
       const { ambisonicsNormalization, ambisonicsLevelDb, ...receivers } = output;
-      return { ...document, output: receivers };
+      const { automationRange, ...sceneRest } = scene || {};
+      const acousticPaths = Array.isArray(paths)
+        ? paths.map(p => { if (!p || typeof p !== 'object' || !('lfo' in p)) return p; const { lfo, ...rest } = p; return rest; })
+        : paths;
+      return { ...document, scene: sceneRest, output: receivers, ...(acousticPaths !== undefined ? { paths: acousticPaths } : {}) };
     };
-    const acousticChange=JSON.stringify(acousticDocument(next.document))!==JSON.stringify(acousticDocument(state.document));
+    const posMoved = ['s', 'l'].some(p => Object.keys(next.parameters?.values || {}).some(k => /^(?:s\d+|l)[xyz]$/.test(k) && next.parameters.values[k] !== state.parameters.values[k]));
+    const acousticChange = posMoved || JSON.stringify(acousticDocument(next.document)) !== JSON.stringify(acousticDocument(state.document));
     const bakeInvalid=acousticChange&&(['baking','baked','approximate'].includes(bakeStatus.state)||(Array.isArray(bakeStatus.paths)&&bakeStatus.paths.some(x=>['baking','baked','approximate'].includes(x.state))));
     const oldPaths=state.document?.paths;
     const fromRevision = state.revision; next.revision = (BigInt(fromRevision) + 1n).toString();
@@ -112,6 +156,8 @@ export async function createMockBridge(options = {}) {
       bakeStatus={...bakeStatus,state:'outdated',percent:0,reason:msg,paths:updatedPaths};
     }
     if(bakeInvalid||JSON.stringify(oldPaths)!==JSON.stringify(next.document?.paths)) bakeEvent();
+    else emitModIfChanged();
+    scheduleModTick();
     return state.revision;
   }
   function replayEnergy() {
@@ -126,14 +172,16 @@ export async function createMockBridge(options = {}) {
     const message = { values: clone(values), effective: clone(effective) };
     audit.push({ direction: 'relay-in', message }); parameterListeners.forEach(fn => fn(message));
   }
+  function paramDesc(id) { return (state?.parameters?.descriptors?.parameters || descriptors.parameters).find(p => p.id === id); }
   function parameterAction(type, id, value) {
     if (!state || closed) throw new Error('Bridge is not ready');
-    const d = descriptors.parameters.find(p => p.id === id); if (!d) throw new Error('Unknown parameter');
+    const d = paramDesc(id); if (!d) throw new Error('Unknown parameter');
     if (type === 'begin') { if (gestures.has(id)) throw new Error(`Gesture already open: ${id}`); gestures.add(id); }
     if (type === 'change') {
       if (!gestures.has(id)) throw new Error(`Change outside gesture: ${id}`);
       if (canonical(d, value) !== value) throw new Error(`Noncanonical parameter value: ${id}`);
       state.parameters.values[id] = value; updateEffective(state); relay();
+      if (state.document?.modulation?.routes?.length && (/^(?:s\d+|l)(?:x|y|z|az|path)$/.test(id) || id === 'mode')) { emitModIfChanged(); scheduleModTick(); }
       if (job?.resultId) event({ event: 'analysis.stale', resultId: job.resultId, stale: true });
       if (['size', 'absorption', 'decayLow', 'decayMid', 'decayHigh', 'mode'].includes(id)) scheduleTail(15);
     }
@@ -267,18 +315,55 @@ export async function createMockBridge(options = {}) {
           const old = clone(state), name = FIXTURES[Number(p.id)]; fresh(name, true);
           delete state.preferences.sessionViewState;
           state.host = old.host;
-          if (old.document.editorFlags.keepRouting) { state.document.sources = old.document.sources; state.document.output = old.document.output; }
+          if (old.document.editorFlags.keepRouting) {
+            state.document.sources = old.document.sources; state.document.output = old.document.output;
+            const localN = old.document.sources.length;
+            const roomGlobalTargets = new Set(['earlyLevel', 'tailLevel', 'mix']);
+            const localRoutes = (old.document.modulation?.routes || []).filter(r =>
+              !roomGlobalTargets.has(r.target)
+              && (r.object === 32 || (r.object >= 0 && r.object < localN))
+              && (r.target === 'none' || (r.targetObject < 0 && r.object < localN) || (r.targetObject >= 0 && r.targetObject < localN)));
+            const presetGlobalRoutes = (state.document.modulation?.routes || []).filter(r =>
+              roomGlobalTargets.has(r.target) && (r.object === 32 || (r.object >= 0 && r.object < localN)));
+            const mergedRoutes = [...localRoutes, ...presetGlobalRoutes].slice(0, 64);
+            if (mergedRoutes.length) state.document.modulation = { routes: mergedRoutes };
+            else delete state.document.modulation;
+            const ar = state.document.scene.automationRange;
+            if (ar && !isDefaultAutomationRange(ar)) {
+              for (let i = 0; i < old.document.sources.length; i++) {
+                expandRangeWithPoint(ar, old.parameters.values[`s${i + 1}x`], old.parameters.values[`s${i + 1}y`], old.parameters.values[`s${i + 1}z`]);
+                for (const pt of old.document.paths?.[i]?.points || []) expandRangeWithPoint(ar, pt[0], pt[1], pt[2]);
+              }
+              expandRangeWithPoint(ar, old.parameters.values.lx, old.parameters.values.ly, old.parameters.values.lz);
+              for (const pt of old.document.paths?.[32]?.points || []) expandRangeWithPoint(ar, pt[0], pt[1], pt[2]);
+              state.document.scene.automationRange = sanitiseAutomationRange(ar);
+              syncDescriptorsWithRange(state);
+            }
+          }
           state.document.editorFlags = { ...state.document.editorFlags, ...Object.fromEntries(['keepRouting', 'keepProcessing', 'inputMeters', 'mixerCompact', 'navLocked', 'outlinerVisible'].filter(k => k in old.document.editorFlags).map(k => [k, old.document.editorFlags[k]])) };
           updateHost(state); validateModel(state, validator);
           state.revision = (BigInt(old.revision) + 1n).toString(); event({ event: 'resync.required', reason: 'asyncLoad', currentRevision: state.revision }); snapshot(); scheduleTail(35); result = ack();
         } else if (op === 'catalogs.list') {
           result = ack(); event({event:'catalogs.list',requestId:message.requestId,materials:clone(state.document.scene.materials),builtinRooms:FIXTURES.slice(0,4).map((name,id)=>({id,name})),userPresets:[]});
         } else if (op === 'reflections.query') { result = ack(); event({event:'diagnostics.paths',revision:state.revision,sceneSerial:state.sceneSerial || '0',sourceIndex:p.sourceIndex,paths:[],truncated:false,stale:false,engineOrder:1,receiver:'listener-centre'}); }
+        else if (op === 'app.openExternal') {
+          const allowed = new Set(['ko-fi.com', 'send.monobank.ua', 'github.com', 'bodzijun.github.io']);
+          const url = p?.url;
+          const bad = typeof url !== 'string' || !url.startsWith('https://') || url.length > 512 || /[\u0000-\u0020\u007f\\<>"'`]/.test(url);
+          const rest = bad ? '' : url.slice(8);
+          const sep = rest.search(/[/?#]/);
+          const host = sep >= 0 ? rest.slice(0, sep) : rest;
+          if (bad || !host || /[@:[\]%,;]/.test(host) || !allowed.has(host.toLowerCase())) {
+            reject('invalid', 'External URL is not in the allow-list');
+          } else {
+            result = ack();
+          }
+        }
         else if (['preset.list', 'preset.save', 'ir.export', 'source.loadDirectivityFile'].includes(op)) reject('ioError', 'Mock only: native library / dialogs / file export are not connected');
         else if (op === 'history.redo' || op.startsWith('comparison.')) reject('unsupported', 'Capability unavailable in frozen v1');
         else if (op === 'history.undo') {
           if (!history.length) result = ack({ status: 'noChange' });
-          else { const next = clone(state); const previous=history.pop(); if('makeupBefore' in previous) next.parameters.values.makeup=previous.makeupBefore; else if('pathObject' in previous) {next.document.paths[previous.pathObject]=previous.pathBefore;} else if(previous.transactionDocument) { next.document=previous.transactionDocument; if(previous.transactionParams) next.parameters.values=previous.transactionParams; } else next.document.scene=previous; change(next, message.requestId); event({ event: 'resync.required', reason: 'undo', currentRevision: state.revision }); snapshot(); scheduleTail(35); result = ack(); }
+          else { const next = clone(state); const previous=history.pop(); if('makeupBefore' in previous) next.parameters.values.makeup=previous.makeupBefore; else if('pathObject' in previous) {next.document.paths[previous.pathObject]=previous.pathBefore;} else if(previous.transactionDocument) { next.document=previous.transactionDocument; if(previous.transactionParams) next.parameters.values=previous.transactionParams; syncDescriptorsWithRange(next); } else next.document.scene=previous; change(next, message.requestId); event({ event: 'resync.required', reason: 'undo', currentRevision: state.revision }); snapshot(); scheduleTail(35); result = ack(); }
         } else {
           if (message.transactionId && tx?.id !== message.transactionId) reject('invalid', 'Unknown transaction');
           const next = clone(state), materials = [...data.values()].flatMap(f => f.messages?.find(m => m.kind === 'snapshot')?.payload.document.scene.materials || []);
@@ -305,7 +390,7 @@ export async function createMockBridge(options = {}) {
             if (!tx && op === 'output.autoMakeup') history.push({makeupBefore:state.parameters.values.makeup});
             if (!tx && op === 'output.set') history.push({ transactionDocument: clone(state.document), undoLabel: 'Output settings' });
             if (!tx && op === 'source.setConfig') history.push({ transactionDocument: clone(state.document), undoLabel: 'color' in p ? 'Source colour' : 'Edit source' });
-            if (!tx && (op === 'room.scale' || op === 'source.setDirectivity' || op === 'source.setInstrument')) history.push({ transactionDocument: clone(state.document), transactionParams: clone(state.parameters.values) });
+            if (!tx && (op === 'room.scale' || op === 'room.fitAutomationRange' || op === 'room.setAutomationRange' || op === 'source.setDirectivity' || op === 'source.setInstrument' || op === 'source.remove' || op.startsWith('modulation.'))) history.push({ transactionDocument: clone(state.document), transactionParams: clone(state.parameters.values), undoLabel: op === 'room.fitAutomationRange' ? 'Fit automation range' : op === 'room.setAutomationRange' ? (p.reset ? 'Reset automation range' : 'Set automation range') : op.startsWith('modulation.') ? 'Edit modulation' : undefined });
             else if (!tx && (op.startsWith('surface.') || ['room.setHeight', 'room.setOpening', 'room.clear', 'scene.joinCorners'].includes(op))) history.push(clone(state.document.scene));
             history.splice(0, Math.max(0, history.length - 60)); if (tx) tx.changed = true;
             change(next, message.requestId, undefined, op.startsWith('path.') ? p.object : null);
@@ -315,7 +400,7 @@ export async function createMockBridge(options = {}) {
             result = ack(extra);
           }
         }
-        if ((/^(history|surface|room|scene|transaction|path)\./.test(op)&&!['path.bake','path.bakeCancel','path.bakeClear','path.recordPass','path.recordStop','path.recordClear'].includes(op)) || op === 'output.autoMakeup' || (op === 'output.set' && !tx) || op === 'source.setDirectivity' || op === 'source.setInstrument' || (op === 'source.setConfig' && !tx)) historyEvent();
+        if ((/^(history|surface|room|scene|transaction|path|modulation)\./.test(op)&&!['path.bake','path.bakeCancel','path.bakeClear','path.recordPass','path.recordStop','path.recordClear'].includes(op)) || op === 'output.autoMakeup' || (op === 'output.set' && !tx) || op === 'source.setDirectivity' || op === 'source.setInstrument' || op === 'source.remove' || (op === 'source.setConfig' && !tx)) historyEvent();
         seen.set(message.requestId, result); if (seen.size > 512) seen.delete(seen.keys().next().value); return result;
       } catch (error) {
         const result = emit('error', { requestId: message.requestId, code: error.code || 'invalid', message: error.message, currentRevision: state.revision, ...(error.code === 'staleRevision' ? { resync: true } : {}) }, message.requestId);
@@ -331,7 +416,7 @@ export async function createMockBridge(options = {}) {
       const error = clone(data.get('error-resync').messages.find(m => m.kind === 'error').payload); error.currentRevision = state.revision;
       emit('error', error, error.requestId); event({ event: 'resync.required', reason: 'staleRevision', currentRevision: state.revision }); snapshot();
     },
-    automate(id, value) { const d = descriptors.parameters.find(p => p.id === id); state.parameters.values[id] = canonical(d, value); updateEffective(state); relay(); if (['size', 'absorption', 'decayLow', 'decayMid', 'decayHigh', 'mode'].includes(id)) scheduleTail(15); },
+    automate(id, value) { const d = paramDesc(id); state.parameters.values[id] = canonical(d, value); updateEffective(state); relay(); if (state.document?.modulation?.routes?.length && (/^(?:s\d+|l)(?:x|y|z|az|path)$/.test(id) || id === 'mode')) { emitModIfChanged(); scheduleModTick(); } if (['size', 'absorption', 'decayLow', 'decayMid', 'decayHigh', 'mode'].includes(id)) scheduleTail(15); },
     emitSyntheticTail() {
       const multipliers = state.parameters.effective.decay;
       const baseCurve = [2.8, 2.6, 2.2, 1.9, 1.6, 1.2, 0.9];
@@ -351,10 +436,10 @@ export async function createMockBridge(options = {}) {
         raysUsed: state.document.tail.baseRays, rayLimit: state.document.tail.baseRays * 4, baseRays: state.document.tail.baseRays, shared: state.document.sources.length > 8, adaptive: state.document.tail.adaptive, needsMoreRays: false });
     },
     setCpuStatus(cpu) {
-      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: false, pathBake:{...bakeStatus,...bakeFields(bakeInput())},...(cpu ? { cpu } : {}) });
+      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: false, pathBake:{...bakeStatus,...bakeFields(bakeInput())},...(cpu ? { cpu } : {}),...modFields() });
     },
     setRebuilding(rebuilding) {
-      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: !!rebuilding, pathBake:{...bakeStatus,...bakeFields(bakeInput())} });
+      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: !!rebuilding, pathBake:{...bakeStatus,...bakeFields(bakeInput())},...modFields() });
     },
     setBakeStatus(value){
       const {bakeSource,bakeSourceGroup,recordingNote,...status}=value;

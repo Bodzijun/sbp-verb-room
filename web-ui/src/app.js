@@ -11,22 +11,25 @@ import { editInspector } from './components/edit-inspector.js';
 import { analysisPanel } from './components/analysis.js';
 import { outliner } from './components/outliner.js';
 import { macroRow, mainBottom, mainContext, mainSelectable } from './pages/main.js'; import { timelinePanel } from './components/timeline.js';
+import { modulationEditorPanel, requestModEditorFocus, requestModReturnFocus, applyPendingModFocus } from './components/modulation.js';
 import { editTools, layerBar } from './pages/edit-room.js';
 import { createViewport } from './viewport/viewport.js';
 import { surfaceRefs, surface, layerKey } from './state/selectors.js';
+import { orientationMode } from './viewport/movement-path.js';
 import { budget } from './state/selectors.js';
 import { snapFace } from './viewport/snap.js';
 import { viewportPalette, THEME_LABELS } from './viewport/palette.js';
 import { historyButtons } from './components/history.js';
 import { roomOptions, roomCommand } from './state/catalogs.js';
 import { decorateIcon } from './components/icons.js';
+import { createAboutDialog } from './components/about.js';
 const app = document.getElementById('app'), notification = document.getElementById('notification');
 app.addEventListener('scroll', e => {
   const el = e.target;
   if (el instanceof HTMLElement && !/^(INPUT|TEXTAREA)$/.test(el.tagName) && el.scrollLeft) el.scrollLeft = 0;
 }, { capture: true, passive: true });
 const params = new URLSearchParams(location.search), requestedBridge = params.get('bridge') || 'mock';
-let bridge, store, viewport, rendered = null, pendingRender = false, closed = false, lastSelection = '';
+let bridge, store, viewport, aboutDialog = null, rendered = null, pendingRender = false, closed = false, lastSelection = '';
 // Scroll positions survive the full re-render after every command. They are matched by a stable key (class + occurrence)
 // instead of the element index, and re-applied after layout settles (the status line and banners change the heights after
 // the first restore, which would otherwise clamp a long list such as 32 Sources). A user scroll cancels the pending restore.
@@ -59,6 +62,16 @@ function themePanel() {
   content.append(check('Material-class colours instead of theme roles', !!preferences.classColours, classColours => set({ classColours })), button('Reset theme', () => set({ viewportTheme: 'Amber', accent: '#15d5a5', chromeTint: '', chromeTintAmount: 0, energyPalette: 'Inferno', roles: {}, materialColours: {}, classColours: false })), note(bridge.mode === 'mock' ? 'Preferences are owned by the bridge. Mock keeps them in memory only.' : 'Preferences are saved for this user.'), ...(bridge.mode === 'juce' ? [button('Diagnostics', async () => { try { const line=await bridge.readDiagnostics(); content.querySelector('[data-ui-diagnostics]')?.remove();const box=element('pre',{'data-ui-diagnostics':'true',className:'note',text:String(line)});box.style.whiteSpace='pre-wrap';content.append(box); } catch(e){errorMessage(e);} },{'data-action':'diagnostics'}), button('Classic UI', () => bridge.useNativeUi().catch(errorMessage), { 'data-action': 'classic-ui' })] : []));
   const heading = content.firstElementChild, rest = [...content.children].slice(1); content.replaceChildren(heading, scrollArea(rest, { className: 'theme-scroll' }));
   panel.append(content); panel.addEventListener('toggle', () => { store.view.themeOpen = panel.open; }); return panel;
+}
+function aboutButton() {
+  return button('About', e => aboutDialog?.open(e.currentTarget), {
+    className: 'about-header-btn',
+    'data-about-btn': 'true',
+    'data-focus-key': 'header-about',
+    'aria-haspopup': 'dialog',
+    'aria-label': 'About',
+    title: 'About Verb Room',
+  });
 }
 // T11 item 2: the viewport takes the remaining width; the control rack has a sensible width range.
 // `mainSplit` (preferences) is the rack's share of the workspace width; absent = default proportion. Double-click restores it.
@@ -102,7 +115,7 @@ function header() {
   if(store.view.page === 'edit') return element('header',{className:'header edit-header'},[
     element('div',{className:'brand'},[element('span',{className:'brand-icon',text:'⬡'}),element('div',{},[element('strong',{text:'VERB ROOM'}),element('small',{text:'PHYSICALLY BASED REVERB'})])]),
     element('div',{className:'edit-room-heading'},[element('b',{text:`Edit room / ${state.document.sceneName}`}),element('small',{text:'Geometry → materials → sound'})]),
-    note(bridge.mode === 'mock' ? 'Changes update the mock preview' : 'Changes update the engine'),themePanel(),button('✓ Done',()=>leaveEdit(),{className:'primary'})]);
+    note(bridge.mode === 'mock' ? 'Changes update the mock preview' : 'Changes update the engine'),themePanel(),aboutButton(),button('✓ Done',()=>leaveEdit(),{className:'primary'})]);
   const catalog = store.telemetry['catalogs.list'];
   const rooms = bridge.mode === 'mock' ? [[0, 'Built-in demo room'], [1, 'Legacy stage2 box'], [2, 'Vocal booth (dead)'], [3, 'VSL Grand hall · audience']] :
     roomOptions(catalog);
@@ -114,7 +127,7 @@ function header() {
       const command = roomCommand(key); if (command) store.command(command);
     }, { title: state.document.sceneName, reselect:true }),
     element('div', {className:'preset-actions'}, [button('Save', () => store.command({ op:'preset.save', name:state.document.sceneName })), button('Load file', () => store.command({ op: 'preset.load', source: 'file' })), button('Export IR', () => store.command({ op: 'ir.export' }))]),
-    element('div', { className: 'header-actions' }, [...historyButtons(store), unavailable(state, 'ab.compare', 'A / B'), element('div', { className: 'mode-switch' }, [modeButton(0, 'Physical'), modeButton(1, 'Creative'), element('small', { text: state.parameters.effective.mode === 'physical' ? 'ROOM-DERIVED' : 'CREATIVE OVERRIDES' })]), themePanel(), button(store.view.page === 'main' ? 'Edit room ↗' : '✓ Done', () => {viewport?.cancelGesture?.();if(store.view.page==='main')store.setView({page:'edit',pathDrawing:null,pathDraft:null,pathRedo:null});else leaveEdit();}, { className: 'primary' })])]);
+    element('div', { className: 'header-actions' }, [...historyButtons(store), unavailable(state, 'ab.compare', 'A / B'), element('div', { className: 'mode-switch' }, [modeButton(0, 'Physical'), modeButton(1, 'Creative'), element('small', { text: state.parameters.effective.mode === 'physical' ? 'ROOM-DERIVED' : 'CREATIVE OVERRIDES' })]), themePanel(), aboutButton(), button(store.view.page === 'main' ? 'Edit room ↗' : '✓ Done', () => {viewport?.cancelGesture?.();if(store.view.page==='main')store.setView({page:'edit',pathDrawing:null,pathDraft:null,pathRedo:null});else leaveEdit();}, { className: 'primary' })])]);
 }
 // N1: show / hide the engine's clutter objects. Remembered in preferences (default ON); only has an effect while clutter count > 0.
 function pathsButton() {
@@ -126,6 +139,21 @@ function clutterButton() {
   const on = store.state.preferences?.showClutter !== false, count = store.state.document.scene.clutter?.count || 0;
   return button('Clutter', () => store.command({ op: 'preferences.set', patch: { showClutter: !on } }), { className: `${on ? 'active' : ''}${count ? '' : ' idle'}`.trim(), 'aria-pressed': String(on), 'data-clutter-toggle': on ? 'on' : 'off',
     title: count ? `${on ? 'Hide' : 'Show'} the ${count} clutter objects the engine placed (same seed as the sound)` : 'Clutter count is 0 — nothing to show. Set Clutter objects in Edit room → Scene.' });
+}
+function modButton() {
+  const on = !!store.view.modEditorOpen, count = store.state?.document?.modulation?.routes?.length || 0;
+  return button('Mod', () => {
+    if (!store.view.modEditorOpen) { requestModEditorFocus('toolbar'); store.setView({ modEditorOpen: true }); }
+    else { requestModReturnFocus('toolbar'); store.setView({ modEditorOpen: false }); }
+  }, {
+    className: on ? 'active' : '',
+    'aria-label': on ? 'Close floating modulation editor' : 'Open floating modulation editor',
+    'aria-expanded': String(on),
+    'aria-pressed': String(on),
+    'data-mod-toggle': on ? 'on' : 'off',
+    'data-focus-key': 'viewport-mod-toggle',
+    title: `${on ? 'Hide' : 'Show'} floating modulation editor (${count} routes)`
+  });
 }
 function toolbar() {
   const nav=element('details', { className: 'nav-tools', open:!!store.view.navOpen }, [element('summary', { text: '⌖', title: 'Frame / navigation', 'aria-label': 'Viewport navigation' }), element('div', {}, [button('Frame all', () => viewport.frameAll()), button('Frame sel.', () => viewport.frameSelection()), select('Ray preview order', [[0,'Direct only'],[1,'Direct + first'],[2,'Direct + first + second']], store.view.rayOrder ?? 2, n=>store.setView({rayOrder:Number(n)})), check('Lock pan', store.state.document.editorFlags.navLocked, navLocked => store.flags({ navLocked }))])]);
@@ -142,6 +170,7 @@ function toolbar() {
       button('Rays', () => store.setView({ rays: !store.view.rays }), { className: store.view.rays ? 'active' : '', 'aria-pressed': String(store.view.rays) }),
       clutterButton(),
       pathsButton(),
+      modButton(),
       ...(store.view.page==='edit'?[button('▧',()=>store.setView({perspectivePreview:!(store.view.perspectivePreview??['room','wall','floorZone','ceilingZone','plate'].includes(store.view.tool))}),{'aria-label':'Perspective preview','aria-pressed':String(store.view.perspectivePreview??['room','wall','floorZone','ceilingZone','plate'].includes(store.view.tool)),title:'3D inset · default follows drawing tool'})]:[]),
       nav])]);
 }
@@ -180,6 +209,7 @@ function render() {
   const centre = element('div', { className: 'viewport-section' }, [toolbar(), store.view.page === 'edit' ? layerBar(ctx) : null, viewport]);
   viewport.querySelector(':scope > .analysis')?.remove();
   if(store.view.energy)viewport.append(analysisPanel(ctx)); viewport.querySelector(':scope > .timeline-panel')?.remove(); if (store.view.timelineOpen) viewport.append(timelinePanel(ctx));
+  viewport.querySelector(':scope > .mod-editor-panel')?.remove(); if (store.view.modEditorOpen) viewport.append(modulationEditorPanel(ctx));
   const workspace = element('main', { className: store.view.page === 'edit' ? 'workspace edit-layout' : 'workspace main-layout' });
   if (store.view.page === 'edit') {
     workspace.append(editTools(ctx));
@@ -202,6 +232,7 @@ function render() {
   const stamp = ++renderSeq, again = () => { if (renderSeq === stamp && pendingScroll === scrolls) restoreScrolls(); };
   requestAnimationFrame(() => { again(); requestAnimationFrame(again); }); setTimeout(() => { again(); if (pendingScroll === scrolls) pendingScroll = null; }, 250);
   if (restoreFocus) { const next = [...app.querySelectorAll('[data-focus-key]')].find(n => n.getAttribute('data-focus-key') === key); if (next) { next.focus({ preventScroll: true }); if (selection) next.setSelectionRange(...selection); } }
+  applyPendingModFocus(app);
   refreshSnapFace();
   updateStatus();
   if (store.error) errorMessage(store.error);
@@ -251,7 +282,8 @@ function updateStatus() {
   }
   const node = app.querySelector('.footer-status'); if (!node) return;
   const file = store.telemetry['status.file'], exp = store.telemetry['status.export'];
-  const text = [file?.message, exp?.state ? exp.message || 'Exporting IR…' : '', store.telemetry['status.load']?.status || store.state.load.status].filter(Boolean).join(' · ');
+  const loadStatus = store.telemetry['status.load']?.status || store.state.load.status;
+  const text = [statusNote.text, file?.message, exp?.state ? exp.message || 'Exporting IR…' : '', statusNote.text ? '' : loadStatus].filter(Boolean).join(' · ');
   // A finished action's message must not look like a running process: show it for a few seconds, then clear it.
   if (text !== footerStatus.text) {
     footerStatus.text = text; clearTimeout(footerStatus.timer); footerStatus.timer = null; footerStatus.expired = false;
@@ -261,6 +293,19 @@ function updateStatus() {
 }
 const REBUILD_APPEAR_MS = 150, REBUILD_MIN_VISIBLE_MS = 400;
 const rebuildBanner = { want: false, visible: false, shownAt: 0, appearTimer: null, hideTimer: null };
+let statusNote = { text: '', timer: null };
+if (typeof window !== 'undefined') {
+  window.addEventListener('verb-status-note', e => {
+    clearTimeout(statusNote.timer);
+    const text = String(e.detail?.text || '').trim();
+    const duration = Number(e.detail?.durationMs) || 4500;
+    statusNote = {
+      text,
+      timer: text ? setTimeout(() => { statusNote.text = ''; statusNote.timer = null; updateStatus(); }, duration) : null
+    };
+    updateStatus();
+  });
+}
 function syncRebuildingBanner(want) {
   rebuildBanner.want = !!want;
   if (rebuildBanner.want) {
@@ -301,9 +346,10 @@ export function statusInProgress(text) { return /(\.\.\.|…)\s*$/.test(text) ||
 async function init() {
   bridge = requestedBridge === 'mock' ? await createMockBridge({ fixture: params.get('fixture') || 'default-physical' }) : createJuceBridge({ onError:errorMessage });
   store = createStore(bridge);
+  aboutDialog = createAboutDialog({ store, getBridgeMode: () => bridge?.mode });
   const hash = location.hash.slice(1);
   if (hash.startsWith('edit')) { store.view.page = 'edit'; store.view.selection=[{kind:'wall',index:1}]; if (hash === 'edit-3d') store.view.projection = '3d'; if (hash === 'edit-source') store.view.selection = [{ kind: 'source', index: 0 }]; if (hash === 'edit-scene') { store.view.selection = []; store.view.inspectorTab = 'scene'; } }
-  if (['sources', 'mix', 'mix-creative', 'output'].includes(hash)) store.view.tab = hash === 'mix-creative' ? 'mix' : hash;
+  if (['sources', 'mix', 'mix-creative', 'modulation', 'output'].includes(hash)) store.view.tab = hash === 'mix-creative' ? 'mix' : hash;
   if (hash === 'sources') store.view.selection = [{ kind: 'source', index: 0 }];
   if (['front', 'side', '3d'].includes(hash)) store.view.projection = hash;
   if (hash === 'energy') store.view.energy = true;
@@ -313,6 +359,7 @@ async function init() {
     if (reason === 'error') errorMessage(store.error);
     if (reason === 'dismiss') { notification.replaceChildren(); notification.classList.remove('visible'); }
     if (!store.state) return;
+    aboutDialog?.sync(store.state);
     // Only state/view changes may rebuild chrome. Meter/status events never scan the document.
     if (['snapshot','patch','parameters','view','resync','catalogs.list'].includes(reason)) {
       const state = store.state;
@@ -338,12 +385,20 @@ async function init() {
   if (bridge.mode === 'mock') window.verbRoom = { store, bridge, version: 'T2' };
 }
 document.addEventListener('keydown', e => {
-  if (e.defaultPrevented) return;
+  if (e.defaultPrevented || document.querySelector('dialog[open]')) return;
   if (!store || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable) return;
   const ctrl=modKey(e),key=e.key.toLowerCase();
   if (['Delete','Backspace'].includes(e.key)) {
     e.preventDefault();
     const hasSurfSel = store.view.page === 'edit' && store.view.selection.some(r => !['source', 'listener', 'floor', 'ceiling'].includes(r.kind));
+    if (!hasSurfSel && store.view.timelineOpen && store.view.azKey != null && !(store.view.page === 'main' && store.state.preferences?.mainViewportLocked)) {
+      const ak = store.view.azKey, path = store.state?.document?.paths?.[ak.object];
+      if (path && orientationMode(path) === 'manual' && path.azKeys?.[ak.index]) {
+        store.setView({ azKey: null }, false);
+        store.command({ op: 'path.removeAzimuthKey', object: ak.object, index: ak.index });
+        return;
+      }
+    }
     if (!hasSurfSel && store.view.pathPoint != null && !(store.view.page === 'main' && store.state.preferences?.mainViewportLocked)) {
       const pt = store.view.pathPoint, path = store.state?.document?.paths?.[pt.object];
       if (path?.points?.length > 2) {
@@ -374,8 +429,13 @@ document.addEventListener('keydown', e => {
   if(e.key.startsWith('Arrow')&&store.view.selection.length){e.preventDefault();return;}
   if (e.key === 'Escape') {
     e.preventDefault();
-    if (store.view.timelineOpen) store.setView({ timelineOpen: false }, false); else if (store.view.pathDrawing != null || store.view.pathDraft) store.setView({ pathDrawing: null, pathDraft: null });
-    else store.setView({ selection: [], themeOpen: false, pathEditing: null, pathPoint: null });
+    if (document.querySelector('.dd-popup')) { closeDropdowns(); return; }
+    const inModWin = !!e.target?.closest?.('.mod-editor-panel');
+    if (inModWin && store.view.modEditorOpen) { requestModReturnFocus(); store.setView({ modEditorOpen: false }); }
+    else if (store.view.timelineOpen) store.setView({ timelineOpen: false }, false);
+    else if (store.view.modEditorOpen) { requestModReturnFocus(); store.setView({ modEditorOpen: false }); }
+    else if (store.view.pathDrawing != null || store.view.pathDraft) store.setView({ pathDrawing: null, pathDraft: null });
+    else store.setView({ selection: [], themeOpen: false, pathEditing: null, pathPoint: null, azKey: null });
   }
   if(store.view.page==='edit'&&!modKey(e)&&!e.ctrlKey&&!e.altKey){const tool={v:'move',b:'box',r:'room',w:'wall',z:'floorZone',c:'ceilingZone',p:'plate'}[e.key.toLowerCase()];if(tool){e.preventDefault();store.setView({tool});viewport?.querySelector('canvas').focus();}}
 });
@@ -391,5 +451,5 @@ window.addEventListener('verb-bridge-error',e=>recoverUi(e.detail));
 window.addEventListener('error',e=>{errorMessage(e.error||e.message);recoverUi(e.error||e.message);});
 window.addEventListener('unhandledrejection',e=>{errorMessage(e.reason);recoverUi(e.reason);});
 window.addEventListener('verb-control-end', () => { if (pendingRender) { pendingRender = false; render(); } });
-window.addEventListener('pagehide', () => { closed = true; clearTimeout(rebuildBanner.appearTimer); clearTimeout(rebuildBanner.hideTimer); clearTimeout(footerStatus.timer); disposeControls(); viewport?.dispose(); store?.dispose(); bridge?.dispose(); });
+window.addEventListener('pagehide', () => { closed = true; aboutDialog?.destroy(); aboutDialog = null; clearTimeout(rebuildBanner.appearTimer); clearTimeout(rebuildBanner.hideTimer); clearTimeout(footerStatus.timer); disposeControls(); viewport?.dispose(); store?.dispose(); bridge?.dispose(); });
 init().catch(error => { app.replaceChildren(element('p', { className: 'loading', text: `Cannot open Verb Room: ${error.message}` })); errorMessage(error); });

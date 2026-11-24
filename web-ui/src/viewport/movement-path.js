@@ -154,12 +154,49 @@ export function evaluatePath(p,u) {
  let lo=1,hi=points.length-1;while(lo<hi){const mid=(lo+hi)>>1;if(lengths[mid]<=d)lo=mid+1;else hi=mid;}
  const span=lengths[lo]-lengths[lo-1];return mix(points[lo-1],points[lo],span>1e-12?(d-lengths[lo-1])/span:0);
 }
-export function pathPositionLocked(state,id) {
- const m=/^(s(\d+)|l)[xyz]$/.exec(id);if(!m)return false;
- const p=state.document.paths?.[m[2]?Number(m[2])-1:32];
- return !!(p?.enabled && p.points?.length>=2);  // azimuth stays editable in every orientation mode: it is the offset
+export function remainder360(x) {
+ const q = x / 360;
+ const n = Math.floor(q);
+ const f = q - n;
+ const k = f < 0.5 ? n : (f > 0.5 ? n + 1 : ((n % 2 === 0) ? n : n + 1));
+ const r = x - k * 360;
+ return Object.is(r, -0) ? 0 : r;
 }
-export const orientationMode=p=>p?.lookAt?'lookAt':p?.orient?'along':'manual';
+export function orientationMode(p){return p?.lookAt?'lookAt':p?.orient?'along':'manual';}
+export function hasActiveAzimuthKeys(p) {
+ return !!(p?.enabled && (p.points?.length ?? 0) >= 2 && orientationMode(p) === 'manual' && Array.isArray(p.azKeys) && p.azKeys.length > 0);
+}
+export function evaluateAzimuthKeys(keys, u) {
+ if (!Array.isArray(keys) || keys.length === 0) return null;
+ const uc = Number.isFinite(u) ? Math.max(0, Math.min(1, u)) : 0;
+ const tPct = uc * 100;
+ if (tPct <= keys[0].t) return keys[0].az === 0 ? 0 : keys[0].az;
+ if (tPct >= keys[keys.length - 1].t) {
+  const last = keys[keys.length - 1].az;
+  return last === 0 ? 0 : last;
+ }
+ let loIdx = 0, hiIdx = keys.length;
+ while (loIdx < hiIdx) {
+  const mid = (loIdx + hiIdx) >> 1;
+  if (tPct < keys[mid].t) hiIdx = mid;
+  else loIdx = mid + 1;
+ }
+ const hi = Math.max(1, Math.min(keys.length - 1, loIdx));
+ const lo = hi - 1;
+ const kLo = keys[lo], kHi = keys[hi];
+ if (kLo.easing === 'hold' || kHi.t <= kLo.t) return kLo.az === 0 ? 0 : kLo.az;
+ const s = (tPct - kLo.t) / (kHi.t - kLo.t);
+ const e = applyEasing(kLo.easing, s);
+ const delta = remainder360(kHi.az - kLo.az);
+ return remainder360(kLo.az + delta * e);
+}
+export function pathPositionLocked(state,id) {
+ const m=/^(s(\d+)|l)(x|y|z|az)$/.exec(id);if(!m)return false;
+ const p=state.document.paths?.[m[2]?Number(m[2])-1:32];
+ if(!p?.enabled || (p.points?.length??0)<2)return false;
+ if(m[3]==='az')return hasActiveAzimuthKeys(p);
+ return true;
+}
 export function pathYaw(p,u) {
  const t=compilePath(p);if(t.points.length<2)return 0;
  const frac=closedFrac(p,u);
@@ -198,7 +235,8 @@ export function withPathPoses(state) {
  const values={...state.parameters.values};
  state.document.paths.forEach((p,o)=>{if(!p?.enabled||p.points?.length<2)return;const prefix=o===32?'l':`s${o+1}`,driver=pathGroupDriver(state.document.paths,o),u=values[pathId(driver)]||0,q=evaluatePath(p,u);
  ['x','y','z'].forEach((axis,k)=>values[prefix+axis]=q[k]);
- if(p.orient&&!p.lookAt)values[prefix+'az']+=pathYaw(p,u)+(p.orientOffset||0);});
+ if(p.orient&&!p.lookAt)values[prefix+'az']+=pathYaw(p,u)+(p.orientOffset||0);
+ else if(!p.lookAt&&Array.isArray(p.azKeys)&&p.azKeys.length>0){const keyAz=evaluateAzimuthKeys(p.azKeys,u);if(keyAz!==null)values[prefix+'az']=keyAz;}});
  // E19 Look at: azimuth from the positions just resolved (same function as the engine: atan2 + azimuth + offset, wrapped; target missing or coincident keeps the manual value)
  const ns=state.document.sources?.length??32,pre=o=>o===32?'l':`s${o+1}`;
  state.document.paths.forEach((p,o)=>{

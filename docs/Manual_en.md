@@ -1,4 +1,4 @@
-# Verb Room 0.2.3 user manual
+# Verb Room 0.3.0 user manual
 
 [Українська версія](Manual_uk.md)
 
@@ -10,7 +10,7 @@
 4. [Rooms and materials](#rooms)
 5. [Sources, the listener, and outputs](#sources)
 6. [Controls and modes](#controls)
-7. [Movement and paths](#movement)
+7. [Movement and paths](#movement) · [Motion modulation](#motion-modulation)
 8. [Baking explained](#baking) · [Decision table](#bake-decision) · [Workflows](#bake-workflows) · [Statuses](#bake-status) · [Examples](#bake-examples) · [FAQ](#bake-faq)
 9. [Presets and sharing](#presets)
 10. [Settings and performance](#performance)
@@ -22,7 +22,7 @@
 
 ## 1. What Verb Room is
 
-Verb Room is a VST3 reverb that models sound in a room you draw, with sources and a listener you can move. **Physical** plays the modeled room and **Creative** adds controls for shaping its sound. Version 0.2.3 is a working alpha for Windows x64, macOS Universal (Apple silicon and Intel), and Linux x86_64 (classic interface only). Check the [project download page](https://bodzijun.github.io/sbp-verb-room/) for packages and the [cross-platform build guide](Cross_platform_builds_en.md) for experimental CI builds.
+Verb Room is a VST3 reverb that models sound in a room you draw, with sources and a listener you can move. **Physical** plays the modeled room and **Creative** adds controls for shaping its sound. Version 0.3.0 is a working alpha for Windows x64, macOS Universal (Apple silicon and Intel), and Linux x86_64 (classic interface only). Check the [project download page](https://bodzijun.github.io/sbp-verb-room/) for packages and the [cross-platform build guide](Cross_platform_builds_en.md) for experimental CI builds.
 
 <a name="quick-start"></a>
 
@@ -52,11 +52,11 @@ The steps below use the new interface. Windows needs **WebView2 Runtime** for it
 
 *Main page in the plug-in. The viewport is on the left and the selected object and sound controls are on the right.*
 
-- **Header.** The room preset menu shows the current room. **Save**, **Load file**, and **Export IR** handle preset and impulse-response files. The arrow buttons undo and redo edits. **Physical** and **Creative** change how the sound controls are applied. **Theme** holds editor preferences and **Edit room** opens the geometry editor.
+- **Header.** The room preset menu shows the current room. **Save**, **Load file**, and **Export IR** handle preset and impulse-response files. The arrow buttons undo and redo edits. **Physical** and **Creative** change how the sound controls are applied. **Theme** holds editor preferences, **About** (also available in **Edit room**) opens a dialog with the build version, recent highlights, quick tips, voluntary support options, and project links, and **Edit room** opens the geometry editor.
 - **Viewport.** Switch among **Plan**, **Front**, **Side**, and **3D**. Use Plan for horizontal positions and Front or Side to check heights. The navigation menu has **Frame all**, **Frame sel.**, and **Lock pan**. The Main viewport also has its own lock button. If a drag has no effect, check the locks.
 - **Overlays.** **Energy** opens the energy-map controls. Choose a source, slice height, octave band, and Direct/Early/Tail components, then analyze. The map estimates modeled coverage on that slice and leaves the audio unchanged. **Rays** shows direct/reflection paths. **Clutter** shows placed obstacles. **Paths** shows movement curves and nodes. See the [Energy analyzer guide](Energy_analyzer_0.1.14_en.md) for map interpretation.
 - **Inspector and macro strip.** Select the source or listener to see position, orientation, and movement controls. The strip below the inspector contains **Size**, **Absorption**, **RT60 target**, **Predelay**, **Stereo width**, and **Output**.
-- **Tabs.** **Decay** shows the seven modeled decay curves and the three creative decay controls. **Sources** is the input rack, including channel assignment and meters. **Mix** holds early/tail levels, diffusion, Doppler, wet/dry mix, makeup, and ducking. **Settings** holds output layout, microphone controls, tail quality, and host-related options.
+- **Tabs.** **Decay** shows the seven modeled decay curves and the three creative decay controls. **Sources** is the input rack, including channel assignment and meters. **Mix** holds early/tail levels, diffusion, Doppler, wet/dry mix, makeup, and ducking. **Modulation** configures motion-driven modulation routes and shaping curves (Creative mode). **Settings** holds output layout, microphone controls, tail quality, and host-related options.
 
 ![Edit room page with the drawing tools, geometry, and inspector](images/manual/edit-room.png)
 
@@ -85,6 +85,14 @@ If a room is meant to be closed, check that every perimeter endpoint meets the n
 **Auto-link corners** moves already joined wall ends together when you drag a wall or a corner. In **Plan**, select a wall and drag an end near another visible corner to snap onto it. A wall or selection snaps when one of its moving wall ends approaches a stationary corner. The square marks the target and the preview shows the resulting geometry. The corner magnet works with **Snap off**. Hold Alt to bypass snapping, and use one Undo to restore the drag.
 
 In **Scene → Room**, **Open corners** counts groups of wall ends with gaps under 10 cm. Choose a tolerance of 1, 5, or 10 cm and click **Join corners** to close those gaps in one edit. Gaps can leak sound and slow down **Bake path**. A locked wall can anchor a join. The command skips groups with conflicting locked ends, excessive spread, or a wall that would collapse. It repairs wall ends only. T-junctions along a wall and zone vertices require manual edits.
+
+### Automation range
+
+By default, host position automation parameters (`s1x..s32z` and `lx..lz`) span `−200…200 m` on X/Y and `0…30 m` on Z. For small or off-centre rooms you can narrow this per-instance range in **Edit room → Scene → Automation range** without changing parameter IDs or internal physics in metres:
+
+- **Fit to scene:** Frames all walls, zones, active source extents, the listener array, and drawn path points / look-at targets with an automatic margin rounded to `0.5 m`. Switching away from the `±200 m` default asks for confirmation first, because changing the range rescales normalized host automation envelopes on that instance.
+- **Manual Min / Max & Reset:** Enter custom bounds directly (minimum span `1.0 m` for X/Y and `0.5 m` for Z), or press **Reset (±200 m)** to restore global bounds. If a narrower range excludes active objects, a warning shows how many will be clamped; pressing **Undo** restores both the previous range and the exact pre-clamp coordinates in one step.
+- **Viewport frame & persistence:** While **Automation range** is open in Edit room, **Plan**, **Front**, and **Side** views draw a dotted box showing the active bounds. Changing range without clamping any object keeps the audio engine output identical and does not invalidate **Bake path**. Non-default ranges are saved in DAW project states and `.verbroom` presets, unioned with local sources/paths under **Keep I/O**, scaled along with the room by **Scale room**, and reset to `±200 m` when loading plain `.txt` or built-in starter rooms.
 
 <a name="sources"></a>
 
@@ -150,7 +158,7 @@ In **Mix**, **Positioned dry** makes the direct sound follow source and listener
 
 The FX parameter list exposes **Mode**, **Size**, `absorption`, `decayLow`, `decayMid`, `decayHigh`, **Early Reflections**, **Tail Level**, **Early Diffusion**, **Doppler Strength**, **Predelay**, **Stereo width**, **Freeze**, **Duck amount**, **Duck release**, **Dry/Wet Mix**, **Positioned Dry**, **Solo Direct**, **Solo Early**, **Solo Tail**, **Output Gain**, and **Makeup**. It also exposes numbered source **Gain**, **Mute**, and **Solo**, plus the pose and path parameters described below. The mode determines which parameters affect the sound.
 
-Room drawing, surface materials, source routing and profiles, output layout, tail quality, the **RT60 target** action, **Auto** makeup, and the bake buttons are editor commands. Automate the resulting **Makeup** or `absorption` parameter when you need an envelope for that value.
+Room drawing, surface materials, source routing and profiles, output layout, tail quality, the **RT60 target** action, **Auto** makeup, and the bake buttons are editor commands. Automate the resulting **Makeup** or `absorption` parameter when you need an envelope for that value. To give DAW X/Y/Z envelopes finer lane resolution inside a specific room, configure **Edit room → Scene → Automation range**.
 
 <a name="movement"></a>
 
@@ -166,11 +174,77 @@ Room drawing, surface materials, source routing and profiles, output layout, tai
 
 *Browser-harness capture with test paths. Voice (Source 1) drives Group 1, and the listener begins at 25% on the same Position axis.*
 
+### Azimuth keys
+
+Each moving source or listener (`points >= 2`) has an **Azimuth** sub-row under its path bar in **Path timeline** with an interactive −180…180° angle curve (wrapping seamlessly across ±180°). Azimuth keys apply only when **Orientation** is set to **Manual** and take priority over direct control of the object's **Azimuth** slider:
+
+- **Add & edit keys:** Press **+ Key** to capture the current angle at the playhead, or double-click empty space on the Azimuth strip. Click a key marker to open the bottom **Angle** editor (slider or double-clicked readout; **Shift** gives 0.1° fine steps).
+- **Timing, curves & removal:** Drag a key left/right between neighbours (**Shift** = 0.05 % fine snap) or nudge a focused marker with **Left/Right** arrows. Right-click a key for **Linear**, **Ease in**, **Ease out**, **Ease in-out**, **Hold** (stepped orientation), or **Delete key** (**Del** / **Backspace** also deletes). Every drag gesture records a single undo step.
+- **Viewport rotation:** Right-dragging in **Plan** or **3D** updates only the selected key or a key within ±0.5 % of the playhead; rotating elsewhere without a selection leaves keys unchanged and shows a viewport hint. Objects with 0 keys still rotate their host **Azimuth** control directly.
+- **Locked slider & other orientation modes:** With active keys in **Manual** mode, the inspector's **Azimuth** slider shows the interpolated angle as read-only (`Azimuth keys: N` + **Timeline** focus button). Switching to **Along path** or **Look at** dims the strip with a reminder and keeps your stored keys intact.
+
+![Path timeline showing an Azimuth key curve, Hold step, wrap across 180 degrees and selected-key Angle editor](images/manual/azimuth-keys.png)
+
+*Browser-harness capture of a moving Voice path with four Azimuth keys (Ease in-out, Hold, and ±180° wrap) and Key 2 selected in the Angle editor.*
+
 ### Draw the envelope in REAPER
 
 Use the FX parameter list to show the envelope for **Source 1 Path position** (or the appropriate source number), or **Listener Path position** for an independent listener. For a Group, show only the driver's envelope. Set two points at the desired start and end times, with parameter values at the bottom and top of the range (0 to 1 in the plug-in parameter, or 0% to 100% on its Position display). Start with a linear ramp. Add flat sections before and after the ramp if you want to hold the endpoints.
 
 Static source/listener **X**, **Y**, and **Z**, source **Azimuth**, and listener **Yaw** are also host parameters. An enabled path supplies XYZ from Position. Use static XYZ automation for movement without a drawn path. Path points, timing windows, easing, laps, group assignments, and orientation mode/target are edited in the plug-in. Use **Keep processing during silence** in **Settings** if Position automation must take effect before the first sound. This uses more CPU.
+
+<a name="motion-modulation"></a>
+
+### Motion modulation
+
+In **Creative** mode (`Mode = Creative`), two additional modulation tools let scene motion shape audio dynamically: **Modulation routes** and **Path LFO**. Both are strictly **Creative-only**: switching back to **Physical** bypasses all modulation cleanly while preserving every route, curve, and LFO setting intact for when you return to **Creative**. Clear hints indicate this in the **Modulation** tab and **Path LFO** inspector.
+
+#### Modulation routes (`Modulation` tab & floating editor)
+
+Each route links a **Source object** (`Source 1..32` or **Listener**) and one of 11 spatial/motion **Drivers** to a per-source or global **Target**, shaped by a transfer curve and attack/release smoothing (up to 64 routes per instance):
+
+- **Docked bottom editor & optional detach:** The full **Modulation** editor (toolbar with **+ Add route**, **Add from preset…**, route list on the left, interactive curve, node bar, ranges, and live telemetry on the right) lives right inside the bottom **Modulation** tab; drag the inspector/tabs splitter upward to give it extra room. Click **Detach ↗** (or the **Mod** toggle in the viewport toolbar, available in both **Main** and **Edit room**) to open the optional floating **Modulation editor** over the scene. When detached, the bottom tab displays the compact route list and **Dock ↙**; drag the floating header to move (double-click to reset), resize from the top-right grip, collapse (`−`), or press `Dock ↙` / `Mod` / `×` / `Esc` to dock back. Picking from **Add from preset…** always appends a new route (selecting it, briefly highlighting its row, and confirming `Added route: <Driver → Target>` in the status bar without overwriting the current route), and double-clicking a route selects it directly without popping up extra windows. Each route row clearly lists its full **Driver → Target**, object scope, explicit **Active / Off / Bypassed** status, and live target readout with units.
+
+  ![Docked Modulation tab with a Distance to listener to Low-pass route, transfer curve, and live telemetry](images/manual/modulation-docked.png)
+
+  *Docked **Modulation** tab showing a **Distance to listener → Low-pass** route (`In 1–15 m`, `Out 20000–1400 Hz`), its transfer curve, and live telemetry readout.*
+
+- **11 drivers:** **Distance to listener**, **Distance to point** (with reference **X / Y / Z** fields), **Azimuth to listener** (relative to listener heading, ±180°), **Elevation angle**, world **X**, **Y**, **Z**, smoothed 3D **Speed**, signed **Radial speed** (away positive, toward negative), **Path position** (shown in ranges as **In (path 0–1)** = effective path progress 0..1 including Path LFO), and **Distance to nearest wall**.
+- **8 targets & safe range/curve switching:** Per-source **Source gain Δ** (`-60..+12 dB`), **Source low-pass** (`20..20000 Hz`), **Source high-pass** (`20..20000 Hz`), **Source low shelf** (`-12..+12 dB`), and **Source high shelf** (`-12..+12 dB`), targeting the same or another source via **Apply to**; global **Early level Δ** (`-60..+6 dB`), **Tail level Δ** (`-48..+12 dB`), and **Wet / dry mix Δ** (`-100..+100 %`). Multiple routes on the same target sum in dB / % (or log₂ octaves for LPF/HPF). Output ranges clamp automatically to each target's legal domain; switching **Target** atomically resets output range and resets the curve to linear defaults in one Undo step, while switching **Driver** resets `Input range` to that driver's defaults.
+- **Transfer curve, smoothing, and live readout:** Drag 2–8 nodes on the interactive curve graph (double-click empty plot or press **+ Node** to insert; **Del** or **− Node** removes; one drag gesture records a single undo step). Toggle **Smooth** per segment, edit numeric **Node X / Y**, **In / Out** ranges, **Invert**, **Clamp**, **Atk ms** (0–2000 ms), and **Rel ms** (0–5000 ms). The **Live telemetry** panel and moving crosshair below the curve show the real-time driver and output target values.
+
+![Detached Modulation floating panel with two routes, 5-node curve, and live telemetry](images/manual/modulation-panel.png)
+
+*Detached floating Modulation panel showing two active routes, a 5-node curve, and live driver/target telemetry.*
+
+#### Path LFO
+
+Moving paths (`points >= 2`) include **Path LFO** controls in the source or listener path inspector alongside **Position** and **Coupling**:
+
+- Toggle **Path LFO** and choose **Shape** (`Sine`, `Triangle`, `Saw`, `Square`, `Smooth random`), **Rate** (`0.05–8 Hz`), **Depth** (`0–100 %` of path range), and **Phase** (`0–360°`).
+- **Swing & end-of-path safety:** **Path LFO** modulates around the **Position** slider (`Swing a–b %`). When swing crosses `0 %` or `100 %`, a live warning explains boundary behavior (**Closed** paths wrap around `[0, 100%)`, whereas open paths clamp at `0 %` and `100 %`), and a **Keep inside path** button clamps **Depth** cleanly to the largest integer percentage that fits inside `[0 %, 100 %]`. Path LFO follows host transport playback (standing at phase `0°` when stopped, or free-running in offline/standalone renders without transport).
+- **Base path & Bake compatibility:** The viewport always displays the **base path geometry** (the Path timeline highlights the oscillation range around the playhead). Enabling or adjusting Path LFO does **not** alter path geometry and leaves an existing **Baked** table valid.
+
+![Path LFO controls in the path inspector beside Position and Coupling](images/manual/path-lfo.png)
+
+*Browser-harness capture in Edit room showing Path LFO controls (Smooth random, rate, depth, phase), live Swing readout, boundary warning, and Keep inside path button.*
+
+#### Using modulation in other plug-ins
+
+Every modulation route in **Creative** mode includes an optional **Host out** slot (`—` or `1`–`16`), corresponding to the sixteen automatable host parameters **`Mod Out 1`** … **`Mod Out 16`** exposed at the end of Verb Room’s parameter list (listed like any normal parameter so DAWs such as REAPER allow linking to them):
+
+- **Target options:** Pick any internal Verb Room target to modulate both Verb Room and a host slot at once, or set **Target** to **Host output only** (`none`) when you want a pure external modulation curve without altering Verb Room’s own sound.
+- **Output format & modes:** Each active slot outputs the route’s **smoothed curve in normalized `0–1` range** (before target-range scaling), clamped to `[0, 1]` and updated once per audio block when changed by more than `1e-4` (with up to one block of latency relative to track effects before or after Verb Room). If multiple enabled routes target the same slot, the last enabled route in the list wins. Switching back to **Physical** mode returns all `Mod Out 1–16` parameters smoothly to their neutral **`0.5`** value.
+- **Do not draw automation on `Mod Out 1–16`:** Although `Mod Out 1–16` appear in parameter and envelope lists so hosts can link to them, they are **outputs driven only by Verb Room’s modulation matrix**. Writing host automation envelopes or manually moving `Mod Out` controls is **ignored** and has no effect.
+- **REAPER setup (`Link from FX parameter`):**
+  1. Insert Verb Room in **Creative** mode and add a route (e.g., **Distance to listener → Host output only**, **Host out** = `1`).
+  2. Open another FX before or after Verb Room on the track (or route across track FX in REAPER), click the target parameter’s **Param** button → **Parameter modulation / MIDI link**.
+  3. Enable **Link from FX parameter**, pick **Verb Room** → **`Mod Out 1`**, and adjust offset/scale as needed.
+
+#### Known limits
+
+- Rate is specified exclusively in hertz (**Hz**); **host-tempo sync** (musical divisions) is not implemented.
+- **Classic UI** does not expose the modulation matrix or Path LFO controls; use the web editor to configure them.
 
 <a name="baking"></a>
 
@@ -210,7 +284,7 @@ flowchart TD
 | The listener moves while sources move on independent paths | Put every moving path in one **Group** and bake, or follow the host automation workflow below. |
 | Motion comes from REAPER XYZ or angle envelopes alone | Use **Record automation**, play once, press **Stop**, then **Bake path**. Replay the same movement. |
 | A moving object's **Look at** target moves independently | Put both paths in one **Group** and bake, or follow the host automation workflow below. |
-| A moving **Manual** object also has angle automation | Bake the path/group, or bake a recording for independently driven motion. Since 0.2.2 the changing manual angle does not drop the table for a moving Manual participant. Direct and early sound still turn live. |
+| A moving **Manual** object also has angle automation | Bake the path/group, or bake a recording for independently driven motion. Without azimuth keys, a changing live manual angle does not drop the table (direct and early sound still turn live); with active azimuth keys, the key curve is baked into the table. |
 | AmbiX or a large scene | Choose the workflow by how objects move. Allow more time for tracing, especially with more sources, outputs, or rays. |
 
 <a name="bake-workflows"></a>
@@ -331,10 +405,10 @@ These are practice setups. Distances and times are example values. The browser f
 
 ### Baking FAQ
 
-- **Bake does nothing or stays at 0%.** Read the reason. Check that a path is enabled or that **Recorded** shows a usable pass. Finish room edits, stop scrubbing, and wait for the rebuild. On 0.2.3 a room edit or replacement can bake with transport stopped. If a small, closed room never starts tracing, report the exact banner and the edits that preceded it.
+- **Bake does nothing or stays at 0%.** Read the reason. Check that a path is enabled or that **Recorded** shows a usable pass. Finish room edits, stop scrubbing, and wait for the rebuild. Since 0.2.3 a room edit or replacement can bake with transport stopped. If a small, closed room never starts tracing, report the exact banner and the edits that preceded it.
 - **Outdated all the time.** Check for live changes to geometry, size, absorption, quality, route, or stationary participants. Choose the final settings before baking. Check for a table from an earlier build after opening a project or preset. For a recording, verify that the pass still represents the motion.
 - **The tail changes when movement stops.** One accurate rebuild at the settled position is expected. In a development test of one scene, the broadband change was about **+0.4 dB** with either bake workflow and **−8.6 dB** without one. Those values describe that scene and measurement. A conspicuous change with Bake warrants checking table use and the recorded-pass status.
-- **The baked tail ignores my azimuth turn.** The table uses the angle sampled when baking a drawn path or captured during a recorded pass. Direct and early sound use the live turn. For a moving Manual participant, changing the angle does not drop the table.
+- **The baked tail ignores my azimuth turn.** Without azimuth keys, the table uses the angle sampled when baking a drawn path (or captured during a recorded pass) while direct and early sound turn live, so changing the Manual angle does not drop the table. To make the baked tail follow planned turns on a drawn path, add **Azimuth keys** before baking.
 - **Baking is very slow.** Bake time grows with the size of the room. In practice, rooms assembled from overlapping or unjoined volumes take noticeably longer, so check that a room intended to be enclosed has joined corners and no unintended openings. Large scenes, high ray budgets, many outputs, and background CPU load can all increase the wait. Try **Preview** quality while checking the setup and bake at the final quality for the mix.
 - **How do I clear or replace a bake or a recording?** **Discard** removes the capture and its bake. **Clear bake** clears tables and keeps paths and the recording. **Cancel** stops a running bake. **Bake again** computes a new table after an edit.
 - **Do I have to bake?** For a static room, play it normally. For motion, listen to the live estimate and bake when the late tail needs to track the passage more closely.
@@ -381,7 +455,7 @@ xattr -dr com.apple.quarantine "$HOME/Library/Audio/Plug-Ins/VST3/Verb Room.vst3
 
 With more than four sources, early reflections update in batches and glide between updates during motion. The geometry is **2.5D**, with vertical walls and horizontal surfaces. Low-frequency wave modes are outside this model. The late tail is a statistical estimate, and the Energy analyzer shows modeled coverage with unit excitation. Treat the readouts as model diagnostics and audition the scene in the session.
 
-Windows was tested in REAPER. A community tester tried 0.2.0 on a real Mac. Versions 0.2.1, 0.2.2 and 0.2.3 await Mac testing. Linux builds and passes CI tests with the classic interface and awaits testing in a real host. Live performance on older four-core machines still needs checks. See the [0.2.3 release notes](Release_0.2.3_en.md).
+Windows was tested in REAPER (including 0.3.0 `Mod Out` parameter linking). A community tester tried 0.2.0 on a real Mac. Versions 0.2.1–0.3.0 await Mac testing. Linux builds and passes CI tests with the classic interface and awaits testing in a real host. Live performance on older four-core machines still needs checks. See the [0.3.0 release notes](Release_0.3.0_en.md).
 
 <a name="reporting"></a>
 
@@ -405,6 +479,8 @@ Verb Room is distributed under **AGPL-3.0** and uses JUCE under its AGPLv3 optio
 | AmbiX | Ambisonic output in ACN order with SN3D normalization. |
 | Group | Enabled movement paths sharing one Position driver. |
 | Path | The editable movement curve and its timing settings. |
+| **Motion modulation** | Creative-only routing from spatial/motion drivers through custom curves to source or mix targets. |
+| **Path LFO** | Built-in low-frequency oscillator (`0.05–8 Hz`) modulating an object's **Position** along its drawn path in Creative mode. |
 | Bake | Precompute a late-tail table along motion so playback can use it as the objects move. |
 | Recorded pass | Poses captured while the DAW plays, available to the bake engine. |
 | Settle | Stay at a stable pose long enough to schedule the accurate late-tail rebuild. |

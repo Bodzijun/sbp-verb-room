@@ -222,6 +222,27 @@
         },
         "pathBake": {
           "$ref": "#/$defs/PathBakeStatus"
+        },
+        "modulation": {
+          "type": "object",
+          "properties": {
+            "routes": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "raw": { "type": "number" },
+                  "value": { "type": "number" },
+                  "active": { "type": "boolean" }
+                },
+                "additionalProperties": false,
+                "required": ["raw", "value", "active"]
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": ["routes"]
         }
       },
       "additionalProperties": false,

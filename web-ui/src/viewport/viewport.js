@@ -1,5 +1,5 @@
 import { modKey } from '../state/platform.js';
-import { compilePath, evaluatePath, pathPositionLocked, withPathPoses } from './movement-path.js';
+import { compilePath, evaluatePath, evaluateAzimuthKeys, hasActiveAzimuthKeys, pathGroupDriver, pathId, pathPositionLocked, withPathPoses } from './movement-path.js';
 import { facingAngle, cursorEnergyLevel } from './t13.js';
 import { viewportState, positionId } from './effective-scene.js';
 import { element, button } from '../components/dom.js';
@@ -19,6 +19,7 @@ import { effectiveStep, autoStep, pixelsPerMetre, visibleGrid } from './snap.js'
 import { cornerXY, movedVertexCorners, sameCorner, snapTranslation, snapVertex, visibleCorners, wallCorners } from './corner-snap.js';
 import { viewportEvent } from '../state/render-policy.js';
 import { scaleIndicatorState, wallLengthM, formatMetres2 } from './room-metrics.js';
+import { sceneAutomationRange } from '../bridge/mock-model.js';
 // Default material strokes stay inside the warm canvas palette. Explicit user
 // colours and theme overrides are preserved; alpha never depends on class/type.
 const same = (a, b) => a.kind === b.kind && a.index === b.index;
@@ -55,11 +56,54 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   let width = 600, height = 300, camera = store.view.camera || createCamera(store.view.projection), hitCache = [], raf = null, disposed = false;
   let poseTimer=null,persistTimer=null,cursorLevel=null;
   const mouseLocked=()=>store.view.page==='main' && !!store.state.preferences?.mainViewportLocked;
+  const AZ_ROTATE_BLOCKED_HINT = 'Select a key or move the playhead onto a key to rotate; use + Key to add one';
+  function resolveAzKeyForRotate(state, obj) {
+    const p = state.document.paths?.[obj];
+    if (!hasActiveAzimuthKeys(p)) return { active: false };
+    const sel = store.view.azKey;
+    if (sel?.object === obj && sel.index >= 0 && sel.index < p.azKeys.length) {
+      return { active: true, index: sel.index, key: p.azKeys[sel.index] };
+    }
+    const driver = pathGroupDriver(state.document.paths, obj);
+    const u = Math.max(0, Math.min(1, state.parameters?.values?.[pathId(driver)] ?? 0));
+    const playhead = u * 100;
+    let bestIdx = -1, bestDist = Infinity;
+    for (let i = 0; i < p.azKeys.length; i++) {
+      const dist = Math.abs(p.azKeys[i].t - playhead);
+      if (dist <= 0.5 && dist < bestDist) { bestDist = dist; bestIdx = i; }
+    }
+    return bestIdx >= 0 ? { active: true, index: bestIdx, key: p.azKeys[bestIdx] } : { active: true, index: -1 };
+  }
+  function flushAzKeyRotate(d) {
+    if (!d || d.azKeyIndex == null || !d.azDirty) return;
+    const cmd = { op: 'path.setAzimuthKey', object: d.obj, index: d.azKeyIndex, az: d.liveAz };
+    const key = JSON.stringify(cmd);
+    if (key === d.sentKey) return;
+    d.sentKey = key;
+    d.lastSent = performance.now();
+    if (!d.began) {
+      d.began = true;
+      store.command({ op: 'transaction.begin', label: 'Rotate azimuth key' }, d.tx);
+    }
+    store.command(cmd, d.tx);
+  }
+  function queueAzKeyRotate(d, angle) {
+    const clean = Number(Math.max(-180, Math.min(180, angle)).toFixed(3));
+    const az = clean === 0 ? 0 : clean;
+    d.liveAz = az;
+    d.azDirty = az !== d.initialAz || d.began;
+    if (!d.azDirty) return;
+    if (performance.now() - d.lastSent >= 33) flushAzKeyRotate(d);
+    else if (poseTimer === null) poseTimer = setTimeout(() => { poseTimer = null; if (drag === d) flushAzKeyRotate(d); }, 33);
+  }
   function facePointer(p) {
-    const prefix=drag.ref.kind==='listener'?'l':`s${drag.ref.index+1}`,v=store.state.parameters.values;
+    const prefix=drag.ref.kind==='listener'?'l':`s${drag.ref.index+1}`,v=withPathPoses(store.state).parameters.values;
     const target=camera.view==='3d'?pointOnHeightPlane(p,camera,width,height,v[prefix+'z']):pointOnTargetPlane(p,camera,width,height);
     const angle=facingAngle([v[prefix+'x'],v[prefix+'y']],target);
-    if(angle!==null){const id=prefix+'az',d=store.state.parameters.descriptors.parameters.find(d=>d.id===id);pendingPose={[id]:canonical(d,angle)};flushPose();}
+    if(angle!==null){
+      if(drag.azKeyIndex>=0){queueAzKeyRotate(drag,angle);return;}
+      const id=prefix+'az',d=store.state.parameters.descriptors.parameters.find(d=>d.id===id);pendingPose={[id]:canonical(d,angle)};flushPose();
+    }
   }
   let drag = null, pendingPose = null, lastPoseTime = 0, binary = null, energy = null, draft = [], cycle = { point: [-100, -100], index: 0 };
   let autoFrame = true, sceneKey = '', lastSize = null, lastPage = store.view.page, lastLoadState = null, pendingRoomFit = false;
@@ -275,7 +319,21 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     }
     const labelBoxes=[],nextLabels=new Map();
     const pose = (ref, colour, text, labelColour = roles.labels, custom = false) => {
-      const world = pointsFor(ref)[0], p = project(world, camera, width, height), yaw = state.parameters.values[ref.kind === 'listener' ? 'laz' : `s${ref.index + 1}az`] * Math.PI / 180;
+      const world = pointsFor(ref)[0], p = project(world, camera, width, height);
+      const objIdx = ref.kind === 'listener' ? 32 : ref.index;
+      let yawDeg = state.parameters.values[ref.kind === 'listener' ? 'laz' : `s${ref.index + 1}az`];
+      const dNow = activeDrag();
+      if (dNow?.azKeyIndex >= 0 && dNow.obj === objIdx && Number.isFinite(dNow.liveAz)) {
+        const pathObj = authorStore.state.document.paths?.[objIdx];
+        if (pathObj && hasActiveAzimuthKeys(pathObj)) {
+          const driver = pathGroupDriver(authorStore.state.document.paths, objIdx);
+          const u = Math.max(0, Math.min(1, authorStore.state.parameters.values[pathId(driver)] ?? 0));
+          const patched = pathObj.azKeys.map((k, i) => i === dNow.azKeyIndex ? { ...k, az: dNow.liveAz } : k);
+          const ev = evaluateAzimuthKeys(patched, u);
+          if (ev !== null) yawDeg = ev;
+        }
+      }
+      const yaw = yawDeg * Math.PI / 180;
       const isSelected = store.view.selection.some(r => same(r, ref));
       // A marker always stays at the projected physical point. Threshold-based
       // collision displacement made dense preset markers jump by 16 px in orbit.
@@ -464,6 +522,26 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       delete root.dataset.selectedWallSummary;
       delete root.dataset.wallLabels;
     }
+    if (store.view.page === 'edit' && !preview && camera.view !== '3d' && store.view.accordion?.['scene.autoRange']) {
+      const ar = sceneAutomationRange(s), f = sizeFactor();
+      const [x0, x1] = ar.xM.map(v => v * f), [y0, y1] = ar.yM.map(v => v * f), [z0, z1] = ar.zM.map(v => v * f);
+      const corners = camera.view === 'front'
+        ? [[x0, 0, z0], [x1, 0, z0], [x1, 0, z1], [x0, 0, z1]]
+        : camera.view === 'side'
+          ? [[0, y0, z0], [0, y1, z0], [0, y1, z1], [0, y0, z1]]
+          : [[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0]];
+      ctx.save();
+      ctx.strokeStyle = roles.selection || '#2fd1a8';
+      ctx.globalAlpha = 0.72;
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([5, 4]);
+      for (let i = 0; i < 4; i++) worldLine(corners[i], corners[(i + 1) % 4]);
+      ctx.setLineDash([]);
+      ctx.restore();
+      root.dataset.autoRangeBox = 'visible';
+    } else {
+      delete root.dataset.autoRangeBox;
+    }
     marquee.hidden=drag?.type!=='box';
     if(!marquee.hidden){const lo=drag.start.map((v,i)=>Math.min(v,drag.last[i]));Object.assign(marquee.style,{left:`${lo[0]}px`,top:`${lo[1]}px`,width:`${Math.abs(drag.last[0]-drag.start[0])}px`,height:`${Math.abs(drag.last[1]-drag.start[1])}px`});root.dataset.marqueeCount=String(wouldSelect.length);}
     root.dataset.draftPoints=String(draft.length);
@@ -649,9 +727,15 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     const ending=drag;
     try{
       const selection=ending.type==='box'&&!cancel?marqueeSelection():null;
-      if(cancel&&ending.ids)pendingPose=restore?Object.fromEntries(ending.ids.map(id=>[id,ending.initial[id]])):null;
-      flushPose();
-      if(ending.tx)store.command({op:cancel?'transaction.cancel':'transaction.commit'},ending.tx);
+      if(ending.azKeyIndex>=0){
+        if(poseTimer!==null){clearTimeout(poseTimer);poseTimer=null;}
+        if(!cancel)flushAzKeyRotate(ending);
+        if(ending.began)store.command({op:cancel?'transaction.cancel':'transaction.commit'},ending.tx);
+      }else{
+        if(cancel&&ending.ids)pendingPose=restore?Object.fromEntries(ending.ids.map(id=>[id,ending.initial[id]])):null;
+        flushPose();
+        if(ending.tx)store.command({op:cancel?'transaction.cancel':'transaction.commit'},ending.tx);
+      }
       if(selection)store.setView({selection});
       if(['pan','orbit'].includes(ending.type))persistCamera();
     }finally{
@@ -839,6 +923,8 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     const nextPt = path.points[nextIdx === index ? index + 1 : nextIdx] || path.points[0];
     store.setView({ pathPoint: { object, index: nextIdx, point: nextPt } }, false);
   }
+  // setPointerCapture throws InvalidStateError when the pointer is already gone (slow frame, button released); report false instead of an error toast.
+  const tryCapture = e => { try { canvas.setPointerCapture(e.pointerId); return true; } catch { return false; } };
   onCanvas('pointerdown', e => {
     const p = screen(e);
     if(store.ready&&e.button===0&&store.view.pathDrawing!=null&&!mouseLocked()){
@@ -850,7 +936,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       const draftHit=[...draftNodeHits].reverse().find(h=>Math.hypot(p[0]-h.screen[0],p[1]-h.screen[1])<9);
       if(draftHit){
         drag={type:'draftPoint',object:o,index:draftHit.index,start:p,startWorld:draftHit.point.slice(),startZ:draftHit.point[2]*f,startTarget:pointOnTargetPlane(p,camera,width,height),moved:false};
-        canvas.setPointerCapture(e.pointerId);schedule();return;
+        tryCapture(e);schedule();return;
       }
       const q=camera.view==='front'||camera.view==='side'?pointOnTargetPlane(p,camera,width,height):pointOnHeightPlane(p,camera,width,height,initial[2]*f);
       if(q&&pts.length<64){
@@ -863,6 +949,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       schedule();return;
     }
     if (!store.ready) return; if (drag) finish(true); canvas.focus(); e.preventDefault();
+    hover.textContent = '';
     const ref = pick(p, true);
     const objMarkerHit = ref && ['source', 'listener'].includes(ref.kind) ? ref : null;
     if (!objMarkerHit) {
@@ -877,7 +964,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         const tx = `path-${Date.now()}`, f = sizeFactor();
         store.command({ op: 'transaction.begin', label: 'Move path point' }, tx);
         drag = { type: 'pathPoint', ...pathHit, livePoint: pathHit.point.slice(), start: p, startWorld: pathHit.point.slice(), startZ: pathHit.point[2] * f, startTarget: pointOnTargetPlane(p, camera, width, height), tx, lastSent: 0 };
-        canvas.setPointerCapture(e.pointerId); schedule(); return;
+        tryCapture(e); schedule(); return;
       }
       const selObj = store.view.selection.find(r => r.kind === 'source' || r.kind === 'listener');
       const selectedPathObj = selObj ? (selObj.kind === 'listener' ? 32 : selObj.index) : null;
@@ -891,7 +978,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         const ptInfo = { object: segHit.object, index: segHit.insertIndex, point: segHit.point };
         store.setView({ pathPoint: ptInfo, selection: [ownerRef] }, false);
         drag = { type: 'pathPoint', object: segHit.object, index: segHit.insertIndex, point: segHit.point, livePoint: segHit.point.slice(), start: p, startWorld: segHit.point.slice(), startZ: segHit.point[2] * f, startTarget: pointOnTargetPlane(p, camera, width, height), tx, isNew: true, baseCount: segHit.baseCount, lastSent: 0 };
-        canvas.setPointerCapture(e.pointerId); schedule(); return;
+        tryCapture(e); schedule(); return;
       }
       if (e.button === 0 && !ref) {
         const anyLineHit = closestCurveHit(p, null);
@@ -902,13 +989,22 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         }
       }
     }
-    if(ref&&['source','listener'].includes(ref.kind)&&pathPositionLocked(authorStore.state,(ref.kind==='listener'?'l':`s${ref.index+1}`)+'x')){store.setView({selection:[ref]});return;}
+    if(e.button!==2&&ref&&['source','listener'].includes(ref.kind)&&pathPositionLocked(authorStore.state,(ref.kind==='listener'?'l':`s${ref.index+1}`)+'x')){store.setView({selection:[ref]});return;}
     if(isDrawing()&&e.button===2){endDraft();return;}
     if(e.button===2&&!preview){
       if(mouseLocked()||!['plan','3d'].includes(camera.view))return;
       const selected=store.view.selection.find(r=>['source','listener'].includes(r.kind))||{kind:'listener',index:0};
-      const id=selected.kind==='listener'?'laz':`s${selected.index+1}az`;
-      bridge.parameters.begin(id);drag={type:'face',ref:selected,ids:[id],initial:{...store.state.parameters.values},start:p,camera};facePointer(p);
+      const obj=selected.kind==='listener'?32:selected.index;
+      const kt=resolveAzKeyForRotate(authorStore.state,obj);
+      if(kt.active){
+        if(kt.index<0){hover.textContent=AZ_ROTATE_BLOCKED_HINT;return;}
+        const tx=`az-rot-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+        drag={type:'face',ref:selected,obj,azKeyIndex:kt.index,tx,began:false,azDirty:false,initialAz:kt.key.az,liveAz:kt.key.az,lastSent:0,sentKey:'',start:p,camera};
+        facePointer(p);
+      }else{
+        const id=selected.kind==='listener'?'laz':`s${selected.index+1}az`;
+        bridge.parameters.begin(id);drag={type:'face',ref:selected,ids:[id],initial:{...store.state.parameters.values},start:p,camera};facePointer(p);
+      }
     } else if(preview){drag={type:'orbit',start:p,camera,labels:new Map(labelVisibility)};}
     else if (e.button === 1 || e.shiftKey && e.button === 0 && store.view.tool!=='box' && !(store.view.page==='edit'&&ref&&!isDrawing())) {
       if (store.state.document.editorFlags.navLocked) return;
@@ -935,8 +1031,21 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         drag = { type: 'point', ref, tx, start: p, camera, local, hitZ, lastSent: 0, inFlight: false }; store.command({ op: 'transaction.begin', label: 'Move channel point' }, tx);
       } else {
       const prefix = ref.kind === 'listener' ? 'l' : `s${ref.index + 1}`, yaw = ref.kind === 'listener' ? 'laz' : `${prefix}az`;
-      const ids = e.button === 2 ? [yaw] : camera.view === 'front' ? [`${prefix}x`, `${prefix}z`] : camera.view === 'side' ? [`${prefix}y`, `${prefix}z`] : [`${prefix}x`, `${prefix}y`];
-      ids.forEach(id => bridge.parameters.begin(id)); drag = { type: e.button === 2 ? 'rotate' : 'pose', ref, ids, start: p, camera, initial: { ...store.state.parameters.values } };
+      if (e.button === 2) {
+        const obj = ref.kind === 'listener' ? 32 : ref.index;
+        const kt = resolveAzKeyForRotate(authorStore.state, obj);
+        if (kt.active) {
+          if (kt.index < 0) { hover.textContent = AZ_ROTATE_BLOCKED_HINT; return; }
+          const tx = `az-rot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          drag = { type: 'rotate', ref, obj, azKeyIndex: kt.index, tx, began: false, azDirty: false, initialAz: kt.key.az, liveAz: kt.key.az, lastSent: 0, sentKey: '', start: p, camera };
+        } else {
+          bridge.parameters.begin(yaw);
+          drag = { type: 'rotate', ref, ids: [yaw], start: p, camera, initial: { ...store.state.parameters.values } };
+        }
+      } else {
+        const ids = camera.view === 'front' ? [`${prefix}x`, `${prefix}z`] : camera.view === 'side' ? [`${prefix}y`, `${prefix}z`] : [`${prefix}x`, `${prefix}y`];
+        ids.forEach(id => bridge.parameters.begin(id)); drag = { type: 'pose', ref, ids, start: p, camera, initial: { ...store.state.parameters.values } };
+      }
       }
     } else if (ref && store.view.page === 'edit') {
       const modified=e.shiftKey||modKey(e);
@@ -957,7 +1066,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       // Rays are display-only (owner's decision): they are never picked, so they cannot steal clicks.
       store.setView({ selection: [] }); return;
     }
-    if (drag) canvas.setPointerCapture(e.pointerId);
+    if (drag && !tryCapture(e)) { finish(true); return; }
     if (drag && ['pan', 'orbit'].includes(drag.type)) autoFrame = false;
   });
   onCanvas('pointerleave',()=>{cursorLevel=null;hover.textContent='';schedule();});
@@ -1003,6 +1112,11 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       } return;
     }
     if (drag.type === 'face') facePointer(p);
+    else if (drag.type === 'rotate' && drag.azKeyIndex >= 0) {
+      let value = drag.initialAz + (p[0] - drag.start[0]) * (e.shiftKey ? 0.1 : 0.6);
+      value = ((value + 180) % 360 + 360) % 360 - 180;
+      queueAzKeyRotate(drag, value);
+    }
     else if (drag.type === 'pan') camera = pan(drag.camera, drag.start, p, width, height);
     else if (drag.type === 'orbit') camera = { ...drag.camera, yaw: drag.camera.yaw - (p[0] - drag.start[0]) * 0.008, pitch: Math.max(-0.2, Math.min(1.5, drag.camera.pitch + (p[1] - drag.start[1]) * 0.008)) };
     else if (drag.type === 'box' || drag.type === 'room') drag.last = p;
@@ -1155,6 +1269,13 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         const p = authorStore.state.document.paths?.[pt.object];
         if(!p?.points || p.points.length<2) store.view.pathPoint = null;
         else if(pt.index >= p.points.length) store.view.pathPoint = { object: pt.object, index: p.points.length - 1, point: p.points.at(-1) };
+      }
+      const ak = store.view.azKey;
+      if (ak) {
+        const p = authorStore.state.document.paths?.[ak.object];
+        if (!p?.points || p.points.length < 2 || !Array.isArray(p.azKeys) || ak.index < 0 || ak.index >= p.azKeys.length) {
+          store.view.azKey = null;
+        }
       }
       if(store.view.pathEditing!=null && !(authorStore.state.document.paths?.[store.view.pathEditing]?.points?.length>=2)) store.view.pathEditing = null;
     }

@@ -113,3 +113,49 @@ export function scrollArea(children, attrs = {}) {
   root.view = view; root.update = update; root.dispose = () => observer?.disconnect();
   return root;
 }
+
+// Collapsible inspector section with chevron header, keyboard support (native button + focus restore), and persisted view state.
+export function accordionSection(store, id, { title, hint = '', hintClass = '', defaultOpen = true, nodes = [], className = '', nested = false, focusKey = `acc-${id}` }) {
+  const filtered = nodes.filter(Boolean);
+  if (!filtered.length) return null;
+  const state = store.view.accordion || {};
+  const open = state[id] ?? defaultOpen;
+  if (!open) {
+    for (const node of filtered) {
+      node.dispose?.();
+      for (const child of node.querySelectorAll?.('*') || []) child.dispose?.();
+    }
+  }
+  const titleEl = typeof title === 'string' ? element('span', { text: title }) : title;
+  const head = element('button', {
+    type: 'button',
+    className: 'acc-head',
+    'aria-expanded': String(open),
+    'aria-controls': `acc-${id}`,
+    'data-acc-id': id,
+    ...(focusKey ? { 'data-focus-key': focusKey } : {}),
+    onclick: () => store.setView({ accordion: { ...(store.view.accordion || {}), [id]: !open } })
+  }, [
+    element('i', { className: 'acc-caret', 'aria-hidden': 'true' }),
+    titleEl,
+    hint ? element('small', { ...(hintClass ? { className: hintClass } : {}), text: hint }) : null
+  ]);
+  return element('section', {
+    className: `acc${open ? ' open' : ''}${nested ? ' acc-nested' : ''}${className ? ` ${className}` : ''}`,
+    'data-acc': id
+  }, [
+    head,
+    open ? element('div', { className: 'acc-body stack', id: `acc-${id}` }, filtered) : null
+  ]);
+}
+
+export function accordion(store, tabKey, sections) {
+  return sections.map((s, i) => accordionSection(store, `${tabKey}.${s.key}`, {
+    title: s.title,
+    hint: s.hint,
+    defaultOpen: s.defaultOpen ?? (i === 0),
+    nodes: s.nodes,
+    className: s.className,
+    nested: s.nested
+  })).filter(Boolean);
+}

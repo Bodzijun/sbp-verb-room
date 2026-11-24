@@ -580,6 +580,69 @@
         "includeObjects"
       ]
     },
+    "RoomFitAutomationRange": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.fitAutomationRange"
+        },
+        "marginM": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 50
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ]
+    },
+    "RoomSetAutomationRange": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "room.setAutomationRange"
+        },
+        "reset": {
+          "type": "boolean"
+        },
+        "xM": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": -200,
+            "maximum": 200
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "yM": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": -200,
+            "maximum": 200
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "zM": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 30
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "op"
+      ],
+      "minProperties": 2
+    },
     "RoomSetHeight": {
       "type": "object",
       "properties": {
@@ -1337,6 +1400,12 @@
           "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomScale"
         },
         {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomFitAutomationRange"
+        },
+        {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomSetAutomationRange"
+        },
+        {
           "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/RoomSetHeight"
         },
         {
@@ -1466,6 +1535,30 @@
           "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/PathsetPointTiming"
         },
         {
+          "$ref": "#/$defs/PathsetAzimuthKey"
+        },
+        {
+          "$ref": "#/$defs/PathremoveAzimuthKey"
+        },
+        {
+          "$ref": "#/$defs/PathsetAzimuthKeys"
+        },
+        {
+          "$ref": "#/$defs/PathSetLfo"
+        },
+        {
+          "$ref": "#/$defs/ModulationAddRoute"
+        },
+        {
+          "$ref": "#/$defs/ModulationSetRoute"
+        },
+        {
+          "$ref": "#/$defs/ModulationRemoveRoute"
+        },
+        {
+          "$ref": "#/$defs/ModulationSetRoutes"
+        },
+        {
           "$ref": "#/$defs/PathBake"
         },
         {
@@ -1494,6 +1587,9 @@
         },
         {
           "$ref": "#/$defs/PathRecordClear"
+        },
+        {
+          "$ref": "#/$defs/AppOpenExternal"
         }
       ]
     },
@@ -1760,6 +1856,16 @@
           },
           "minItems": 2,
           "maxItems": 64
+        },
+        "azKeys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AzimuthKeyInput"
+          },
+          "maxItems": 128
+        },
+        "lfo": {
+          "$ref": "#/$defs/PathLfoInput"
         }
       },
       "required": [
@@ -1945,6 +2051,9 @@
           "type": "number",
           "minimum": 0.01,
           "maximum": 100
+        },
+        "lfo": {
+          "$ref": "#/$defs/PathLfoInput"
         }
       },
       "required": [
@@ -2235,6 +2344,301 @@
       "required": [
         "op"
       ],
+      "additionalProperties": false
+    },
+    "AzimuthKeyInput": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "az": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "easing": {
+          "enum": [
+            "linear",
+            "easeIn",
+            "easeOut",
+            "easeInOut",
+            "hold"
+          ]
+        }
+      },
+      "required": [
+        "t",
+        "az"
+      ],
+      "additionalProperties": false
+    },
+    "PathsetAzimuthKey": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.setAzimuthKey"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        },
+        "t": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "az": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "easing": {
+          "enum": [
+            "linear",
+            "easeIn",
+            "easeOut",
+            "easeInOut",
+            "hold"
+          ]
+        }
+      },
+      "required": [
+        "op",
+        "object"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "index"
+          ]
+        },
+        {
+          "required": [
+            "t",
+            "az"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "PathremoveAzimuthKey": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.removeAzimuthKey"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        }
+      },
+      "required": [
+        "op",
+        "object",
+        "index"
+      ],
+      "additionalProperties": false
+    },
+    "PathsetAzimuthKeys": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "path.setAzimuthKeys"
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AzimuthKeyInput"
+          },
+          "maxItems": 128
+        }
+      },
+      "required": [
+        "op",
+        "object",
+        "keys"
+      ],
+      "additionalProperties": false
+    },
+    "PathLfoInput": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "shape": { "enum": ["sine", "triangle", "saw", "square", "smoothRandom"] },
+        "rateHz": { "type": "number", "minimum": 0, "maximum": 8 },
+        "depth": { "type": "number", "minimum": 0, "maximum": 1 },
+        "phaseDeg": { "type": "number", "minimum": 0, "maximum": 360 },
+        "seed": { "type": "integer", "minimum": 1, "maximum": 999999 }
+      },
+      "additionalProperties": false
+    },
+    "PathSetLfo": {
+      "type": "object",
+      "properties": {
+        "op": { "const": "path.setLfo" },
+        "object": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "lfo": { "$ref": "#/$defs/PathLfoInput" }
+      },
+      "required": ["op", "object", "lfo"],
+      "additionalProperties": false
+    },
+    "ModCurveNodeInput": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "smooth": { "type": "boolean" }
+      },
+      "required": ["x", "y"],
+      "additionalProperties": false
+    },
+    "ModCurveInput": {
+      "type": "object",
+      "properties": {
+        "inputRange": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "outputRange": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -1000000, "maximum": 1000000 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "invert": { "type": "boolean" },
+        "clamp": { "type": "boolean" },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ModCurveNodeInput" },
+          "minItems": 2,
+          "maxItems": 8
+        }
+      },
+      "required": ["inputRange", "outputRange", "nodes"],
+      "additionalProperties": false
+    },
+    "ModRouteInput": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "object": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "driver": {
+          "enum": [
+            "distanceToListener",
+            "distanceToPoint",
+            "azimuthToListener",
+            "elevation",
+            "x",
+            "y",
+            "z",
+            "speed",
+            "radialSpeed",
+            "pathPosition",
+            "distanceToNearestWall"
+          ]
+        },
+        "point": {
+          "type": "array",
+          "items": { "type": "number", "minimum": -200, "maximum": 200 },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "curve": { "$ref": "#/$defs/ModCurveInput" },
+        "targetObject": { "type": "integer", "minimum": -1, "maximum": 31 },
+        "target": {
+          "enum": [
+            "sourceGain",
+            "sourceLowPass",
+            "sourceHighPass",
+            "sourceLowShelf",
+            "sourceHighShelf",
+            "earlyLevel",
+            "tailLevel",
+            "mix",
+            "none"
+          ]
+        },
+        "hostOut": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "attackMs": { "type": "number", "minimum": 0, "maximum": 2000 },
+        "releaseMs": { "type": "number", "minimum": 0, "maximum": 5000 }
+      },
+      "required": ["object", "driver", "curve", "target"],
+      "additionalProperties": false
+    },
+    "ModulationAddRoute": {
+      "type": "object",
+      "properties": {
+        "op": { "const": "modulation.addRoute" },
+        "route": { "$ref": "#/$defs/ModRouteInput" }
+      },
+      "required": ["op", "route"],
+      "additionalProperties": false
+    },
+    "ModulationSetRoute": {
+      "type": "object",
+      "properties": {
+        "op": { "const": "modulation.setRoute" },
+        "index": { "type": "integer", "minimum": 0, "maximum": 63 },
+        "route": { "$ref": "#/$defs/ModRouteInput" }
+      },
+      "required": ["op", "index", "route"],
+      "additionalProperties": false
+    },
+    "ModulationRemoveRoute": {
+      "type": "object",
+      "properties": {
+        "op": { "const": "modulation.removeRoute" },
+        "index": { "type": "integer", "minimum": 0, "maximum": 63 }
+      },
+      "required": ["op", "index"],
+      "additionalProperties": false
+    },
+    "ModulationSetRoutes": {
+      "type": "object",
+      "properties": {
+        "op": { "const": "modulation.setRoutes" },
+        "routes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ModRouteInput" },
+          "maxItems": 64
+        }
+      },
+      "required": ["op", "routes"],
+      "additionalProperties": false
+    },
+    "AppOpenExternal": {
+      "type": "object",
+      "properties": {
+        "op": { "const": "app.openExternal" },
+        "url": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^https://(ko-fi\\.com|send\\.monobank\\.ua|github\\.com|bodzijun\\.github\\.io)([/?#][^\\s\\\\\"<>'`]*)?$"
+        }
+      },
+      "required": ["op", "url"],
       "additionalProperties": false
     }
   }

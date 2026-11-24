@@ -1,7 +1,9 @@
 import { compilePath, pathId, pathGroupDriver, pathGroupMembers, MIN_WINDOW_GAP, isPointKey, clampPointTime, orientationMode } from '../viewport/movement-path.js';
+import { LFO_SHAPES, normalizeLfo, computePathLfoSwing } from './modulation-model.js';
+import { txSlider } from './tx-gesture.js';
 import { bakeSourceText, pathBakeView } from './path-bake.js';
 import { directivityShape } from '../viewport/marker.js';
-import { element, button, select, check, row, note, unavailable } from './dom.js';
+import { element, button, select, check, row, note, unavailable, accordionSection } from './dom.js';
 import { slider, numericField } from './slider.js';
 import { FORMATS, LAYOUTS, MICS, channels, budget, surface } from '../state/selectors.js';
 import { bandEditor } from './band-editor.js';
@@ -9,6 +11,7 @@ import { materialPicker, materialCatalogue, MATERIAL_CLASSES } from './material-
 import { materialColour, surfaceRole } from '../viewport/colour.js';
 import { wallSelectionSummary, computeRoomMetrics } from '../viewport/room-metrics.js';
 import { viewportState } from '../viewport/effective-scene.js';
+import { sceneAutomationRange, isDefaultAutomationRange, computeFitRange } from '../bridge/mock-model.js';
 export const heading = text => element('h3', { text });
 export function parameterToggle(ctx, id, label) {
   const { store, bridge } = ctx, value = store.state.parameters.values[id];
@@ -125,9 +128,12 @@ function polarPreview(slices, activeProfile) {
   return root;
 }
 // ── Source ------------------------------------------------------------------
-export function sourceParts(ctx, index) {
+export function sourceParts(ctx, index, opts = {}) {
   const { store, param } = ctx, state = store.state, source = state.document.sources[index];
   if (!source) return null;
+  const collapsible = !!opts.collapsible;
+  const p = store.state.document.paths?.[index];
+  const pathHint = (p?.points?.length ?? 0) >= 2 ? `Length ${compilePath(p).length.toFixed(2)} m · ${p.points.length} pts` : '';
   const config = patch => store.command({ op: 'source.setConfig', index, ...patch }), prefix = `s${index + 1}`;
   const name = element('input', { type: 'text', value: source.name, maxLength: state.limits.maxNameLength, 'aria-label': 'Source name', 'data-focus-key': 'source-name', onchange: e => config({ name: e.target.value }) });
   const ms = element('div', { className: 'ms-row', title: 'Mute beats Solo' }, [parameterSwitch(ctx, `${prefix}mute`, 'M', 'mute', `Source ${index + 1} mute`), parameterSwitch(ctx, `${prefix}solo`, 'S', 'solo', `Source ${index + 1} solo`)]);
@@ -216,21 +222,37 @@ export function sourceParts(ctx, index) {
   if (source.directivityWarning) {
     directivityControls.push(element('p', { className: 'note warning directivity-warning', text: source.directivityWarning }));
   }
+  const pose = [param(`${prefix}x`, { label: 'X' }), param(`${prefix}y`, { label: 'Y' }), param(`${prefix}z`, { label: 'Z' }), param(`${prefix}az`, { label: 'Azimuth' })];
+  const orientation = orientationControls(ctx, index);
+  const path = pathControls(ctx, index, { collapsible });
+  const routingOnly = [element('div', { className: 'check-pair' }, [check('Sum', source.sum, sum => config({ sum }), { title: 'Sum channels to one point' }), check('Free pts', source.freePoints, freePoints => config({ freePoints }), { disabled: source.sum, title: 'Free channel points' })]),
+    slider('Spread', source.spreadM, 0, 20, 0.001, spreadM => store.command({ op: 'source.setSpread', index, spreadM }), 'm')];
   return {
     source,
     identity: [row('Name', name), row('Format', select('Source format', FORMATS, source.format, n => config({ format: Number(n) }))),
       slider('First input', source.firstIn + 1, 1, state.limits.maxInputs, 1, n => config({ firstIn: n - 1 })),
       source.format === 7 ? slider('Channels', source.channels, 2, state.limits.maxSourceChannels, 1, n => config({ channels: n })) : row('Channels', `${channels(source)} · In ${source.firstIn + 1}–${source.firstIn + channels(source)}`)],
-    routing: [element('div', { className: 'check-pair' }, [check('Sum', source.sum, sum => config({ sum }), { title: 'Sum channels to one point' }), check('Free pts', source.freePoints, freePoints => config({ freePoints }), { disabled: source.sum, title: 'Free channel points' })]),
-      slider('Spread', source.spreadM, 0, 20, 0.001, spreadM => store.command({ op: 'source.setSpread', index, spreadM }), 'm'),
-      ...directivityControls],
-    position: [param(`${prefix}x`, { label: 'X' }), param(`${prefix}y`, { label: 'Y' }), param(`${prefix}z`, { label: 'Z' }), param(`${prefix}az`, { label: 'Azimuth' }), ...orientationControls(ctx, index), ...pathControls(ctx,index)],
+    routingOnly,
+    directivity: directivityControls,
+    directivityHint: instId === 'none' ? 'Analytic' : (selectedProfile?.name || 'Custom'),
+    routing: [...routingOnly, ...directivityControls],
+    pose,
+    orientation,
+    path,
+    pathHint,
+    position: [...pose, ...orientation, ...path],
     level: [element('div', { className: 'gain-ms-row' }, [param(`${prefix}g`, { label: 'Gain' }), ms])],
     points, ms
   };
 }
-export function listenerParts(ctx) {
-  const { param } = ctx; return { position: [...['lx', 'ly', 'lz', 'laz'].map((id, i) => param(id, { label: ['X', 'Y', 'Z', 'Yaw'][i] })), ...orientationControls(ctx, 32), ...pathControls(ctx,32)], output: outputParts(ctx) };
+export function listenerParts(ctx, opts = {}) {
+  const { param } = ctx, collapsible = !!opts.collapsible;
+  const p = ctx.store.state.document.paths?.[32];
+  const pathHint = (p?.points?.length ?? 0) >= 2 ? `Length ${compilePath(p).length.toFixed(2)} m · ${p.points.length} pts` : '';
+  const pose = ['lx', 'ly', 'lz', 'laz'].map((id, i) => param(id, { label: ['X', 'Y', 'Z', 'Yaw'][i] }));
+  const orientation = orientationControls(ctx, 32);
+  const path = pathControls(ctx, 32, { collapsible });
+  return { pose, orientation, path, pathHint, position: [...pose, ...orientation, ...path], output: outputParts(ctx) };
 }
 // ── Scene / room -----------------------------------------------------------
 export function scenePartsRoom(ctx) {
@@ -248,6 +270,85 @@ export function scenePartsRoom(ctx) {
     const pick = 1 + Math.floor(Math.random() * 9998);
     setSeed(pick < current ? pick : pick + 1);
   }, { 'aria-label': 'Randomize clutter seed' }));
+  const ar = sceneAutomationRange(s), isDefRange = isDefaultAutomationRange(ar);
+  const autoRangeDraft = { xM: [...ar.xM], yM: [...ar.yM], zM: [...ar.zM] };
+  const countOutsideRange = box => {
+    const vals = store.state.parameters.values;
+    let outside = 0;
+    const checkPos = (px, py, pz) => {
+      if (px < box.xM[0] - 1e-5 || px > box.xM[1] + 1e-5 || py < box.yM[0] - 1e-5 || py > box.yM[1] + 1e-5 || pz < box.zM[0] - 1e-5 || pz > box.zM[1] + 1e-5) outside++;
+    };
+    const count = (store.state.document.sources || []).length;
+    for (let i = 0; i < count; i++) checkPos(vals[`s${i + 1}x`] ?? 0, vals[`s${i + 1}y`] ?? 0, vals[`s${i + 1}z`] ?? 1.5);
+    checkPos(vals.lx ?? 0, vals.ly ?? 0, vals.lz ?? 1.5);
+    return outside;
+  };
+  const clampNote = element('small', { className: 'note auto-range-clamp', hidden: true });
+  const confirmMsg = element('small', { className: 'note' });
+  const confirmBox = element('div', { className: 'auto-range-confirm stack', hidden: true });
+  const confirmActions = element('div', { className: 'auto-range-actions' }, [
+    button('Confirm fit', () => { confirmBox.hidden = true; store.command({ op: 'room.fitAutomationRange' }); }, { className: 'primary' }),
+    button('Cancel', () => { confirmBox.hidden = true; })
+  ]);
+  confirmBox.append(confirmMsg, confirmActions);
+  const fitBtn = button('Fit to scene', () => {
+    if (isDefRange) {
+      const fitted = computeFitRange(store.state);
+      const nOut = countOutsideRange(fitted);
+      confirmMsg.textContent = `Changing from ±200 m rescales normalized DAW automation envelopes for this instance.${nOut > 0 ? ` ${nOut} object(s) outside the new range will be clamped.` : ''}`;
+      confirmBox.hidden = false;
+    } else {
+      store.command({ op: 'room.fitAutomationRange' });
+    }
+  });
+  const resetRangeBtn = button('Reset (±200 m)', () => {
+    confirmBox.hidden = true;
+    store.command({ op: 'room.setAutomationRange', reset: true });
+  }, { disabled: isDefRange });
+  const rangeInputs = {};
+  const previewDraftBox = () => {
+    const parseInput = key => Number(rangeInputs[key].value);
+    const x0 = parseInput('xMin'), x1 = parseInput('xMax'), y0 = parseInput('yMin'), y1 = parseInput('yMax'), z0 = parseInput('zMin'), z1 = parseInput('zMax');
+    if (![x0, x1, y0, y1, z0, z1].every(Number.isFinite)) { clampNote.hidden = true; return; }
+    if (x0 < -200 || x1 > 200 || x1 - x0 < 1 || y0 < -200 || y1 > 200 || y1 - y0 < 1 || z0 < 0 || z1 > 30 || z1 - z0 < 0.5) {
+      clampNote.textContent = 'Minimum span is 1.0 m for X/Y and 0.5 m for Z within global bounds.';
+      clampNote.hidden = false;
+      return;
+    }
+    const nOut = countOutsideRange({ xM: [x0, x1], yM: [y0, y1], zM: [z0, z1] });
+    if (nOut > 0) {
+      clampNote.textContent = `${nOut} object(s) outside the new range will be clamped.`;
+      clampNote.hidden = false;
+    } else {
+      clampNote.textContent = '';
+      clampNote.hidden = true;
+    }
+  };
+  const makeBoundField = (key, label, val, gLo, gHi, minSpan, axisKey, endIdx) => {
+    const field = numericField(label, val, gLo, gHi, 0.5, v => {
+      const next = { ...autoRangeDraft, [axisKey]: [...autoRangeDraft[axisKey]] };
+      next[axisKey][endIdx] = v;
+      if (next[axisKey][1] - next[axisKey][0] < minSpan - 1e-9) {
+        field.setCustomValidity(`Min span ${minSpan} m`);
+        field.reportValidity();
+        field.value = String(Number(ar[axisKey][endIdx].toFixed(3)));
+        return;
+      }
+      field.setCustomValidity('');
+      autoRangeDraft[axisKey] = next[axisKey];
+      confirmBox.hidden = true;
+      store.command({ op: 'room.setAutomationRange', xM: next.xM, yM: next.yM, zM: next.zM });
+    });
+    field.addEventListener('input', previewDraftBox);
+    rangeInputs[key] = field;
+    return field;
+  };
+  const axisRow = (axisLabel, axisKey, minKey, maxKey, gLo, gHi, minSpan) => element('div', { className: 'auto-range-axis' }, [
+    element('span', { className: 'auto-range-label', text: axisLabel }),
+    makeBoundField(minKey, `Automation ${axisLabel[0]} min, m`, ar[axisKey][0], gLo, gHi, minSpan, axisKey, 0),
+    makeBoundField(maxKey, `Automation ${axisLabel[0]} max, m`, ar[axisKey][1], gLo, gHi, minSpan, axisKey, 1)
+  ]);
+
   return {
     room: [slider('Ceiling height', s.heightM, 1, 30, 0.001, heightM => store.command({ op: 'room.setHeight', heightM }), 'm'),
       row('Floor', select('Floor material', materials, s.materials[s.floorMaterial]?.name, n => apply('floor', n))),
@@ -259,6 +360,17 @@ export function scenePartsRoom(ctx) {
     clutter: [...[['Count', 'count', 0, 80, 1], ['Min length', 'minLenM', 0.1, 3, 0.1], ['Max length', 'maxLenM', 0.2, 5, 0.1], ['Min height', 'minHeightM', 0.1, 3, 0.1], ['Max height', 'maxHeightM', 0.2, 4, 0.1], ['Min TL', 'tlMinDb', 0, 30, 0.1], ['Max TL', 'tlMaxDb', 0, 40, 0.1]]
       .map(([label, key, min, max, step]) => slider(label, s.clutter[key], min, max, step, n => store.command({ op: 'room.setClutter', [key]: n }), key.endsWith('M') ? 'm' : key.endsWith('Db') ? 'dB' : '')), seedRow, slider('Source clearance', s.clutter.minDistM, 0, 10, .01, minDistM => store.command({op:'room.setClutter',minDistM}), 'm')],
     roughness: [slider('Roughness', s.roughness, 0, 1, 0.001, roughness => store.command({ op: 'room.setRoughness', roughness }))],
+    autoRangeHint: isDefRange ? '±200 m default' : `X ${Number(ar.xM[0].toFixed(1))}..${Number(ar.xM[1].toFixed(1))} m`,
+    automationRange: [
+      element('small', { className: 'note auto-range-note', text: 'Position automation bounds for s1x..s32z and lx..lz. Changing range rescales normalized DAW envelopes.' }),
+      element('div', { className: 'auto-range-actions' }, [fitBtn, resetRangeBtn]),
+      confirmBox,
+      element('div', { className: 'auto-range-head' }, [element('span'), element('small', { text: 'Min, m' }), element('small', { text: 'Max, m' })]),
+      axisRow('X, m', 'xM', 'xMin', 'xMax', -200, 200, 1),
+      axisRow('Y, m', 'yM', 'yMin', 'yMax', -200, 200, 1),
+      axisRow('Z, m', 'zM', 'zMin', 'zMax', 0, 30, 0.5),
+      clampNote
+    ],
     scale: [note('Scale geometry once; this is not an automated Size parameter.'), factorRow, include, button('Apply scale', () => {
       const n = Number(factor.value); if (Number.isFinite(n) && n >= 0.05 && n <= 20) store.command({ op: 'room.scale', factor: n, includeObjects: include.checked });
       else { factor.setCustomValidity('Enter 0.05…20'); factor.reportValidity(); }
@@ -353,23 +465,51 @@ export function orientationControls(ctx, object) {
     }, { 'data-orientation-target': String(object) });
     rows.push(element('div', { className: 'orient-row' }, [targetSel]));
     if (Array.isArray(p.lookPos)) {
-      const axis = (i, l) => numericField(`Look at ${l}`, p.lookPos[i], i === 2 ? 0 : -200, i === 2 ? 30 : 200, 0.1, n => { const next = p.lookPos.slice(); next[i] = n; send({ lookPos: next }); });
+      const ar = sceneAutomationRange(store.state.document.scene);
+      const axis = (i, l) => {
+        const b = [ar.xM, ar.yM, ar.zM][i];
+        return numericField(`Look at ${l}`, p.lookPos[i], Math.min(b[0], p.lookPos[i]), Math.max(b[1], p.lookPos[i]), 0.1, n => { const next = p.lookPos.slice(); next[i] = n; send({ lookPos: next }); });
+      };
       rows.push(element('div', { className: 'orient-xyz' }, ['X', 'Y', 'Z'].map((l, i) => element('label', {}, [element('span', { text: l }), axis(i, l)]))));
     }
   }
   if (mode === 'along') {
     if (!((p.points?.length ?? 0) >= 2 && p.enabled)) rows.push(element('small', { className: 'note', text: 'Needs an enabled path to take effect' }));
   }
+  if ((p.points?.length ?? 0) >= 2) {
+    const azCount = Array.isArray(p.azKeys) ? p.azKeys.length : 0;
+    const focusStrip = button('Timeline', () => store.setView({
+      selection: [object === 32 ? { kind: 'listener', index: 0 } : { kind: 'source', index: object }],
+      timelineOpen: true,
+      timelineMin: false,
+      timelineFocusAz: object
+    }, false), {
+      className: 'az-keys-focus',
+      'data-az-focus': String(object),
+      'aria-label': 'Focus azimuth strip in timeline',
+      title: 'Open Path timeline and focus this Azimuth strip'
+    });
+    rows.push(element('div', { className: `az-keys-row${mode !== 'manual' ? ' dim' : ''}`, 'data-az-keys-info': String(object) }, [
+      element('span', { className: 'az-keys-label', text: `Azimuth keys: ${azCount}` }),
+      focusStrip
+    ]));
+    if (mode !== 'manual') {
+      rows.push(element('small', {
+        className: 'note az-keys-dim-hint',
+        text: mode === 'along' ? 'Angle is driven by Along path (keys kept)' : 'Angle is driven by Look at (keys kept)'
+      }));
+    }
+  }
   return rows;
 }
-export function pathControls(ctx, object) {
+export function pathControls(ctx, object, { collapsible = false } = {}) {
   const { store, param } = ctx;
   const p = store.state.document.paths?.[object];
   const hasPath = (p?.points?.length ?? 0) >= 2;
   const drawing = store.view.pathDrawing === object;
   const editing = store.view.pathEditing === object;
   const selectedPt = store.view.pathPoint?.object === object ? store.view.pathPoint.index : -1;
-  const header = element('div', { className: 'path-head' }, [
+  const header = collapsible ? null : element('div', { className: 'path-head' }, [
     heading('Path'),
     ...(hasPath ? [element('small', { className: 'path-meta', text: `Length ${compilePath(p).length.toFixed(2)} m · ${p.points.length} pts` })] : [])
   ]);
@@ -416,7 +556,7 @@ export function pathControls(ctx, object) {
     }, { 'aria-label': 'Clear path', title: 'Remove the movement path and restore static XYZ' }));
   }
   const block = element('div', { className: 'path-section', 'data-path-object': String(object) }, [
-    header,
+    ...(header ? [header] : []),
     element('div', { className: 'path-actions' }, actions)
   ]);
   const bakeStatus = element('small', { className: 'path-bake-status', 'aria-live': 'polite' });
@@ -443,7 +583,7 @@ export function pathControls(ctx, object) {
   const clearButton = button('Clear bake', () => store.command({ op: 'path.bakeClear' }), {
     'data-clear-bake': String(object), title: 'Discard all baked tables. Drawn paths and the recording stay.'
   });
-  const updateBake = () => {
+  const updateAuto = () => {
     const pass = store.telemetry['status.load']?.pathBake;
     const samples = pass?.passSamples ?? 0;
     const recorded = [3, 4].includes(pass?.passState) && samples >= 2;
@@ -461,28 +601,67 @@ export function pathControls(ctx, object) {
     recordButton.textContent = recordLabel;
     recordButton.title = recordTitle;
     clearRecording.disabled = !recorded && ![1, 2].includes(pass?.passState);
+    recordingNote.textContent = pass?.recordingNote || '';
+    recordingNote.hidden = !pass?.recordingNote;
+  };
+  const updateBakeStatus = () => {
+    const pass = store.telemetry['status.load']?.pathBake;
+    const samples = pass?.passSamples ?? 0;
+    const recorded = [3, 4].includes(pass?.passState) && samples >= 2;
+    const usesRecording = pass?.bakeSource === 'recorded';
+    const readyToBake = recorded && usesRecording && !['baking', 'baked', 'approximate'].includes(pass.state);
     const v = pathBakeView(pass, bakeStatusObject);
     bakeStatus.textContent = readyToBake ? `${v.text} · ${afterStop}` : v.text;
     bakeStatus.classList.toggle('warn', v.warn || readyToBake);
     bakeSource.textContent = `Bake source: ${bakeSourceText(pass)}`;
-    recordingNote.textContent = pass?.recordingNote || '';
-    recordingNote.hidden = !pass?.recordingNote;
     bakeButton.classList.toggle('warn', !!v.warn);
     bakeButton.textContent = v.label;
     bakeButton.title = v.running ? 'Stop the current bake.' : `${bakeHelp} ${drawnFlow} ${automationFlow}`;
   };
-  updateBake();
+  updateAuto();
+  updateBakeStatus();
   const bakeRow = (caption, controls) => element('div', { className: 'path-bake-row' }, [
-    element('small', { className: 'path-bake-caption' }, [caption]),
+    caption ? element('small', { className: 'path-bake-caption' }, [caption]) : null,
     element('div', { className: 'path-bake-buttons' }, controls)
   ]);
-  const bakeActions = element('div', { className: 'path-bake-actions' }, [
-    bakeRow('Host automation', [recordButton, clearRecording]),
-    bakeRow('Bake late tail', [bakeButton, clearButton]),
-    bakeSource, recordingNote, bakeStatus
-  ]);
-  block.dispose = store.subscribe(({ reason }) => { if (reason === 'status.load') updateBake(); });
-  if (!hasPath) { block.append(bakeActions); return [block]; }
+  let bakeNodes = [];
+  if (collapsible) {
+    const autoWrap = element('div', { className: 'path-bake-actions path-bake-sub' }, [
+      bakeRow(null, [recordButton, clearRecording]),
+      recordingNote
+    ]);
+    autoWrap.dispose = store.subscribe(({ reason }) => { if (reason === 'status.load') updateAuto(); });
+    const bakeWrap = element('div', { className: 'path-bake-actions path-bake-sub' }, [
+      bakeRow(null, [bakeButton, clearButton]),
+      bakeSource, bakeStatus
+    ]);
+    bakeWrap.dispose = store.subscribe(({ reason }) => { if (reason === 'status.load') updateBakeStatus(); });
+    bakeNodes = [
+      accordionSection(store, 'main.path.automation', {
+        title: element('span', { className: 'path-bake-caption', text: 'Host automation' }),
+        defaultOpen: true,
+        nested: true,
+        nodes: [autoWrap]
+      }),
+      accordionSection(store, 'main.path.bake', {
+        title: element('span', { className: 'path-bake-caption', text: 'Bake late tail' }),
+        defaultOpen: true,
+        nested: true,
+        nodes: [bakeWrap]
+      })
+    ].filter(Boolean);
+  } else {
+    const bakeActions = element('div', { className: 'path-bake-actions' }, [
+      bakeRow('Host automation', [recordButton, clearRecording]),
+      bakeRow('Bake late tail', [bakeButton, clearButton]),
+      bakeSource, recordingNote, bakeStatus
+    ]);
+    bakeActions.dispose = store.subscribe(({ reason }) => {
+      if (reason === 'status.load') { updateAuto(); updateBakeStatus(); }
+    });
+    bakeNodes = [bakeActions];
+  }
+  if (!hasPath) { block.append(...bakeNodes); return [block]; }
   const flags = element('div', { className: 'path-flags' }, [
     ['enabled', 'Enabled', 'Follow this path during playback'],
     ['closed', 'Closed', 'Loop back from the last point to the first'],
@@ -505,7 +684,119 @@ export function pathControls(ctx, object) {
     groupNote = element('small', { className: 'note path-group-note', text });
   }
   const posLabel = driver !== object ? `${objLabel(driver)} Position` : (members.length > 1 ? `Position (Group ${curGroup + 1})` : 'Position');
-  block.append(flags, groupRow, ...(groupNote ? [groupNote] : []), param(pathId(driver), { label: posLabel }), bakeActions);
+
+  const creativeMode = (store.state.parameters?.values?.mode ?? 0) >= 0.5;
+  const lfo = normalizeLfo(p.lfo);
+  const wrapTooltip = 'Modulates path Position around its base value. Closed paths wrap around [0, 100%); open paths clamp at 0% and 100%. Active in Creative mode only.';
+  const lfoCmd = patch => ({ op: 'path.setLfo', object, lfo: normalizeLfo({ ...lfo, ...patch }) });
+  const lfoEnableChk = check('Path LFO', lfo.enabled, enabled => store.command(lfoCmd({ enabled })), {
+    disabled: !creativeMode,
+    'aria-label': 'Enable path LFO',
+    title: wrapTooltip
+  });
+  const lfoShapeSel = select('LFO shape', LFO_SHAPES.map(s => [s.id, s.label]), lfo.shape, shape => store.command(lfoCmd({ shape })), {
+    disabled: !creativeMode,
+    title: 'Oscillator waveform'
+  });
+  const lfoDisposers = [() => lfoShapeSel.dispose?.()];
+  const rateSlider = txSlider({
+    store,
+    label: 'LFO rate',
+    txLabel: 'Edit path LFO rate',
+    value: Math.max(0.05, Math.min(8, lfo.rateHz || 0.5)),
+    min: 0.05,
+    max: 8,
+    step: 0.05,
+    unit: 'Hz',
+    disabled: !creativeMode,
+    title: 'LFO frequency (0.05–8 Hz)',
+    getCommitCmd: rateHz => lfoCmd({ rateHz })
+  });
+  const readBasePos01 = () => Math.max(0, Math.min(1, Number(store.state.parameters?.values?.[pathId(driver)] ?? 0)));
+  let previewDepthPct = Math.round(lfo.depth * 100);
+  const swingValEl = element('span', { className: 'path-lfo-swing' });
+  const warnEl = element('small', {
+    className: 'note path-lfo-warn',
+    text: 'Clipped at the path end: open path clamps, closed path wraps'
+  });
+  let keepBtn = null;
+  const refreshSwingUi = (depthPct = previewDepthPct) => {
+    previewDepthPct = Math.max(0, Math.min(100, Number(depthPct) || 0));
+    const sw = computePathLfoSwing(readBasePos01(), previewDepthPct / 100, !!p.closed);
+    const warns = previewDepthPct > 1e-6 && sw.leavesEnds;
+    swingValEl.textContent = sw.text;
+    swingValEl.classList.toggle('warn', warns);
+    warnEl.hidden = !warns;
+    if (keepBtn) keepBtn.hidden = !warns;
+    return sw;
+  };
+  keepBtn = button('Keep inside path', () => {
+    const sw = computePathLfoSwing(readBasePos01(), previewDepthPct / 100, !!p.closed);
+    store.command(lfoCmd({ depth: sw.safeDepth }));
+  }, {
+    className: 'path-lfo-keep-btn',
+    disabled: !creativeMode,
+    'aria-label': 'Clamp LFO depth to keep swing inside path 0 to 100 percent',
+    'data-focus-key': `path-lfo-keep-${object}`,
+    title: 'Clamp depth so Position ± depth stays inside 0–100 %'
+  });
+
+  const depthSlider = txSlider({
+    store,
+    label: 'LFO depth',
+    txLabel: 'Edit path LFO depth',
+    value: previewDepthPct,
+    min: 0,
+    max: 100,
+    step: 1,
+    unit: '%',
+    disabled: !creativeMode,
+    title: wrapTooltip,
+    onPreview: pct => refreshSwingUi(pct),
+    getCommitCmd: depthPct => lfoCmd({ depth: Number((depthPct / 100).toFixed(4)) })
+  });
+  const phaseSlider = txSlider({
+    store,
+    label: 'LFO phase',
+    txLabel: 'Edit path LFO phase',
+    value: Math.round(lfo.phaseDeg),
+    min: 0,
+    max: 360,
+    step: 1,
+    unit: '°',
+    disabled: !creativeMode,
+    title: 'Initial LFO phase (0–360°)',
+    getCommitCmd: phaseDeg => lfoCmd({ phaseDeg })
+  });
+  refreshSwingUi(previewDepthPct);
+  lfoDisposers.push(
+    () => rateSlider.dispose?.(),
+    () => depthSlider.dispose?.(),
+    () => phaseSlider.dispose?.(),
+    store.subscribe(({ reason }) => {
+      if (reason === 'parameters') refreshSwingUi(previewDepthPct);
+      else if (reason === 'patch' || reason === 'snapshot') {
+        const curLfo = normalizeLfo(store.state?.document?.paths?.[object]?.lfo);
+        refreshSwingUi(Math.round(curLfo.depth * 100));
+      }
+    })
+  );
+
+  const lfoBlock = element('div', { className: `path-lfo${creativeMode ? '' : ' is-physical'}`, title: wrapTooltip }, [
+    element('div', { className: 'path-lfo-head' }, [
+      ...(collapsible ? [] : [element('span', { className: 'path-lfo-title', text: 'Path LFO' })]),
+      element('span', { className: `path-lfo-hint${creativeMode ? '' : ' warning'}`, text: 'Creative mode only' })
+    ]),
+    element('div', { className: 'path-lfo-top' }, [lfoEnableChk, lfoShapeSel]),
+    element('div', { className: 'path-lfo-sliders' }, [rateSlider, depthSlider, phaseSlider]),
+    element('div', { className: 'path-lfo-swing-row' }, [swingValEl, keepBtn]),
+    warnEl,
+    ...(driver !== object ? [element('small', { className: 'note path-lfo-note', text: `Coupled group drives motion using ${objLabel(driver)}'s LFO.` })] : [])
+  ]);
+  lfoBlock.dispose = () => lfoDisposers.forEach(fn => fn?.());
+
+  if (!collapsible) block.append(flags, groupRow, ...(groupNote ? [groupNote] : []), param(pathId(driver), { label: posLabel }));
+  else block.append(flags, param(pathId(driver), { label: posLabel }));
 
   const curStart = p.start ?? 0, curEnd = p.end ?? 100;
   const startField = numericField('Path start %', curStart, 0, 99.99, 0.5, raw => {
@@ -525,6 +816,27 @@ export function pathControls(ctx, object) {
   if (p.closed) {
     block.append(Object.assign(row('Laps', numericField('Path laps', p.laps ?? 1, 1, 64, 1, laps => store.command({ op: 'path.setFlags', object, laps: Math.round(laps) }))), { className: 'row path-laps' }));
     block.append(element('small', { className: 'note path-lap-note', text: 'Timing shapes overall progress before laps repeat' }));
+  }
+
+  if (collapsible) {
+    const shapeLabel = LFO_SHAPES.find(s => s.id === lfo.shape)?.label || lfo.shape;
+    const couplingNode = accordionSection(store, 'main.path.coupling', {
+      title: 'Coupling / group',
+      hint: curGroup >= 0 ? `Group ${curGroup + 1}` : '',
+      defaultOpen: true,
+      nested: true,
+      nodes: [groupRow, ...(groupNote ? [groupNote] : [])]
+    });
+    const lfoNode = accordionSection(store, 'main.path.lfo', {
+      title: 'Path LFO',
+      hint: lfo.enabled ? shapeLabel : 'Off',
+      defaultOpen: lfo.enabled,
+      nested: true,
+      nodes: [lfoBlock]
+    });
+    block.append(...[couplingNode, lfoNode, ...bakeNodes].filter(Boolean));
+  } else {
+    block.append(lfoBlock, ...bakeNodes);
   }
 
   let selectionPanel = null;  // timing box / hint: BELOW the point list so the rows never shift with the selection
@@ -625,17 +937,18 @@ export function pathControls(ctx, object) {
   }
 
   const ptsList = element('div', { className: 'path-points' });
+  const arPts = sceneAutomationRange(store.state.document.scene);
   p.points.forEach((point, index) => {
     const latestPt = () => store.state.document.paths?.[object]?.points?.[index] || point;
-    const xField = numericField(`Path point ${index + 1} X, m`, point[0], -200, 200, 0.01, x => {
+    const xField = numericField(`Path point ${index + 1} X, m`, point[0], Math.min(arPts.xM[0], point[0]), Math.max(arPts.xM[1], point[0]), 0.01, x => {
       const cur = latestPt();
       store.command({ op: 'path.movePoint', object, index, point: [x, cur[1], cur[2]] });
     });
-    const yField = numericField(`Path point ${index + 1} Y, m`, point[1], -200, 200, 0.01, y => {
+    const yField = numericField(`Path point ${index + 1} Y, m`, point[1], Math.min(arPts.yM[0], point[1]), Math.max(arPts.yM[1], point[1]), 0.01, y => {
       const cur = latestPt();
       store.command({ op: 'path.movePoint', object, index, point: [cur[0], y, cur[2]] });
     });
-    const zField = numericField(`Path point ${index + 1} Z, m`, point[2], 0, 30, 0.01, z => {
+    const zField = numericField(`Path point ${index + 1} Z, m`, point[2], Math.min(arPts.zM[0], point[2]), Math.max(arPts.zM[1], point[2]), 0.01, z => {
       const cur = latestPt();
       store.command({ op: 'path.movePoint', object, index, point: [cur[0], cur[1], z] });
     });

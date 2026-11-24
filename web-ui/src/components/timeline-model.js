@@ -1,7 +1,13 @@
 // E20: pure model + drag math for the path timeline panel (no DOM; unit-tested in tests/e20.test.mjs).
 // Axis = group Position 0..100 % (the engine's u). A key's "Time %" is WINDOW-relative: axis x = start + time * (end - start) / 100.
-import { compilePath, evaluateTimeMap, pathGroupMembers, pathId, pointTimeBounds, clampPointTime, MIN_WINDOW_GAP, PATH_EASINGS } from '../viewport/movement-path.js';
+import {
+  compilePath, evaluateTimeMap, pathGroupMembers, pathId, pointTimeBounds, clampPointTime,
+  MIN_WINDOW_GAP, PATH_EASINGS, remainder360, applyEasing, evaluateAzimuthKeys,
+  hasActiveAzimuthKeys, orientationMode, withPathPoses
+} from '../viewport/movement-path.js';
 export { MIN_WINDOW_GAP, PATH_EASINGS };
+export const AZ_EASINGS = ['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold'];
+export const AZ_AT_PLAYHEAD_TOL = 0.5;
 export const SNAP_STEP = 0.5, FINE_STEP = 0.05, MIN_VIEW = 5;
 export const objectLabel = (state, o) => o === 32 ? 'Listener' : (state.document.sources[o]?.name || `Source ${o + 1}`);
 export const objectColour = (o, state) => {
@@ -53,10 +59,30 @@ export function pathRow(state, o) {
     if (Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < 1e-9 && at[k + 1] - at[k] > 1e-9) holds.push({ index: k, from: r4(timeToAxis(start, end, at[k])), to: r4(timeToAxis(start, end, at[k + 1])) });
   }
   const driver = pathGroupMembers(state.document.paths, p.group ?? -1).length >= 2 ? driverOf(state.document.paths, o) : o;
+  const position = clamp(num(state.parameters?.values?.[pathId(driver)], 0), 0, 1) * 100;
+  const prefix = o === 32 ? 'l' : `s${o + 1}`;
+  const hostAz = num(state.parameters?.values?.[prefix + 'az'], 0);
+  const azMode = orientationMode(p);
+  const azActive = hasActiveAzimuthKeys(p);
+  const azKeys = (Array.isArray(p.azKeys) ? p.azKeys : []).map((k, index) => ({
+    index,
+    t: r4(k.t),
+    az: r4(k.az),
+    easing: k.easing || 'linear',
+    atPlayhead: Math.abs(k.t - position) <= AZ_AT_PLAYHEAD_TOL
+  }));
+  let azCurrent = hostAz;
+  if (state.document?.paths && state.parameters?.values) {
+    azCurrent = num(withPathPoses(state).parameters?.values?.[prefix + 'az'], hostAz);
+  } else if (azActive && azKeys.length) {
+    const evaluated = evaluateAzimuthKeys(p.azKeys, position / 100);
+    if (evaluated !== null) azCurrent = evaluated;
+  }
   return {
     object: o, label: objectLabel(state, o), colour: objectColour(o, state), enabled: !!p.enabled, closed: !!p.closed, laps: p.closed ? Math.max(1, Math.round(p.laps ?? 1)) : 1,
-    start, end, group: Number.isInteger(p.group) ? p.group : -1, driver, position: clamp(num(state.parameters?.values?.[pathId(driver)], 0), 0, 1) * 100,
-    keys, autos, holds, lapMarks: lapBoundaries(p), points: n
+    start, end, group: Number.isInteger(p.group) ? p.group : -1, driver, position,
+    keys, autos, holds, lapMarks: lapBoundaries(p), points: n,
+    azMode, azActive, azKeys, azCurrent: r4(azCurrent)
   };
 }
 function driverOf(paths, o) { const g = paths[o]?.group ?? -1; return pathGroupMembers(paths, g)[0] ?? o; }
@@ -146,4 +172,82 @@ export function holdCommands(p, index, object) {
   const cmds = [{ op: 'path.addPoint', object, index: index + 1, point: p.points[index].slice() }, { op: 'path.setPointTiming', object, index: index + 1, time, ...(ease !== 'linear' ? { easing: ease } : {}) }];
   if (ease !== 'linear') cmds.push({ op: 'path.setPointTiming', object, index, easing: 'linear' });   // the easing now belongs to the move that starts after the hold
   return cmds;
+}
+
+// ---- azimuth keys math & curve geometry ------------------------------------------------------------------------------------------
+export function azKeyTimeBounds(p, index) {
+  const keys = p?.azKeys || [];
+  const prev = index > 0 && Number.isFinite(keys[index - 1]?.t) ? keys[index - 1].t : null;
+  const next = index + 1 < keys.length && Number.isFinite(keys[index + 1]?.t) ? keys[index + 1].t : null;
+  const loGap = prev !== null ? Math.min(FINE_STEP, Math.max(1e-4, ((next ?? 100) - prev) * 0.25)) : 0;
+  const hiGap = next !== null ? Math.min(FINE_STEP, Math.max(1e-4, (next - (prev ?? 0)) * 0.25)) : 0;
+  const min = prev !== null ? Math.min(100, prev + loGap) : 0;
+  const max = next !== null ? Math.max(0, next - hiGap) : 100;
+  const r5 = v => Number(v.toFixed(5));
+  return { min: r5(min), max: r5(Math.max(min, max)) };
+}
+
+export function clampAzKeyTime(p, index, raw) {
+  const { min, max } = azKeyTimeBounds(p, index);
+  return Number(clamp(raw, min, max).toFixed(5));
+}
+
+export function newAzKeyTime(p, index, v, fine) {
+  return clampAzKeyTime(p, index, snap(clamp(v, 0, 100), fine));
+}
+
+export function azAngleAt(state, o, tPct) {
+  const p = state?.document?.paths?.[o];
+  if (Array.isArray(p?.azKeys) && p.azKeys.length > 0) {
+    const v = evaluateAzimuthKeys(p.azKeys, clamp(tPct, 0, 100) / 100);
+    if (v !== null) return v === 0 ? 0 : v;
+  }
+  const id = o === 32 ? 'laz' : `s${o + 1}az`;
+  const v = num(state?.parameters?.values?.[id], 0);
+  return v === 0 ? 0 : v;
+}
+
+export function azimuthCurvePath(keys, view = FULL_VIEW, width = 1000, height = 24) {
+  if (!Array.isArray(keys) || keys.length === 0) return '';
+  const pad = 3, mid = height / 2, span = mid - pad;
+  const xOf = t => Number((viewFrac(view, t) * width).toFixed(2));
+  const yOf = az => Number((mid - (clamp(az, -180, 180) / 180) * span).toFixed(2));
+  const cmds = [`M ${xOf(0)} ${yOf(keys[0].az)}`];
+  if (keys[0].t > 0) cmds.push(`L ${xOf(keys[0].t)} ${yOf(keys[0].az)}`);
+  for (let i = 0; i + 1 < keys.length; i++) {
+    const a = keys[i], b = keys[i + 1];
+    const ease = a.easing || 'linear';
+    if (ease === 'hold' || b.t <= a.t) {
+      cmds.push(`L ${xOf(b.t)} ${yOf(a.az)}`);
+      cmds.push(`L ${xOf(b.t)} ${yOf(b.az)}`);
+      continue;
+    }
+    const delta = remainder360(b.az - a.az);
+    const steps = ease === 'linear' ? 1 : 24;
+    let prevT = a.t, prevRaw = a.az, prevWrapped = a.az;
+    for (let j = 1; j <= steps; j++) {
+      const s = j / steps;
+      const t = a.t + s * (b.t - a.t);
+      const e = applyEasing(ease, s);
+      const raw = a.az + delta * e;
+      const wrapped = remainder360(raw);
+      if (Math.abs(wrapped - prevWrapped) > 180) {
+        const seam = raw > prevRaw ? 180 : -180;
+        const prevCont = seam === 180 && prevWrapped < 0 ? prevWrapped + 360 : seam === -180 && prevWrapped > 0 ? prevWrapped - 360 : prevWrapped;
+        const curCont = seam === 180 && wrapped < 0 ? wrapped + 360 : seam === -180 && wrapped > 0 ? wrapped - 360 : wrapped;
+        const denom = curCont - prevCont;
+        const f = Math.abs(denom) > 1e-12 ? clamp((seam - prevCont) / denom, 0, 1) : 0.5;
+        const tCross = prevT + f * (t - prevT);
+        cmds.push(`L ${xOf(tCross)} ${yOf(seam)}`);
+        cmds.push(`M ${xOf(tCross)} ${yOf(-seam)}`);
+      }
+      cmds.push(`L ${xOf(t)} ${yOf(wrapped)}`);
+      prevT = t;
+      prevRaw = raw;
+      prevWrapped = wrapped;
+    }
+  }
+  const last = keys[keys.length - 1];
+  if (last.t < 100) cmds.push(`L ${xOf(100)} ${yOf(last.az)}`);
+  return cmds.join(' ');
 }

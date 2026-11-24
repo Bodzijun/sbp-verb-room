@@ -21,6 +21,9 @@ public:
     juce::var clutterObjects();
     void setPreferenceLocation(const juce::File&);
     void setUiSwitch(std::function<void(bool)> fn) { uiSwitch = std::move(fn); }
+    using ExternalUrlLauncher = std::function<bool(const juce::String&)>;
+    static bool isAllowedExternalUrl(const juce::String& url);
+    void setExternalUrlLauncher(ExternalUrlLauncher fn) { externalUrlLauncher = std::move(fn); }
     void windowSize(int w, int h);
     std::pair<int, int> preferredSize() const;
     juce::File directivityInitialDir(bool createDefault = true) const;
@@ -90,6 +93,7 @@ private:
     std::deque<juce::String> resourceIds;
     juce::var pathsRequest;
     bool pathsDirty = true;
+    ExternalUrlLauncher externalUrlLauncher;
 };
 juce::var sceneJson(const verb::Scene&, const double* home = nullptr);
 juce::var materialJson(const verb::Material&);

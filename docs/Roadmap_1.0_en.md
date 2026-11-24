@@ -50,11 +50,10 @@ need testers.
 
 ## Where we are
 
-**Latest release: [0.2.3](Release_0.2.3_en.md)** for Windows x64, macOS Universal and Linux x86_64. Downloads are posted on the project's [Ko-fi page](https://ko-fi.com/s/405ebacfcc).
+**Latest release: [0.3.0](Release_0.3.0_en.md)** for Windows x64, macOS Universal and Linux x86_64. Downloads are posted on the project's [Ko-fi page](https://ko-fi.com/s/405ebacfcc).
 
 - **A new interface:** resizable, with a 3D room editor, material inspector, dimensions and scale, outliner, decay
-  curves, energy map and a CPU load meter. The classic interface stays available. On macOS this is its first release
-  and it needs testers.
+  curves, energy map, timeline azimuth keys, interactive modulation editor, collapsible inspector sections, About dialog, and a CPU load meter. The classic interface stays available. On macOS the web UI was first released in 0.2.0 and needs testers on 0.2.1–0.3.0.
 - **Movement paths:** draw a path for a source or the listener and automate one position parameter. Path timing
   (start / end, per-point time, easing), laps and closed paths, groups that move together, orientation (along the path
   or looking at another object, also between moving objects), a timeline panel, and **baked tails** along a path that
@@ -94,9 +93,9 @@ We would like to call the next major version 1.0 when the following is in place.
 - Turning an object by hand (Manual orientation) no longer breaks a bake. **Done in 0.2.2**, for group bakes and for recorded
   passes: for Manual objects the baked table no longer requires an azimuth match (position still has to match). The
   direct sound and the early reflections follow the live azimuth; the baked tail keeps the azimuth it was baked with.
-- Azimuth keys on the timeline: a strip for the azimuth of each object next to its movement strip, locked to the same
+- **Done in 0.3.0.** Azimuth keys on the timeline: a strip for the azimuth of each object next to its movement strip, locked to the same
   position axis and the same table. Add keys anywhere and set the angle on a key with a slider or by turning the object
-  in the scene editor. Keys support hold and easing. The azimuth is then known in advance and baked with the path, so
+  in the scene editor. Keys support hold and easing (shortest arc across ±180°). The azimuth is then known in advance and baked with the path, so
   the baked tail follows the turn as well.
 - Still to do: orientation of objects at sharp path corners, and more tests with other hosts.
 
@@ -106,12 +105,9 @@ We would like to call the next major version 1.0 when the following is in place.
 
 **3. More automation**
 - Automatable reflection controls (absorption per band, scattering).
-- A position automation range that fits the room: the X / Y / Z parameters now span ±200 m (Z 0–30 m), so a room of a few
-  metres uses about 1% of an automation lane and the envelope is hard to draw. Add an option to fit the range to the
-  scene, set by an explicit button so that existing automation is never rescaled silently. Automation can reach outside the
-  room (a car arriving from far away), so the bounding box has to be chosen with care: walls, sources, the listener and
-  path points plus a margin, and possibly a box the user can edit by hand.
-  The default stays as it is, so old projects keep sounding the same.
+- **Done in 0.3.0.** A position automation range that fits the room: under **Edit room → Scene → Automation range**, **Fit to scene** fits the bounds to walls, zones, active sources, listener, and path/look-at points plus margin (alongside manual Min/Max fields, dotted viewport frame, confirmation prompt, and **Reset (±200 m)** in one Undo step).
+  The `±200 m` (Z `0–30 m`) default stays as it is, so old projects keep sounding the same.
+- **Done in 0.3.0.** `Mod Out 1…16` host output parameters (`mo1…mo16`, indices 283–298) to drive parameters in other plug-ins (e.g. REAPER `Link from FX parameter`) from smoothed modulation curves (`Host out` / `Host output only`).
 - Automation slots for materials: assign a slot to a material or a group of surfaces and automate it.
 
 **4. More realism**
@@ -139,12 +135,8 @@ We would like to call the next major version 1.0 when the following is in place.
 - Other plug-in formats (CLAP, AU) if there is demand.
 
 **7. Creative tools (candidates after the basics above)**
-- **Motion modulation:** a matrix that lets movement drive sound. Drivers: distance to the listener, to a point or to
-  the nearest wall, angle, height, speed, position on the path (later also how much the direct sound is blocked).
-  Targets: source level, source filters, Early / Tail level, Doppler, Width, Duck, directivity amount. Each route has a
-  multi-segment curve and smoothing. Planned for 0.3.0 together with the azimuth keys on the timeline.
-- **Path LFO and orbits:** an LFO that moves a source back and forth along its path, or round the listener on a
-  closed path, with a speed limit that keeps the Doppler physical.
+- **Motion modulation (Done in 0.3.0 for 11 drivers and 8 sound targets + Host output only):** a Creative-mode matrix that lets movement drive sound. Implemented drivers: distance to listener, to a point, or to the nearest wall, azimuth, elevation, X/Y/Z, 3D speed, radial speed, and path position; implemented targets: source gain, LPF/HPF, low/high shelf, Early/Tail level, Wet/dry mix, and `Host output only` (via `Mod Out 1–16`), with multi-segment curves and attack/release smoothing. Direct occlusion driver and Doppler, Width, Duck, and directivity-amount targets remain planned.
+- **Path LFO and orbits (Path LFO done in 0.3.0):** an LFO (`0.05–8 Hz`, Sine/Triangle/Saw/Square/Smooth random) modulates path position with transport sync, edge warning, and **Keep inside path** while preserving baked tables; host-tempo sync, orbits round the listener, and a Doppler speed limit remain planned.
 - **Animated geometry:** doors, hatches and walls that open and close on the timeline (transmission, height and
   position as automation), tied to the material automation slots above.
 - **Swarm and granular clouds:** a source cloned over a volume or a surface (a limited number of voices for the direct

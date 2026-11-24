@@ -43,7 +43,7 @@ juce::File profilesDir() { return juce::File::getSpecialLocation(juce::File::use
 juce::var materialJson(const verb::Material& m) {
     return obj({{"name", juce::String(m.name)}, {"classId", m.cls}, {"alpha", numbers(m.alpha)}, {"tau", numbers(m.tau)}, {"scatterLF", m.scatter}, {"scatterHF", m.scatterHf < 0 ? juce::var() : juce::var(m.scatterHf)}});
 }
-juce::var sceneJson(const verb::Scene& s, const double* home) {
+juce::var sceneJson(const verb::Scene& s, const verbp::AutomationRange& range, const double* home) {
     juce::Array<juce::var> mats, walls;
     for (const auto& m : s.mats) mats.add(materialJson(m));
     for (const auto& w : s.walls) walls.add(obj({{"a", array({w.ax, w.ay})}, {"b", array({w.bx, w.by})}, {"zBottomM", w.z0}, {"zTopM", w.z1 >= 1e5 ? juce::var() : juce::var(w.z1)}, {"material", w.mat}, {"editor", tagJson(w.editor)}}));
@@ -53,7 +53,8 @@ juce::var sceneJson(const verb::Scene& s, const double* home) {
     auto r = obj({{"ceilingExtent", s.ceilingInfinite ? "infinite" : "walls"}, {"ceilingFootprint", footprint}, {"heightM", s.height}, {"tempC", s.tempC}, {"humidityPct", s.humidity}, {"floorMaterial", s.floorMat}, {"ceilingMaterial", s.ceilMat < 0 ? juce::var() : juce::var(s.ceilMat)},
         {"materials", mats}, {"walls", walls}, {"floorZones", zones(s.floorZones)}, {"ceilingZones", zones(s.ceilZones)}, {"floorEditor", tagJson(s.floorEditor)}, {"ceilingEditor", tagJson(s.ceilEditor)},
         {"clutter", obj({{"count", s.clutter.count}, {"minLenM", s.clutter.minLen}, {"maxLenM", s.clutter.maxLen}, {"minHeightM", s.clutter.hMin}, {"maxHeightM", s.clutter.hMax}, {"tlMinDb", s.clutter.tlMin}, {"tlMaxDb", s.clutter.tlMax}, {"minDistM", s.clutter.minDist}, {"seed", s.clutter.seed}})},
-        {"roughness", s.roughness}, {"roughSeed", s.roughSeed}, {"diffraction", s.diffraction}, {"preserved", obj({{"sr", s.sr}, {"lengthS", s.length}, {"order", s.order}, {"rays", s.rays}, {"seed", s.seed}, {"detectRadiusM", s.detectRadius}})}});
+        {"roughness", s.roughness}, {"roughSeed", s.roughSeed}, {"diffraction", s.diffraction}, {"preserved", obj({{"sr", s.sr}, {"lengthS", s.length}, {"order", s.order}, {"rays", s.rays}, {"seed", s.seed}, {"detectRadiusM", s.detectRadius}})},
+        {"automationRange", obj({{"xM", array({range.xMin, range.xMax})}, {"yM", array({range.yMin, range.yMax})}, {"zM", array({range.zMin, range.zMax})}})}});
     if (home) r.getDynamicObject()->setProperty("home", obj({{"x", home[0]}, {"y", home[1]}, {"z", home[2]}, {"yawDeg", home[3]}}));
     return r;
 }
@@ -78,11 +79,45 @@ juce::var EditorBridge::document() const {
     for (const auto& s : proc.getSources()) sources.add(sourceJson(s));
     const auto output = proc.getOutputCfg(); const auto tail = proc.getTailSettings(); const auto layers = proc.getLayerModes();
     juce::Array<juce::var> paths;
-    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);juce::Array<juce::var> pts;for(auto& q:p.points)pts.add(array({q[0],q[1],q[2]}));auto po=obj({{"points",pts},{"enabled",p.enabled},{"closed",p.closed},{"smooth",p.smooth},{"orient",p.orient},{"laps",p.laps}});if(p.lookAt){po.getDynamicObject()->setProperty("lookAt",true);if(p.lookPoint)po.getDynamicObject()->setProperty("lookPos",array({p.lookPos[0],p.lookPos[1],p.lookPos[2]}));else if(p.lookTarget>=0)po.getDynamicObject()->setProperty("lookTarget",p.lookTarget);}if(p.orientOffset!=0.0)po.getDynamicObject()->setProperty("orientOffset",p.orientOffset);if(p.group>=0)po.getDynamicObject()->setProperty("group",p.group);if(p.start!=0.0)po.getDynamicObject()->setProperty("start",p.start);if(p.end!=100.0)po.getDynamicObject()->setProperty("end",p.end);bool anyTime=false;for(const auto& t:p.times)if(t.has_value()){anyTime=true;break;}if(anyTime&&p.times.size()==p.points.size()){juce::Array<juce::var> ts;for(const auto& t:p.times)ts.add(t.has_value()?juce::var(*t):juce::var());po.getDynamicObject()->setProperty("times",ts);}bool anyEase=false;for(auto e:p.easings)if(e!=verbp::PathEasing::Linear){anyEase=true;break;}if(anyEase&&p.easings.size()==p.points.size()){juce::Array<juce::var> es;for(auto e:p.easings){const char* en="linear";if(e==verbp::PathEasing::EaseIn)en="easeIn";else if(e==verbp::PathEasing::EaseOut)en="easeOut";else if(e==verbp::PathEasing::EaseInOut)en="easeInOut";es.add(juce::String(en));}po.getDynamicObject()->setProperty("easings",es);}paths.add(po);}
-    return obj({{"paths",paths},{"sceneName", proc.getSceneName()}, {"scene", sceneJson(scene, home)}, {"sources", sources}, {"output", obj({{"layout", output.layout}, {"radiusM", output.radius}, {"micPattern", output.micPattern},
+    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);juce::Array<juce::var> pts;for(auto& q:p.points)pts.add(array({q[0],q[1],q[2]}));auto po=obj({{"points",pts},{"enabled",p.enabled},{"closed",p.closed},{"smooth",p.smooth},{"orient",p.orient},{"laps",p.laps}});if(p.lookAt){po.getDynamicObject()->setProperty("lookAt",true);if(p.lookPoint)po.getDynamicObject()->setProperty("lookPos",array({p.lookPos[0],p.lookPos[1],p.lookPos[2]}));else if(p.lookTarget>=0)po.getDynamicObject()->setProperty("lookTarget",p.lookTarget);}if(p.orientOffset!=0.0)po.getDynamicObject()->setProperty("orientOffset",p.orientOffset);if(p.group>=0)po.getDynamicObject()->setProperty("group",p.group);if(p.start!=0.0)po.getDynamicObject()->setProperty("start",p.start);if(p.end!=100.0)po.getDynamicObject()->setProperty("end",p.end);bool anyTime=false;for(const auto& t:p.times)if(t.has_value()){anyTime=true;break;}if(anyTime&&p.times.size()==p.points.size()){juce::Array<juce::var> ts;for(const auto& t:p.times)ts.add(t.has_value()?juce::var(*t):juce::var());po.getDynamicObject()->setProperty("times",ts);}bool anyEase=false;for(auto e:p.easings)if(e!=verbp::PathEasing::Linear){anyEase=true;break;}if(anyEase&&p.easings.size()==p.points.size()){juce::Array<juce::var> es;for(auto e:p.easings){const char* en="linear";if(e==verbp::PathEasing::EaseIn)en="easeIn";else if(e==verbp::PathEasing::EaseOut)en="easeOut";else if(e==verbp::PathEasing::EaseInOut)en="easeInOut";es.add(juce::String(en));}po.getDynamicObject()->setProperty("easings",es);}if(!p.azKeys.empty()){juce::Array<juce::var> aks;for(const auto& k:p.azKeys){const char* en="linear";if(k.easing==verbp::AzimuthEasing::EaseIn)en="easeIn";else if(k.easing==verbp::AzimuthEasing::EaseOut)en="easeOut";else if(k.easing==verbp::AzimuthEasing::EaseInOut)en="easeInOut";else if(k.easing==verbp::AzimuthEasing::Hold)en="hold";aks.add(obj({{"t",k.t},{"az",k.azDeg},{"easing",juce::String(en)}}));}po.getDynamicObject()->setProperty("azKeys",aks);}if(!p.lfo.isDefault()){po.getDynamicObject()->setProperty("lfo",obj({{"enabled",p.lfo.enabled},{"shape",juce::String(verbp::lfoShapeName(p.lfo.shape))},{"rateHz",p.lfo.rateHz},{"depth",p.lfo.depth},{"phaseDeg",p.lfo.phaseDeg},{"seed",(int)p.lfo.seed}}));}paths.add(po);}
+    auto doc = obj({{"paths",paths},{"sceneName", proc.getSceneName()}, {"scene", sceneJson(scene, proc.getAutomationRange(), home)}, {"sources", sources}, {"output", obj({{"layout", output.layout}, {"radiusM", output.radius}, {"micPattern", output.micPattern},
           {"ambisonicsNormalization", output.ambisonicsNormalization}, {"ambisonicsLevelDb", output.ambisonicsLevelDb}})},
         {"tail", obj({{"baseRays", tail.rays}, {"adaptive", tail.adaptive}})}, {"editorFlags", obj({{"navLocked", proc.navigationLocked()}, {"outlinerVisible", proc.outlinerVisible()}, {"mixerCompact", proc.mixerCompactEnabled()}, {"inputMeters", proc.inputMetersEnabled()}, {"keepRouting", proc.keepRoutingEnabled()}, {"keepProcessing", proc.keepProcessingEnabled()},
         {"layerModes", obj({{"walls", layers[0]}, {"floors", layers[1]}, {"ceilings", layers[2]}, {"plates", layers[3]}})}})}});
+    const auto modRoutes = proc.getModulationRoutes();
+    if (!modRoutes.empty()) {
+        juce::Array<juce::var> mArr;
+        for (const auto& r : modRoutes) {
+            juce::Array<juce::var> nodes;
+            for (int ni = 0; ni < r.curve.nodeCount && ni < verbp::kMaxCurveNodes; ++ni) {
+                const auto& nd = r.curve.nodes[(size_t)ni];
+                nodes.add(obj({{"x", nd.x}, {"y", nd.y}, {"smooth", nd.smooth}}));
+            }
+            auto rObj = obj({
+                {"enabled", r.enabled},
+                {"object", r.object},
+                {"driver", juce::String(verbp::modDriverName(r.driver))},
+                {"curve", obj({
+                    {"inputRange", array({r.curve.inputMin, r.curve.inputMax})},
+                    {"outputRange", array({r.curve.outputMin, r.curve.outputMax})},
+                    {"invert", r.curve.invert},
+                    {"clamp", r.curve.clamp},
+                    {"nodes", nodes}
+                })},
+                {"targetObject", r.targetObject},
+                {"target", juce::String(verbp::modTargetName(r.target))},
+                {"attackMs", r.attackMs},
+                {"releaseMs", r.releaseMs}
+            });
+            if (r.hostOut > 0)
+                rObj.getDynamicObject()->setProperty("hostOut", r.hostOut);
+            if (r.driver == verbp::ModDriver::DistanceToPoint)
+                rObj.getDynamicObject()->setProperty("point", array({r.pointX, r.pointY, r.pointZ}));
+            mArr.add(rObj);
+        }
+        doc.getDynamicObject()->setProperty("modulation", obj({{"routes", mArr}}));
+    }
+    return doc;
 }
 juce::var EditorBridge::snapshot() { return snapshotAttempt(2); }
 juce::var EditorBridge::snapshotAttempt(int retries) {
@@ -151,6 +186,19 @@ juce::var EditorBridge::dispatch(const juce::var& message) {
     const auto payload = prop(message, "payload"); const auto op = prop(payload, "op").toString();
     const bool service = op == "output.resetClip" || op == "telemetry.subscribe" || op == "preferences.set" || op == "preset.list" || op == "catalogs.list" || op == "preset.load" || op == "preset.save" || op == "ir.export" || op == "source.loadDirectivityFile" || op == "analysis.start" || op == "analysis.cancel" || op == "rt60.start" || op == "rt60.cancel" || op == "reflections.query" || op == "editor.setFlags";
     if (service && prop(message, "baseRevision").toString() != decimal(proc.getRevision())) return array({error(id, "staleRevision", "Structural revision changed", true), snapshot()});
+    if (op == "app.openExternal")
+    {
+        const auto urlVar = prop(payload, "url");
+        if (!urlVar.isString())
+            return result(error(id, "invalid", "External URL must be a string"));
+        const auto url = urlVar.toString();
+        if (!isAllowedExternalUrl(url))
+            return result(error(id, "invalid", "External URL is not in the allow-list"));
+        const bool launched = externalUrlLauncher ? externalUrlLauncher(url) : juce::URL(url).launchInDefaultBrowser();
+        if (!launched)
+            return result(error(id, "ioError", "Could not open external URL in the system browser"));
+        return result(ack(id));
+    }
     if(op=="output.resetClip"){const auto channel=prop(payload,"channel");if(!channel.isInt()||(int)channel<0||(int)channel>=verbp::kMaxReceivers)return result(error(id,"invalid","Invalid output meter channel"));proc.clearOutputClip((int)channel);return result(ack(id));}
     if (op == "telemetry.subscribe") {
         topics.clear(); if (const auto* a = prop(payload, "topics").getArray()) for (const auto& t : *a) topics.push_back(t.toString()); return result(ack(id));
@@ -377,7 +425,28 @@ void EditorBridge::tick(bool isVisible, double now) {
     if (!pending) rebuildPendingSince = -1;
     else if (rebuildPendingSince < 0) rebuildPendingSince = now;
     if (emit && (resumed || previousTailCurrent != tailCurrent)) emit("verb.parameters", parameters.snapshot(tailCurrent));
-    if (wants("status")) emitEvent(obj({{"event", "status.load"}, {"state", proc.getLoadState()}, {"status", proc.getStatus()}, {"sceneSerial", decimal(proc.getSceneSerial())}, {"loadSerial", decimal(proc.getLoadSerial())}, {"tailCurrent", tailCurrent}, {"rebuilding", pending && now - rebuildPendingSince >= 150}, {"pathBakePercent",proc.pathBakePercent()}, {"pathBake",proc.pathBakeStatus()}, {"cpu", cachedCpu}}));
+    if (wants("status")) {
+        auto statusPayload = obj({{"event", "status.load"}, {"state", proc.getLoadState()}, {"status", proc.getStatus()}, {"sceneSerial", decimal(proc.getSceneSerial())}, {"loadSerial", decimal(proc.getLoadSerial())}, {"tailCurrent", tailCurrent}, {"rebuilding", pending && now - rebuildPendingSince >= 150}, {"pathBakePercent",proc.pathBakePercent()}, {"pathBake",proc.pathBakeStatus()}, {"cpu", cachedCpu}});
+        const int modCount = proc.webConfiguredModRouteCount();
+        if (modCount > 0) {
+            std::array<VerbProcessor::ModLiveSample, verbp::kMaxModRoutes> modSamples{};
+            int liveCount = 0;
+            const bool fresh = audioActive && proc.isCreativeMode() && proc.webModTelemetry(modSamples.data(), verbp::kMaxModRoutes, liveCount);
+            juce::Array<juce::var> routeArr;
+            const int nShow = std::min(modCount, verbp::kMaxModRoutes);
+            for (int i = 0; i < nShow; ++i) {
+                const auto& s = modSamples[(size_t)i];
+                const bool act = fresh && s.active;
+                routeArr.add(obj({
+                    {"raw", act && std::isfinite(s.raw) ? (double)s.raw : 0.0},
+                    {"value", act && std::isfinite(s.value) ? (double)s.value : 0.0},
+                    {"active", act}
+                }));
+            }
+            statusPayload.getDynamicObject()->setProperty("modulation", obj({{"routes", routeArr}}));
+        }
+        emitEvent(statusPayload);
+    }
     if (now - lastSlow >= 1000) {
         lastSlow = now;
         // Immutable scene-worker publications; neither meter nor curve polling takes engineLock.
@@ -617,5 +686,36 @@ juce::var EditorBridge::clutterObjects() {
     }
     return obj({{"event", "diagnostics.clutter"}, {"revision", decimal(proc.getRevision())}, {"sceneSerial", decimal(proc.getSceneSerial())}, {"requested", requested}, {"seed", seed}, {"objects", objects},
         {"stale", !early && (proc.isRoomLoadPending() || !proc.isWebSceneCurrent())}, {"source", "engine"}, {"preview", early}});
+}
+
+bool EditorBridge::isAllowedExternalUrl(const juce::String& url)
+{
+    if (!url.startsWith("https://") || url.length() > 512)
+        return false;
+    for (auto p = url.getCharPointer(); !p.isEmpty(); ++p)
+    {
+        const auto c = (unsigned int) *p;
+        if (c <= 0x20u || c == 0x7fu || c == '\\' || c == '<' || c == '>' || c == '"' || c == '\'' || c == '`')
+            return false;
+    }
+    const auto rest = url.substring(8);
+    int sep = rest.length();
+    for (const auto ch : { '/', '?', '#' })
+    {
+        const int idx = rest.indexOfChar(ch);
+        if (idx >= 0 && idx < sep)
+            sep = idx;
+    }
+    const auto host = rest.substring(0, sep);
+    if (host.isEmpty())
+        return false;
+    for (const auto bad : { '@', ':', '[', ']', '%', ',', ';' })
+        if (host.containsChar(bad))
+            return false;
+    const auto lower = host.toLowerCase();
+    return lower == "ko-fi.com"
+        || lower == "send.monobank.ua"
+        || lower == "github.com"
+        || lower == "bodzijun.github.io";
 }
 } // namespace verbweb

@@ -6,6 +6,111 @@ import { cornerXY, movedVertexCorners, sameCorner } from '../viewport/corner-sna
 import { joinCorners } from '../state/join-corners.js';
 export function reject(code, message) { throw Object.assign(new Error(message), { code }); }
 export const tag = () => ({ name: '', group: '', hidden: false, locked: false });
+
+export function defaultAutomationRange() {
+  return { xM: [-200, 200], yM: [-200, 200], zM: [0, 30] };
+}
+export function sceneAutomationRange(scene) {
+  return scene?.automationRange ? sanitiseAutomationRange(scene.automationRange) : defaultAutomationRange();
+}
+export function isDefaultAutomationRange(r) {
+  if (!r) return true;
+  return Math.abs(r.xM[0] + 200) < 1e-6 && Math.abs(r.xM[1] - 200) < 1e-6
+    && Math.abs(r.yM[0] + 200) < 1e-6 && Math.abs(r.yM[1] - 200) < 1e-6
+    && Math.abs(r.zM[0]) < 1e-6 && Math.abs(r.zM[1] - 30) < 1e-6;
+}
+export function sanitiseAutomationRange(raw) {
+  const def = defaultAutomationRange();
+  const fixAxis = (arr, gLo, gHi, minSpan, dLo, dHi) => {
+    let lo = Array.isArray(arr) && Number.isFinite(arr[0]) ? arr[0] : dLo;
+    let hi = Array.isArray(arr) && Number.isFinite(arr[1]) ? arr[1] : dHi;
+    if (lo > hi) [lo, hi] = [hi, lo];
+    lo = Math.max(gLo, Math.min(gHi, lo));
+    hi = Math.max(gLo, Math.min(gHi, hi));
+    if (hi - lo < minSpan) {
+      const mid = 0.5 * (lo + hi);
+      lo = mid - 0.5 * minSpan;
+      hi = mid + 0.5 * minSpan;
+      if (lo < gLo) { lo = gLo; hi = Math.min(gHi, lo + minSpan); }
+      if (hi > gHi) { hi = gHi; lo = Math.max(gLo, hi - minSpan); }
+    }
+    return [lo, hi];
+  };
+  return {
+    xM: fixAxis(raw?.xM, -200, 200, 1, def.xM[0], def.xM[1]),
+    yM: fixAxis(raw?.yM, -200, 200, 1, def.yM[0], def.yM[1]),
+    zM: fixAxis(raw?.zM, 0, 30, 0.5, def.zM[0], def.zM[1]),
+  };
+}
+export function syncDescriptorsWithRange(state) {
+  const ar = sceneAutomationRange(state.document?.scene);
+  for (const d of state.parameters.descriptors?.parameters || []) {
+    const m = /^(?:s(?:[1-9]|[12]\d|3[0-2])|l)([xyz])$/.exec(d.id);
+    if (!m) continue;
+    const [lo, hi] = m[1] === 'x' ? ar.xM : m[1] === 'y' ? ar.yM : ar.zM;
+    d.min = lo;
+    d.max = hi;
+    const baseDef = m[1] === 'z' ? 1.5 : 0;
+    d.default = Math.max(lo, Math.min(hi, baseDef));
+  }
+}
+function clampPositionValuesToRange(state, ar) {
+  const vals = state.parameters.values;
+  for (const id of Object.keys(vals)) {
+    const m = /^(?:s(?:[1-9]|[12]\d|3[0-2])|l)([xyz])$/.exec(id);
+    if (!m) continue;
+    const [lo, hi] = m[1] === 'x' ? ar.xM : m[1] === 'y' ? ar.yM : ar.zM;
+    vals[id] = Math.round(Math.max(lo, Math.min(hi, vals[id])) * 1000) / 1000;
+  }
+}
+export function expandRangeWithPoint(ar, x, y, z) {
+  if (Number.isFinite(x)) { const c = Math.max(-200, Math.min(200, x)); ar.xM = [Math.min(ar.xM[0], c), Math.max(ar.xM[1], c)]; }
+  if (Number.isFinite(y)) { const c = Math.max(-200, Math.min(200, y)); ar.yM = [Math.min(ar.yM[0], c), Math.max(ar.yM[1], c)]; }
+  if (Number.isFinite(z)) { const c = Math.max(0, Math.min(30, z)); ar.zM = [Math.min(ar.zM[0], c), Math.max(ar.zM[1], c)]; }
+}
+export function computeFitRange(state, marginM = -1) {
+  const s = state.document.scene, sources = state.document.sources || [], paths = state.document.paths || [], vals = state.parameters.values, out = state.document.output || {};
+  let rawXMin = Infinity, rawXMax = -Infinity, rawYMin = Infinity, rawYMax = -Infinity, rawZMin = Infinity, rawZMax = -Infinity;
+  let hasXY = false, hasZ = false, hasGeom = false;
+  const accXY = (x, y) => { if (!Number.isFinite(x) || !Number.isFinite(y)) return; rawXMin = Math.min(rawXMin, x); rawXMax = Math.max(rawXMax, x); rawYMin = Math.min(rawYMin, y); rawYMax = Math.max(rawYMax, y); hasXY = true; };
+  const accZ = z => { if (!Number.isFinite(z)) return; rawZMin = Math.min(rawZMin, z); rawZMax = Math.max(rawZMax, z); hasZ = true; };
+  for (const w of s.walls || []) { hasGeom = true; accXY(w.a[0], w.a[1]); accXY(w.b[0], w.b[1]); accZ(0); accZ(w.zBottomM ?? 0); accZ(w.zTopM === null || w.zTopM === undefined ? s.heightM : w.zTopM); }
+  for (const z of s.floorZones || []) { if (z.vertices?.length) hasGeom = true; for (const pt of z.vertices || []) accXY(pt[0], pt[1]); accZ(z.heightM ?? 0); }
+  for (const z of s.ceilingZones || []) { if (z.vertices?.length) hasGeom = true; for (const pt of z.vertices || []) accXY(pt[0], pt[1]); accZ(z.heightM ?? s.heightM); }
+  if (hasGeom) { accZ(0); accZ(s.heightM); }
+  for (let i = 0; i < sources.length; i++) {
+    const cfg = sources[i];
+    const sx = vals[`s${i + 1}x`] ?? 0, sy = vals[`s${i + 1}y`] ?? 0, sz = vals[`s${i + 1}z`] ?? 1.5, az = ((vals[`s${i + 1}az`] ?? 0) * Math.PI) / 180;
+    accXY(sx, sy); accZ(sz);
+    if (!cfg.sum) {
+      if (cfg.freePoints && Array.isArray(cfg.offsetsM)) {
+        const cs = Math.cos(az), sn = Math.sin(az);
+        for (const off of cfg.offsetsM) { accXY(sx + off[0] * cs - off[1] * sn, sy + off[0] * sn + off[1] * cs); accZ(sz + off[2]); }
+      } else if ((cfg.channels ?? 1) > 1 && (cfg.spreadM ?? 0) > 0) {
+        accXY(sx - cfg.spreadM, sy - cfg.spreadM); accXY(sx + cfg.spreadM, sy + cfg.spreadM);
+      }
+    }
+    const lp = paths[i];
+    if (lp) { for (const pt of lp.points || []) { accXY(pt[0], pt[1]); accZ(pt[2]); } if (lp.lookAt && Array.isArray(lp.lookPos)) { accXY(lp.lookPos[0], lp.lookPos[1]); accZ(lp.lookPos[2]); } }
+  }
+  const lx = vals.lx ?? 0, ly = vals.ly ?? 0, lz = vals.lz ?? 1.5;
+  accXY(lx, ly); accZ(lz);
+  if ((out.radiusM ?? 0) > 0 && out.layout !== 0 && !(out.layout >= 9 && out.layout <= 11)) {
+    accXY(lx - out.radiusM, ly - out.radiusM); accXY(lx + out.radiusM, ly + out.radiusM);
+  }
+  const lpLis = paths[32];
+  if (lpLis) { for (const pt of lpLis.points || []) { accXY(pt[0], pt[1]); accZ(pt[2]); } if (lpLis.lookAt && Array.isArray(lpLis.lookPos)) { accXY(lpLis.lookPos[0], lpLis.lookPos[1]); accZ(lpLis.lookPos[2]); } }
+  if (!hasXY) { rawXMin = -5; rawXMax = 5; rawYMin = -5; rawYMax = 5; }
+  if (!hasZ) { rawZMin = 0; rawZMax = Math.max(3, s.heightM); }
+  const span = Math.max(rawXMax - rawXMin, rawYMax - rawYMin);
+  const mXY = marginM > 0 ? marginM : Math.max(1, Math.min(5, 0.1 * span));
+  const floorHalf = v => Math.floor(v * 2) * 0.5, ceilHalf = v => Math.ceil(v * 2) * 0.5;
+  let xMin = floorHalf(rawXMin - mXY), xMax = ceilHalf(rawXMax + mXY), yMin = floorHalf(rawYMin - mXY), yMax = ceilHalf(rawYMax + mXY);
+  if (!hasGeom) { xMin = Math.min(xMin, -5); xMax = Math.max(xMax, 5); yMin = Math.min(yMin, -5); yMax = Math.max(yMax, 5); }
+  const zBase = Math.max(rawZMax, hasGeom ? s.heightM : Math.max(3, s.heightM));
+  const zMax = ceilHalf(zBase + (s.ceilingMaterial === null ? 2 : 1));
+  return sanitiseAutomationRange({ xM: [xMin, xMax], yM: [yMin, yMax], zM: [0, zMax] });
+}
 const distance = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 function cross(a, b, c) { return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]); }
 export function polygonValid(vertices) {
@@ -180,10 +285,33 @@ export function applyMutation(state, command, original = state, presetMaterials 
   else if (op === 'room.clear') { s.walls = []; s.floorZones = []; s.ceilingZones = []; s.clutter.count = 0; s.roughness = 0; }
   else if (op === 'room.scale') {
     // Frozen v1 behavior: zones are deliberately NOT scaled; capability is partial.
+    let cx = 0, cy = 0;
+    if (s.walls.length) {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const w of s.walls) { x0 = Math.min(x0, w.a[0], w.b[0]); x1 = Math.max(x1, w.a[0], w.b[0]); y0 = Math.min(y0, w.a[1], w.b[1]); y1 = Math.max(y1, w.a[1], w.b[1]); }
+      cx = 0.5 * (x0 + x1); cy = 0.5 * (y0 + y1);
+    }
+    const curAr = sceneAutomationRange(s);
+    if (!isDefaultAutomationRange(curAr)) {
+      const f = command.factor;
+      const nextAr = sanitiseAutomationRange({
+        xM: [cx + (curAr.xM[0] - cx) * f, cx + (curAr.xM[1] - cx) * f],
+        yM: [cy + (curAr.yM[0] - cy) * f, cy + (curAr.yM[1] - cy) * f],
+        zM: command.includeObjects ? [curAr.zM[0] * f, curAr.zM[1] * f] : curAr.zM,
+      });
+      if (!command.includeObjects) {
+        const vals = state.parameters.values;
+        for (let i = 0; i < (state.document.sources || []).length; i++) expandRangeWithPoint(nextAr, vals[`s${i + 1}x`], vals[`s${i + 1}y`], vals[`s${i + 1}z`]);
+        expandRangeWithPoint(nextAr, vals.lx, vals.ly, vals.lz);
+      }
+      s.automationRange = sanitiseAutomationRange(nextAr);
+      syncDescriptorsWithRange(state);
+    }
     s.walls.forEach(w => { w.a = w.a.map(v => v * command.factor); w.b = w.b.map(v => v * command.factor); });
     if (command.includeObjects) {
       s.heightM *= command.factor;
       Object.keys(state.parameters.values).filter(k => /^(s\d+[xyz]|l[xyz])$/.test(k)).forEach(k => { state.parameters.values[k] *= command.factor; });
+      if (!isDefaultAutomationRange(sceneAutomationRange(s))) clampPositionValuesToRange(state, sceneAutomationRange(s));
       if (Array.isArray(state.document.paths)) {
         for (const path of state.document.paths) {
           if (path?.points?.length) {
@@ -196,6 +324,32 @@ export function applyMutation(state, command, original = state, presetMaterials 
         }
       }
     }
+  } else if (op === 'room.fitAutomationRange') {
+    const fitted = computeFitRange(state, command.marginM ?? -1);
+    s.automationRange = fitted;
+    syncDescriptorsWithRange(state);
+    clampPositionValuesToRange(state, fitted);
+  } else if (op === 'room.setAutomationRange') {
+    let next = clone(sceneAutomationRange(s));
+    if (command.reset) next = defaultAutomationRange();
+    if ('xM' in command) {
+      if (!Array.isArray(command.xM) || command.xM.length !== 2 || command.xM[0] < -200 || command.xM[1] > 200 || command.xM[1] - command.xM[0] < 1 - 1e-9)
+        reject('invalid', 'X range must satisfy -200 <= min, max <= 200 and span >= 1.0 m.');
+      next.xM = [...command.xM];
+    }
+    if ('yM' in command) {
+      if (!Array.isArray(command.yM) || command.yM.length !== 2 || command.yM[0] < -200 || command.yM[1] > 200 || command.yM[1] - command.yM[0] < 1 - 1e-9)
+        reject('invalid', 'Y range must satisfy -200 <= min, max <= 200 and span >= 1.0 m.');
+      next.yM = [...command.yM];
+    }
+    if ('zM' in command) {
+      if (!Array.isArray(command.zM) || command.zM.length !== 2 || command.zM[0] < 0 || command.zM[1] > 30 || command.zM[1] - command.zM[0] < 0.5 - 1e-9)
+        reject('invalid', 'Z range must satisfy 0 <= min, max <= 30 and span >= 0.5 m.');
+      next.zM = [...command.zM];
+    }
+    s.automationRange = sanitiseAutomationRange(next);
+    syncDescriptorsWithRange(state);
+    clampPositionValuesToRange(state, s.automationRange);
   } else if (op === 'source.add') {
     if (d.sources.length >= state.limits.maxSources) reject('budgetExceeded', 'Maximum source count');
     d.sources.push({ name: `Source ${d.sources.length + 1}`, format: 0, channels: 1, firstIn: budget(d).inputs, sum: false, spreadM: 0.5, pattern: 0, freePoints: false, offsetsM: [] });
@@ -203,6 +357,28 @@ export function applyMutation(state, command, original = state, presetMaterials 
     if (d.sources.length <= 1 || !d.sources[command.index]) reject('invalid', 'At least one source must remain');
     d.sources.splice(command.index, 1);
     for (let i = command.index + 1; i <= d.sources.length; i++) for (const k of ['x', 'y', 'z', 'az', 'g', 'mute', 'solo']) state.parameters.values[`s${i}${k}`] = state.parameters.values[`s${i + 1}${k}`];
+    if (Array.isArray(d.paths)) {
+      for (let i = command.index; i < d.sources.length; i++) d.paths[i] = clone(d.paths[i + 1]);
+      d.paths[d.sources.length] = { points: [], enabled: true, closed: false, smooth: false, orient: false, laps: 1 };
+      for (const lp of d.paths) {
+        if (!lp || !('lookTarget' in lp) || !Number.isInteger(lp.lookTarget) || lp.lookTarget >= 32) continue;
+        if (lp.lookTarget === command.index) delete lp.lookTarget;
+        else if (lp.lookTarget > command.index) lp.lookTarget -= 1;
+      }
+    }
+    if (Array.isArray(d.modulation?.routes)) {
+      const idx = command.index;
+      const kept = [];
+      for (const route of d.modulation.routes) {
+        const r = clone(route);
+        if (r.object === idx || r.targetObject === idx) continue;
+        if (r.object > idx && r.object < 32) r.object -= 1;
+        if (r.targetObject > idx && r.targetObject < 32) r.targetObject -= 1;
+        kept.push(r);
+      }
+      if (kept.length) d.modulation.routes = kept;
+      else delete d.modulation;
+    }
   } else if (op.startsWith('source.')) {
     const source = d.sources[command.index]; if (!source) reject('invalid', 'Source does not exist');
     if (op === 'source.setConfig') {
@@ -285,6 +461,59 @@ export function applyMutation(state, command, original = state, presetMaterials 
   else if(op.startsWith('path.')) {
     const emptyPath=()=>({points:[],enabled:true,closed:false,smooth:false,orient:false,laps:1});
     const validEasings=new Set(['linear','easeIn','easeOut','easeInOut']);
+    const kMaxAzKeys=128,kAzKeyMinGap=1e-6;
+    const validAzEasings=new Set(['linear','easeIn','easeOut','easeInOut','hold']);
+    const validLfoShapes=new Set(['sine','triangle','saw','square','smoothRandom']);
+    const defaultLfo=()=>({enabled:false,shape:'sine',rateHz:0.5,depth:0,phaseDeg:0,seed:1});
+    const isDefaultLfo=l=>!l||(l.enabled===false&&l.shape==='sine'&&l.rateHz===0.5&&l.depth===0&&l.phaseDeg===0&&l.seed===1);
+    const parseLfo=(item,base=defaultLfo())=>{
+      if(!item||typeof item!=='object'||Array.isArray(item))reject('invalid','Expected LFO object');
+      const out={...base};
+      if('enabled'in item){if(typeof item.enabled!=='boolean')reject('invalid','lfo.enabled must be boolean');out.enabled=item.enabled;}
+      if('shape'in item){if(!validLfoShapes.has(item.shape))reject('invalid','Invalid lfo.shape');out.shape=item.shape;}
+      if('rateHz'in item){if(!Number.isFinite(item.rateHz)||item.rateHz<0||item.rateHz>8)reject('invalid','lfo.rateHz out of range [0, 8]');out.rateHz=item.rateHz;}
+      if('depth'in item){if(!Number.isFinite(item.depth)||item.depth<0||item.depth>1)reject('invalid','lfo.depth out of range [0, 1]');out.depth=item.depth;}
+      if('phaseDeg'in item){if(!Number.isFinite(item.phaseDeg)||item.phaseDeg<0||item.phaseDeg>360)reject('invalid','lfo.phaseDeg out of range [0, 360]');out.phaseDeg=item.phaseDeg;}
+      if('seed'in item){if(!Number.isInteger(item.seed)||item.seed<1||item.seed>999999)reject('invalid','lfo.seed out of range [1, 999999]');out.seed=item.seed;}
+      return out;
+    };
+    const parseAzKey=item=>{
+      if(!item||typeof item!=='object'||Array.isArray(item))reject('invalid','Expected azimuth key object');
+      const t=item.t,az=item.az,easing='easing'in item?item.easing:'linear';
+      if(!Number.isFinite(t)||t<0||t>100)reject('invalid','Azimuth key time out of range [0, 100]');
+      if(!Number.isFinite(az)||az<-180||az>180)reject('invalid','Azimuth key angle out of range [-180, 180]');
+      if(!validAzEasings.has(easing))reject('invalid','Invalid azimuth key easing');
+      return {t:t===0?0:t,az:az===0?0:az,easing};
+    };
+    const normalizeAzKeys=p=>{
+      const n=p.points?.length??0;
+      if(n<2||!Array.isArray(p.azKeys)||p.azKeys.length===0){delete p.azKeys;return;}
+      const sorted=p.azKeys.slice().sort((a,b)=>{
+        const af=Number.isFinite(a.t),bf=Number.isFinite(b.t);
+        if(af!==bf)return bf-af;
+        return af?(a.t-b.t):0;
+      });
+      const dedup=[];
+      for(const item of sorted){
+        const k={t:item.t===0?0:item.t,az:item.az===0?0:item.az,easing:item.easing||'linear'};
+        if(dedup.length&&Number.isFinite(k.t)&&Number.isFinite(dedup[dedup.length-1].t)&&Math.abs(k.t-dedup[dedup.length-1].t)<kAzKeyMinGap)
+          dedup[dedup.length-1]=k;
+        else dedup.push(k);
+      }
+      p.azKeys=dedup;
+    };
+    const validateAzKeys=p=>{
+      if(!('azKeys'in p))return;
+      if(!Array.isArray(p.azKeys)||p.azKeys.length>kMaxAzKeys)reject('invalid','Expected 0..128 azimuth keys');
+      if((p.points?.length??0)<2&&p.azKeys.length>0)reject('invalid','Path has fewer than two points');
+      for(let i=0;i<p.azKeys.length;i++){
+        const k=p.azKeys[i];
+        if(!Number.isFinite(k.t)||k.t<0||k.t>100)reject('invalid','Azimuth key time out of range');
+        if(!Number.isFinite(k.az)||k.az<-180||k.az>180)reject('invalid','Azimuth key angle out of range');
+        if(!validAzEasings.has(k.easing))reject('invalid','Invalid azimuth key easing');
+        if(i>0&&!(k.t>p.azKeys[i-1].t))reject('invalid','Azimuth key times must be strictly increasing');
+      }
+    };
     const normalizeTiming=p=>{
       const n=p.points?.length??0;
       if(n<2){delete p.start;delete p.end;delete p.times;delete p.easings;return;}
@@ -339,9 +568,15 @@ export function applyMutation(state, command, original = state, presetMaterials 
       const next=clone(p);
       if(op==='path.set'){
         next.points=command.points.map(q=>q.slice());
-        delete next.start;delete next.end;delete next.times;delete next.easings;
+        delete next.start;delete next.end;delete next.times;delete next.easings;delete next.lfo;
         if('times'in command)next.times=command.times.map(t=>t??null);
         if('easings'in command)next.easings=command.easings.slice();
+        if('azKeys'in command){
+          if(!Array.isArray(command.azKeys)||command.azKeys.length>kMaxAzKeys)reject('invalid','Expected 0..128 azimuth keys');
+          next.azKeys=command.azKeys.map(parseAzKey);
+          normalizeAzKeys(next);
+        }
+        if('lfo'in command){const l=parseLfo(command.lfo);if(!isDefaultLfo(l))next.lfo=l;}
       }
       if(op==='path.addPoint'){
         if(next.points.length>=64)reject('invalid','Path exceeds 64 points');
@@ -384,8 +619,56 @@ export function applyMutation(state, command, original = state, presetMaterials 
           if(next.easings)next.easings[i]=command.easing;
         }
       }
+      if(op==='path.setAzimuthKey'){
+        if((next.points?.length??0)<2)reject('invalid','Path has fewer than two points');
+        const keys=Array.isArray(next.azKeys)?next.azKeys.slice():[];
+        if('index'in command){
+          const i=command.index;
+          if(!Number.isInteger(i)||i<0||i>=keys.length)reject('invalid','Azimuth key does not exist');
+          if(!('t'in command)&&!('az'in command)&&!('easing'in command))reject('invalid','Expected t, az, and/or easing');
+          const ak={...keys[i]};
+          if('t'in command){if(!Number.isFinite(command.t)||command.t<0||command.t>100)reject('invalid','Azimuth key time out of range');ak.t=command.t;}
+          if('az'in command){if(!Number.isFinite(command.az)||command.az<-180||command.az>180)reject('invalid','Azimuth key angle out of range');ak.az=command.az;}
+          if('easing'in command){if(!validAzEasings.has(command.easing))reject('invalid','Invalid azimuth key easing');ak.easing=command.easing;}
+          keys.splice(i,1);keys.push(ak);
+          next.azKeys=keys;normalizeAzKeys(next);
+        }else{
+          const hasEase='easing'in command;
+          const ak=parseAzKey({t:command.t,az:command.az,...(hasEase?{easing:command.easing}:{})});
+          const hit=keys.findIndex(k=>Math.abs(k.t-ak.t)<kAzKeyMinGap);
+          if(hit>=0){
+            keys[hit]={t:ak.t,az:ak.az,easing:hasEase?ak.easing:keys[hit].easing};
+          }else{
+            if(keys.length>=kMaxAzKeys)reject('invalid','Maximum 128 azimuth keys');
+            keys.push(ak);
+          }
+          next.azKeys=keys;normalizeAzKeys(next);
+        }
+      }
+      if(op==='path.removeAzimuthKey'){
+        if((next.points?.length??0)<2)reject('invalid','Path has fewer than two points');
+        if(!Array.isArray(next.azKeys)||!Number.isInteger(command.index)||!next.azKeys[command.index])reject('invalid','Azimuth key does not exist');
+        next.azKeys.splice(command.index,1);
+      }
+      if(op==='path.setAzimuthKeys'){
+        if(!Array.isArray(command.keys)||command.keys.length>kMaxAzKeys)reject('invalid','Expected 0..128 azimuth keys');
+        if(command.keys.length>0&&(next.points?.length??0)<2)reject('invalid','Path has fewer than two points');
+        next.azKeys=command.keys.map(parseAzKey);
+        normalizeAzKeys(next);
+      }
+      if(op==='path.setLfo'){
+        if(!('lfo'in command))reject('invalid','lfo is required');
+        const l=parseLfo(command.lfo,next.lfo||defaultLfo());
+        if((next.points?.length??0)<2&&!isDefaultLfo(l))reject('invalid','Path has fewer than two points');
+        if(isDefaultLfo(l))delete next.lfo;else next.lfo=l;
+      }
       if(op==='path.set'||op==='path.setFlags'){
         for(const k of ['enabled','closed','smooth','orient','laps','start','end'])if(k in command)next[k]=command[k];
+        if(op==='path.setFlags'&&'lfo'in command){
+          const l=parseLfo(command.lfo,next.lfo||defaultLfo());
+          if((next.points?.length??0)<2&&!isDefaultLfo(l))reject('invalid','Path has fewer than two points');
+          if(isDefaultLfo(l))delete next.lfo;else next.lfo=l;
+        }
         if(command.orient===true)delete next.lookAt;
         if('orientMode'in command){
           if(command.orientMode==='manual'){next.orient=false;delete next.lookAt;}
@@ -404,12 +687,111 @@ export function applyMutation(state, command, original = state, presetMaterials 
         if('group' in command){if(command.group<0)delete next.group;else next.group=command.group;}
       }
       validateTiming(next);
+      validateAzKeys(next);
       normalizeTiming(next);
+      normalizeAzKeys(next);
       d.paths[command.object]=next;
     }
+  } else if (op.startsWith('modulation.')) {
+    const kMaxModRoutes = 64;
+    const validDrivers = new Set(['distanceToListener', 'distanceToPoint', 'azimuthToListener', 'elevation', 'x', 'y', 'z', 'speed', 'radialSpeed', 'pathPosition', 'distanceToNearestWall']);
+    const validTargets = new Set(['sourceGain', 'sourceLowPass', 'sourceHighPass', 'sourceLowShelf', 'sourceHighShelf', 'earlyLevel', 'tailLevel', 'mix', 'none']);
+    const globalTargets = new Set(['earlyLevel', 'tailLevel', 'mix', 'none']);
+    const targetBounds = {
+      sourceGain: [-60, 12],
+      sourceLowPass: [20, 20000],
+      sourceHighPass: [20, 20000],
+      sourceLowShelf: [-12, 12],
+      sourceHighShelf: [-12, 12],
+      earlyLevel: [-60, 6],
+      tailLevel: [-48, 12],
+      mix: [-100, 100],
+      none: [0, 1]
+    };
+    const parseRoute = item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) reject('invalid', 'Expected modulation route object');
+      const enabled = 'enabled' in item ? item.enabled : true;
+      if (typeof enabled !== 'boolean') reject('invalid', 'enabled must be a boolean');
+      if (!Number.isInteger(item.object) || item.object < 0 || item.object > 32 || (item.object < 32 && item.object >= d.sources.length)) reject('invalid', 'object does not exist');
+      if (!validDrivers.has(item.driver)) reject('invalid', 'Invalid modulation driver');
+      if (!validTargets.has(item.target)) reject('invalid', 'Invalid modulation target');
+      let point;
+      if ('point' in item) {
+        if (!Array.isArray(item.point) || item.point.length !== 3 || item.point.some(v => !Number.isFinite(v))) reject('invalid', 'point must be [x, y, z]');
+        if (item.point[0] < -200 || item.point[0] > 200 || item.point[1] < -200 || item.point[1] > 200 || item.point[2] < 0 || item.point[2] > 30) reject('invalid', 'point coordinates out of range');
+        point = item.point.slice();
+      }
+      const targetObject = 'targetObject' in item ? item.targetObject : -1;
+      if (!Number.isInteger(targetObject) || targetObject < -1 || targetObject > 31) reject('invalid', 'targetObject out of range');
+      if (globalTargets.has(item.target)) {
+        if (targetObject !== -1) reject('invalid', 'Global targets require targetObject -1');
+      } else if (targetObject >= d.sources.length || (targetObject === -1 && item.object === 32)) {
+        reject('invalid', 'targetObject does not refer to a valid source');
+      }
+      const hostOut = 'hostOut' in item ? item.hostOut : 0;
+      if (!Number.isInteger(hostOut) || hostOut < 0 || hostOut > 16) reject('invalid', 'hostOut out of range [0, 16]');
+      const attackMs = 'attackMs' in item ? item.attackMs : 15;
+      const releaseMs = 'releaseMs' in item ? item.releaseMs : 80;
+      if (!Number.isFinite(attackMs) || attackMs < 0 || attackMs > 2000) reject('invalid', 'attackMs out of range [0, 2000]');
+      if (!Number.isFinite(releaseMs) || releaseMs < 0 || releaseMs > 5000) reject('invalid', 'releaseMs out of range [0, 5000]');
+      const cv = item.curve;
+      if (!cv || typeof cv !== 'object' || Array.isArray(cv)) reject('invalid', 'curve object is required');
+      for (const rk of ['inputRange', 'outputRange']) {
+        if (!Array.isArray(cv[rk]) || cv[rk].length !== 2 || !Number.isFinite(cv[rk][0]) || !Number.isFinite(cv[rk][1]) || Math.abs(cv[rk][0]) > 1e6 || Math.abs(cv[rk][1]) > 1e6) {
+          reject('invalid', `${rk} must be [min, max]`);
+        }
+      }
+      const invert = 'invert' in cv ? cv.invert : false;
+      const clamp = 'clamp' in cv ? cv.clamp : true;
+      if (typeof invert !== 'boolean' || typeof clamp !== 'boolean') reject('invalid', 'curve.invert and curve.clamp must be boolean');
+      if (!Array.isArray(cv.nodes) || cv.nodes.length < 2 || cv.nodes.length > 8) reject('invalid', 'curve.nodes must have 2..8 points');
+      const nodes = cv.nodes.map((nd, ni) => {
+        if (!nd || typeof nd !== 'object' || !Number.isFinite(nd.x) || !Number.isFinite(nd.y) || nd.x < 0 || nd.x > 1 || nd.y < 0 || nd.y > 1) reject('invalid', 'Curve node x/y out of range [0, 1]');
+        if (ni > 0 && nd.x < cv.nodes[ni - 1].x) reject('invalid', 'Curve node x values must be non-decreasing');
+        const smooth = 'smooth' in nd ? nd.smooth : false;
+        if (typeof smooth !== 'boolean') reject('invalid', 'Curve node smooth must be boolean');
+        return { x: nd.x, y: nd.y, smooth };
+      });
+      const [tgtLo, tgtHi] = targetBounds[item.target] || [-60, 12];
+      const clampedOutRange = [
+        Math.max(tgtLo, Math.min(tgtHi, cv.outputRange[0])),
+        Math.max(tgtLo, Math.min(tgtHi, cv.outputRange[1]))
+      ];
+      const out = { enabled, object: item.object, driver: item.driver, curve: { inputRange: cv.inputRange.slice(), outputRange: clampedOutRange, invert, clamp, nodes }, targetObject, target: item.target, ...(hostOut > 0 ? { hostOut } : {}), attackMs, releaseMs };
+      if (point && item.driver === 'distanceToPoint') out.point = point;
+      else if (item.driver === 'distanceToPoint') out.point = [0, 0, 0];
+      return out;
+    };
+    const routes = Array.isArray(d.modulation?.routes) ? d.modulation.routes.map(clone) : [];
+    if (op === 'modulation.addRoute') {
+      if (routes.length >= kMaxModRoutes) reject('budgetExceeded', 'At most 64 modulation routes.');
+      routes.push(parseRoute(command.route));
+      d.modulation = { routes };
+    } else if (op === 'modulation.setRoute') {
+      if (!Number.isInteger(command.index) || command.index < 0 || command.index >= routes.length) reject('invalid', 'Modulation route does not exist');
+      routes[command.index] = parseRoute(command.route);
+      d.modulation = { routes };
+    } else if (op === 'modulation.removeRoute') {
+      if (!Number.isInteger(command.index) || command.index < 0 || command.index >= routes.length) reject('invalid', 'Modulation route does not exist');
+      routes.splice(command.index, 1);
+      if (routes.length) d.modulation = { routes }; else delete d.modulation;
+    } else if (op === 'modulation.setRoutes') {
+      if (!Array.isArray(command.routes)) reject('invalid', 'routes array is required');
+      if (command.routes.length > kMaxModRoutes) reject('budgetExceeded', 'At most 64 modulation routes.');
+      const nextRoutes = command.routes.map(parseRoute);
+      if (nextRoutes.length) d.modulation = { routes: nextRoutes }; else delete d.modulation;
+    } else reject('unsupported', `Unknown modulation operation ${op}`);
   }
   else if (op === 'output.autoMakeup') { state.parameters.values.makeup = 12; } // Synthetic mock estimate, never engine evidence.
-  else if (op === 'listener.set') { for (const [key,id] of [['xM','lx'],['yM','ly'],['zM','lz'],['yawDeg','laz']]) if (key in command) state.parameters.values[id] = command[key]; }
+  else if (op === 'listener.set') {
+    const ar = sceneAutomationRange(s);
+    for (const [key, id, bounds] of [['xM', 'lx', ar.xM], ['yM', 'ly', ar.yM], ['zM', 'lz', ar.zM], ['yawDeg', 'laz', [-180, 180]]]) {
+      if (key in command) {
+        if (command[key] < bounds[0] - 1e-6 || command[key] > bounds[1] + 1e-6) reject('invalid', `${key} outside range`);
+        state.parameters.values[id] = Math.max(bounds[0], Math.min(bounds[1], command[key]));
+      }
+    }
+  }
   else if (op === 'layers.set') { d.editorFlags.layerModes ||= {walls:0,floors:0,ceilings:0,plates:0}; d.editorFlags.layerModes[['walls','floors','ceilings','plates'][command.layer]] = command.mode; }
   else if (op === 'editor.setFlags') Object.assign(d.editorFlags, command.flags);
   else if (op === 'tail.setQuality') ['baseRays', 'adaptive'].forEach(k => { if (k in command) d.tail[k] = command[k]; });

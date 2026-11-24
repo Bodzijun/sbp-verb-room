@@ -5,12 +5,24 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace verbp {
 using PathPoint = std::array<double, 3>;
 inline constexpr double kMinPathWindowGap = 0.01;
+inline constexpr size_t kMaxAzKeys = 128;
+inline constexpr double kAzKeyMinGap = 1e-6;
 enum class PathEasing : uint8_t { Linear = 0, EaseIn = 1, EaseOut = 2, EaseInOut = 3 };
+enum class AzimuthEasing : uint8_t { Linear = 0, EaseIn = 1, EaseOut = 2, EaseInOut = 3, Hold = 4 };
+struct AzimuthKey {
+    double t = 0.0;        // Timeline Position axis 0.0 .. 100.0 (%)
+    double azDeg = 0.0;    // Degrees [-180.0, 180.0]
+    AzimuthEasing easing = AzimuthEasing::Linear;
+    bool operator==(const AzimuthKey& b) const noexcept {
+        return t == b.t && azDeg == b.azDeg && easing == b.easing;
+    }
+};
 
 inline double applyPathEasing(PathEasing e, double s) noexcept {
     s = std::clamp(s, 0.0, 1.0);
@@ -36,6 +48,100 @@ inline double invertPathEasing(PathEasing e, double r) noexcept {
 
 inline constexpr int kOrientMaxObject = 32;  // == kListener; static_assert'ed in PluginProcessor.h
 enum class OrientMode : uint8_t { Manual = 0, AlongPath = 1, LookAt = 2 };
+
+inline constexpr double kMaxPathLfoRateHz = 8.0;
+enum class LfoShape : uint8_t { Sine = 0, Triangle = 1, Saw = 2, Square = 3, SmoothRandom = 4 };
+
+inline const char* lfoShapeName(LfoShape s) noexcept {
+    switch (s) {
+    case LfoShape::Sine: return "sine";
+    case LfoShape::Triangle: return "triangle";
+    case LfoShape::Saw: return "saw";
+    case LfoShape::Square: return "square";
+    case LfoShape::SmoothRandom: return "smoothRandom";
+    default: return "sine";
+    }
+}
+
+inline bool parseLfoShape(const char* name, LfoShape& out) noexcept {
+    if (!name) return false;
+    std::string_view sv(name);
+    if (sv == "sine") { out = LfoShape::Sine; return true; }
+    if (sv == "triangle") { out = LfoShape::Triangle; return true; }
+    if (sv == "saw") { out = LfoShape::Saw; return true; }
+    if (sv == "square") { out = LfoShape::Square; return true; }
+    if (sv == "smoothRandom") { out = LfoShape::SmoothRandom; return true; }
+    return false;
+}
+
+inline double lfoHashNode(uint32_t seed, int64_t idx) noexcept {
+    uint64_t z = ((uint64_t)seed * 0x9E3779B97F4A7C15ULL) ^ ((uint64_t)idx + 0xBF58476D1CE4E5B9ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    const double u = (double)(z >> 11) * (1.0 / 9007199254740992.0); // [0, 1)
+    return u * 2.0 - 1.0; // [-1, 1)
+}
+
+struct PathLfo {
+    bool enabled = false;
+    LfoShape shape = LfoShape::Sine;
+    double rateHz = 0.5;
+    double depth = 0.0;
+    double phaseDeg = 0.0;
+    uint32_t seed = 1;
+
+    bool isDefault() const noexcept {
+        return !enabled && shape == LfoShape::Sine && rateHz == 0.5 && depth == 0.0 && phaseDeg == 0.0 && seed == 1;
+    }
+    bool operator==(const PathLfo& b) const noexcept {
+        return enabled == b.enabled && shape == b.shape && rateHz == b.rateHz &&
+               depth == b.depth && phaseDeg == b.phaseDeg && seed == b.seed;
+    }
+    double evaluate(double tSec) const noexcept {
+        const double cycles = std::max(0.0, tSec) * rateHz + phaseDeg / 360.0;
+        const int64_t baseIdx = (int64_t)std::floor(cycles);
+        const double frac = cycles - (double)baseIdx;
+        switch (shape) {
+        case LfoShape::Sine:
+            return std::sin(2.0 * 3.14159265358979323846 * frac);
+        case LfoShape::Triangle:
+            if (frac < 0.25) return 4.0 * frac;
+            if (frac < 0.75) return 2.0 - 4.0 * frac;
+            return 4.0 * frac - 4.0;
+        case LfoShape::Saw:
+            return 2.0 * frac - 1.0;
+        case LfoShape::Square:
+            return frac < 0.5 ? 1.0 : -1.0;
+        case LfoShape::SmoothRandom: {
+            const double p0 = lfoHashNode(seed, baseIdx - 1);
+            const double p1 = lfoHashNode(seed, baseIdx);
+            const double p2 = lfoHashNode(seed, baseIdx + 1);
+            const double p3 = lfoHashNode(seed, baseIdx + 2);
+            const double t = frac;
+            const double t2 = t * t, t3 = t2 * t;
+            const double v = 0.5 * ((2.0 * p1) +
+                (-p0 + p2) * t +
+                (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+                (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+            return std::clamp(v, -1.0, 1.0);
+        }
+        default:
+            return 0.0;
+        }
+    }
+    double applyToU(double uBase, double tSec, bool closed, double depthScale = 1.0) const noexcept {
+        if (!enabled || depth <= 0.0 || depthScale <= 0.0) return std::clamp(uBase, 0.0, 1.0);
+        const double uRaw = uBase + (depth * depthScale) * evaluate(tSec);
+        if (closed) {
+            double wrapped = uRaw - std::floor(uRaw);
+            if (wrapped >= 1.0 || wrapped < 0.0) wrapped = 0.0;
+            return wrapped;
+        }
+        return std::clamp(uRaw, 0.0, 1.0);
+    }
+};
+
 struct MovementPath {
     std::vector<PathPoint> points;
     bool closed = false, smooth = false, orient = false, enabled = true;
@@ -49,14 +155,17 @@ struct MovementPath {
     double start = 0.0, end = 100.0;
     std::vector<std::optional<double>> times;
     std::vector<PathEasing> easings;
+    std::vector<AzimuthKey> azKeys;
+    PathLfo lfo;
     bool hasCustomTiming() const noexcept {
         if (start != 0.0 || end != 100.0) return true;
         for (const auto& t : times) if (t.has_value()) return true;
         for (auto e : easings) if (e != PathEasing::Linear) return true;
         return false;
     }
+    bool hasAzimuthKeys() const noexcept { return !azKeys.empty(); }
     bool operator==(const MovementPath& b) const {
-        if (!(points == b.points && closed == b.closed && smooth == b.smooth && orient == b.orient && lookAt == b.lookAt && lookPoint == b.lookPoint && lookTarget == b.lookTarget && lookPos == b.lookPos && orientOffset == b.orientOffset && enabled == b.enabled && laps == b.laps && group == b.group && start == b.start && end == b.end))
+        if (!(points == b.points && closed == b.closed && smooth == b.smooth && orient == b.orient && lookAt == b.lookAt && lookPoint == b.lookPoint && lookTarget == b.lookTarget && lookPos == b.lookPos && orientOffset == b.orientOffset && enabled == b.enabled && laps == b.laps && group == b.group && start == b.start && end == b.end && azKeys == b.azKeys && lfo == b.lfo))
             return false;
         const size_t n = std::max({points.size(), times.size(), b.times.size(), easings.size(), b.easings.size()});
         for (size_t i = 0; i < n; ++i) {
@@ -93,7 +202,56 @@ inline void normalizePathTiming(MovementPath& p) {
     }
 }
 
+inline void normalizePathAzKeys(MovementPath& p) {
+    if (p.points.size() < 2) { p.azKeys.clear(); return; }
+    if (p.azKeys.empty()) return;
+    std::stable_sort(p.azKeys.begin(), p.azKeys.end(), [](const AzimuthKey& a, const AzimuthKey& b) {
+        const bool af = std::isfinite(a.t), bf = std::isfinite(b.t);
+        if (af != bf) return af > bf;
+        return af && a.t < b.t;
+    });
+    std::vector<AzimuthKey> dedup;
+    dedup.reserve(p.azKeys.size());
+    for (auto k : p.azKeys) {
+        if (k.t == 0.0) k.t = 0.0;
+        if (k.azDeg == 0.0) k.azDeg = 0.0;
+        if (!dedup.empty() && std::isfinite(k.t) && std::isfinite(dedup.back().t) && std::abs(k.t - dedup.back().t) < kAzKeyMinGap)
+            dedup.back() = k;
+        else
+            dedup.push_back(k);
+    }
+    p.azKeys = std::move(dedup);
+}
+
+inline std::optional<double> evaluateAzimuthKeys(const std::vector<AzimuthKey>& keys, double u) noexcept {
+    if (keys.empty()) return std::nullopt;
+    const double tPct = (std::isfinite(u) ? std::clamp(u, 0.0, 1.0) : 0.0) * 100.0;
+    if (tPct <= keys.front().t) return keys.front().azDeg;
+    if (tPct >= keys.back().t) return keys.back().azDeg;
+    auto it = std::upper_bound(keys.begin(), keys.end(), tPct,
+        [](double val, const AzimuthKey& k) { return val < k.t; });
+    const size_t hi = std::clamp<size_t>((size_t)(it - keys.begin()), 1, keys.size() - 1);
+    const size_t lo = hi - 1;
+    if (keys[lo].easing == AzimuthEasing::Hold || keys[hi].t <= keys[lo].t)
+        return keys[lo].azDeg;
+    const double s = (tPct - keys[lo].t) / (keys[hi].t - keys[lo].t);
+    const double e = applyPathEasing((PathEasing)keys[lo].easing, s);
+    const double delta = std::remainder(keys[hi].azDeg - keys[lo].azDeg, 360.0);
+    const double out = std::remainder(keys[lo].azDeg + delta * e, 360.0);
+    return out == 0.0 ? 0.0 : out;
+}
+
+inline bool validPathLfo(const PathLfo& l) noexcept {
+    if ((uint8_t)l.shape > (uint8_t)LfoShape::SmoothRandom) return false;
+    if (!std::isfinite(l.rateHz) || l.rateHz < 0.0 || l.rateHz > kMaxPathLfoRateHz) return false;
+    if (!std::isfinite(l.depth) || l.depth < 0.0 || l.depth > 1.0) return false;
+    if (!std::isfinite(l.phaseDeg) || l.phaseDeg < 0.0 || l.phaseDeg > 360.0) return false;
+    if (l.seed < 1 || l.seed > 999999) return false;
+    return true;
+}
+
 inline bool validPath(const MovementPath& p) {
+    if (!validPathLfo(p.lfo)) return false;
     if (!std::isfinite(p.orientOffset) || std::abs(p.orientOffset) > 360.0) return false;
     if (p.lookTarget < -1 || p.lookTarget > kOrientMaxObject) return false;
     for (int k = 0; k < 3; ++k)
@@ -102,7 +260,8 @@ inline bool validPath(const MovementPath& p) {
     if (p.group < -1 || p.group > 31) return false;
     if (!std::isfinite(p.start) || !std::isfinite(p.end) || p.start < 0.0 || p.end > 100.0 || p.end - p.start < kMinPathWindowGap)
         return false;
-    if (p.points.empty()) return p.times.empty() && p.easings.empty();
+    if (p.azKeys.size() > kMaxAzKeys) return false;
+    if (p.points.empty()) return p.times.empty() && p.easings.empty() && p.azKeys.empty() && p.lfo.isDefault();
     if (p.points.size() < 2 || p.points.size() > 64) return false;
     for (const auto& q : p.points) for (int k = 0; k < 3; ++k)
         if (!std::isfinite(q[k]) || q[k] < (k == 2 ? 0 : -200) || q[k] > (k == 2 ? 30 : 200)) return false;
@@ -119,6 +278,13 @@ inline bool validPath(const MovementPath& p) {
         if (!p.closed && i + 1 == p.points.size() && t != 100.0) return false;
         if (t < prevTime) return false;
         prevTime = t;
+    }
+    for (size_t i = 0; i < p.azKeys.size(); ++i) {
+        const auto& k = p.azKeys[i];
+        if (!std::isfinite(k.t) || k.t < 0.0 || k.t > 100.0) return false;
+        if (!std::isfinite(k.azDeg) || k.azDeg < -180.0 || k.azDeg > 180.0) return false;
+        if ((uint8_t)k.easing > (uint8_t)AzimuthEasing::Hold) return false;
+        if (i > 0 && !(k.t > p.azKeys[i - 1].t)) return false;
     }
     return true;
 }
@@ -177,13 +343,17 @@ struct CompiledPath {
     double startNorm = 0.0, endNorm = 1.0;
     bool hasTiming = false;
     std::vector<PathTimeKey> timeKeys;
+    std::vector<AzimuthKey> azKeys;
+    PathLfo lfo{};
+    bool hasAzimuthKeys() const noexcept { return !azKeys.empty(); }
     void build(const MovementPath& p) {
-        points.clear(); lengths.clear(); timeKeys.clear();
+        points.clear(); lengths.clear(); timeKeys.clear(); azKeys.clear(); lfo = p.lfo;
         enabled=p.enabled && p.points.size()>=2;orient=p.orient;closed=p.closed;lookAt=p.lookAt;lookPoint=p.lookPoint;lookTarget=p.lookTarget;lookPos=p.lookPos;orientOffset=p.orientOffset;laps=std::clamp(p.laps,1,64);group=p.group;
         startNorm = std::clamp(p.start, 0.0, 100.0) * 0.01;
         endNorm = std::clamp(p.end, 0.0, 100.0) * 0.01;
         hasTiming = p.hasCustomTiming();
         if(p.points.size()<2)return;
+        azKeys = p.azKeys;
         const int n=(int)p.points.size();
         const int segments=n-(p.closed?0:1), steps=p.smooth?128:1;
         points.push_back(p.points.front()); lengths.push_back(0);
@@ -299,6 +469,11 @@ struct CompiledPath {
         if(points.empty())return {};
         const double mapped=hasTiming?evaluateTimeMap(u):std::clamp(u,0.0,1.0);
         return evaluateArcFraction(mapped,yaw);
+    }
+    double evaluateAzimuth(double u, double fallback) const noexcept {
+        if (!enabled || points.size() < 2 || orient || lookAt || azKeys.empty()) return fallback;
+        if (const auto v = evaluateAzimuthKeys(azKeys, u)) return *v;
+        return fallback;
     }
     bool projectOnPath(double& x,double& y,double& z,double* yawOut=nullptr) const noexcept {
         if(points.size()<2||lengths.size()!=points.size()||lengths.back()<=1e-12)return false;

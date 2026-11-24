@@ -1,18 +1,25 @@
 // E20: path timeline panel. Horizontal axis = group Position 0..100 % (the engine's u). Everything shown comes from the store;
 // every edit is an existing command (path.setFlags start/end, path.setPointTiming), so the inspector and the timeline never disagree.
-import { element, button } from './dom.js';
-import { pathId } from '../viewport/movement-path.js';
+import { element, button, scrollArea } from './dom.js';
+import { valueField } from './value-field.js';
+import { pathId, evaluateAzimuthKeys, orientationMode, withPathPoses } from '../viewport/movement-path.js';
 import {
-  timelineSections, pathRow, objectRef, newStart, newEnd, newKeyTime, shiftWindows, alignCommands, holdCommands, clamp,
-  FULL_VIEW, viewFrac, viewValue, zoomView, panView, rulerTicks, timeToAxis, PATH_EASINGS
+  timelineSections, pathRow, objectRef, newStart, newEnd, newKeyTime, shiftWindows, alignCommands, holdCommands, clamp, snap,
+  FULL_VIEW, viewFrac, viewValue, zoomView, panView, rulerTicks, timeToAxis, PATH_EASINGS,
+  AZ_EASINGS, AZ_AT_PLAYHEAD_TOL, newAzKeyTime, clampAzKeyTime, azAngleAt, azimuthCurvePath
 } from './timeline-model.js';
 
 const EASE_LABEL = { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', easeInOut: 'Ease in-out' };
+const AZ_EASE_LABEL = { linear: 'Linear', easeIn: 'Ease in', easeOut: 'Ease out', easeInOut: 'Ease in-out', hold: 'Hold' };
+const SVG_NS = 'http://www.w3.org/2000/svg';
 const pct = f => `${(f * 100).toFixed(3)}%`;
 const fmt = v => `${Number(v.toFixed(2))}`;
+const fmtAz = v => { const n = Number((v ?? 0).toFixed(1)); return `${n === 0 ? 0 : n}°`; };
 let live = null;   // the panel currently shown (module-level keys/handlers talk to the newest one)
 let pointerInside = false; // last pointer interaction was inside the panel (survives re-renders)
 let lastTap = null; // survives the re-render between the two clicks of a double click
+let pendingFocusAzKey = null; // { o, index } restored after keyboard arrow step
+let pendingFocusAzSlider = false;
 
 export function timelinePanel(ctx) {
   const { store, bridge } = ctx;
@@ -23,6 +30,14 @@ export function timelinePanel(ctx) {
   const root = element('section', { className: 'timeline-panel panel', role: 'region', 'aria-label': 'Path timeline', 'data-timeline': 'open' });
   const selectedObjects = new Set(store.view.selection.filter(r => r.kind === 'source' || r.kind === 'listener').map(r => r.kind === 'listener' ? 32 : r.index));
   const selPoint = store.view.pathPoint;
+  let selAzKey = store.view.azKey;
+  if (selAzKey) {
+    const sp = state.document.paths?.[selAzKey.object];
+    if (!sp || (sp.points?.length ?? 0) < 2 || !Array.isArray(sp.azKeys) || selAzKey.index < 0 || selAzKey.index >= sp.azKeys.length) {
+      selAzKey = null;
+      store.view.azKey = null;
+    }
+  }
   const refs = new Map();           // object -> { row, parts }  (live repaint during a drag)
   const sectionRefs = [];           // group header bar painters
   let tipEl = null, menu = null;
@@ -33,8 +48,9 @@ export function timelinePanel(ctx) {
   const valueAt = (e, el) => { const r = innerOf(el).getBoundingClientRect(); return viewValue(view, clamp((e.clientX - r.left) / Math.max(1, r.width), 0, 1)); };
   const setLeft = (el, v) => { el.style.left = pct(viewFrac(view, v)); };
   const setBar = (el, a, b) => { el.style.left = pct(viewFrac(view, a)); el.style.width = pct(Math.max(0, (b - a) / (view.hi - view.lo))); };
-  const selectObject = (o, extra = {}) => store.setView({ selection: [objectRef(o)], pathPoint: store.view.pathPoint?.object === o ? store.view.pathPoint : null, ...extra }, false);
-  const selectKey = (o, index) => store.setView({ selection: [objectRef(o)], pathPoint: { object: o, index, point: store.state.document.paths[o].points[index] } }, false);
+  const selectObject = (o, extra = {}) => store.setView({ selection: [objectRef(o)], pathPoint: store.view.pathPoint?.object === o ? store.view.pathPoint : null, azKey: store.view.azKey?.object === o ? store.view.azKey : null, ...extra }, false);
+  const selectKey = (o, index) => store.setView({ selection: [objectRef(o)], pathPoint: { object: o, index, point: store.state.document.paths[o].points[index] }, azKey: null }, false);
+  const selectAzKey = (o, index) => store.setView({ selection: [objectRef(o)], azKey: { object: o, index }, pathPoint: null }, false);
   const showTip = (el, v, text) => {
     const inner = innerOf(el);
     if (!tipEl || tipEl.parentNode !== inner) { tipEl?.remove(); tipEl = element('div', { className: 'tl-tip', role: 'status' }); inner.append(tipEl); }
@@ -66,11 +82,13 @@ export function timelinePanel(ctx) {
       cancel() { if (timer) clearTimeout(timer); pending = null; if (began) store.command({ op: 'transaction.cancel' }, tx); began = false; }
     };
   }
+  // setPointerCapture throws InvalidStateError if the pointer is already gone (slow frame, released button); a throw here would leave data-gesture-active set.
+  const tryCapture = (el, e) => { try { el.setPointerCapture?.(e.pointerId); return true; } catch { return false; } };
   // Generic pointer drag with gesture marker (the app defers its re-render while data-gesture-active is set).
-  function drag(e, el, { onMove, label, onClick }) {
+  function drag(e, el, { onMove, label, onClick, onEnd }) {
     if (e.button !== 0 || !store.ready) return;
+    if (!tryCapture(el, e)) return;
     root.setAttribute('data-gesture-active', 'true'); pointerInside = true;
-    el.setPointerCapture?.(e.pointerId);
     const g = label ? gesture(label) : null, start = { x: e.clientX, y: e.clientY };
     let moved = false, done = false;
     const finish = async cancelled => {
@@ -80,6 +98,7 @@ export function timelinePanel(ctx) {
       hideTip();
       if (g) { if (cancelled) g.cancel(); else await g.end(); }
       if (!moved && !cancelled) onClick?.(e);
+      onEnd?.(cancelled, moved);
       root.removeAttribute('data-gesture-active'); window.dispatchEvent(new Event('verb-control-end'));
     };
     const move = ev => { if (ev.pointerId !== e.pointerId) return; if (!moved && Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < 3) return; moved = true; onMove(ev, g); };
@@ -89,15 +108,25 @@ export function timelinePanel(ctx) {
   }
 
   // ---- playhead scrub (same begin/change/end protocol as the Position slider) ----------------------------------------------------
+  const paintDriverPosition = (driver, u) => {
+    const pos = u * 100;
+    for (const r of root.querySelectorAll(`[data-driver="${driver}"]`)) setLeft(r, pos);
+    for (const [, entry] of refs) {
+      if (entry.row.driver !== driver) continue;
+      entry.current = { ...entry.current, position: pos };
+      entry.paintAzPosition?.(pos, u);
+      entry.paintLfoBand?.(pos);
+    }
+  };
   function scrub(e, el, driver) {
     if (e.button !== 0 || !store.ready) return;
     const id = pathId(driver);
-    root.setAttribute('data-gesture-active', 'true'); el.setPointerCapture?.(e.pointerId);
+    if (!tryCapture(el, e)) return; root.setAttribute('data-gesture-active', 'true');
     let active = true, pendingU = null, frame = null;
     bridge.parameters.begin(id);
     const apply = ev => {
       const u = Number(clamp(valueAt(ev, el) / 100, 0, 1).toFixed(4)); pendingU = u;
-      for (const r of root.querySelectorAll(`[data-driver="${driver}"]`)) setLeft(r, u * 100);
+      paintDriverPosition(driver, u);
       if (frame === null) frame = requestAnimationFrame(() => { frame = null; if (pendingU !== null && active) { bridge.parameters.change(id, pendingU); pendingU = null; } });
     };
     apply(e);
@@ -155,6 +184,44 @@ export function timelinePanel(ctx) {
   }
   const clearKeyTime = (o, index) => store.command({ op: 'path.setPointTiming', object: o, index, time: null });
 
+  async function addAzKeyAt(o, t) {
+    const rawAz = azAngleAt(store.state, o, t);
+    const azNorm = Number(clamp(rawAz, -180, 180).toFixed(4));
+    const az = azNorm === 0 ? 0 : azNorm;
+    const reply = await store.command({ op: 'path.setAzimuthKey', object: o, t, az });
+    if (reply?.kind === 'ack') {
+      const keys = store.state.document.paths?.[o]?.azKeys || [];
+      const idx = keys.findIndex(k => Math.abs(k.t - t) < 1e-3);
+      if (idx >= 0) selectAzKey(o, idx);
+    }
+  }
+  function removeAzKey(o, index) {
+    if (store.view.azKey?.object === o) store.setView({ azKey: null }, false);
+    store.command({ op: 'path.removeAzimuthKey', object: o, index });
+  }
+  function openAzMenu(e, o, index, current) {
+    e.preventDefault(); closeMenu();
+    const p = store.state.document.paths?.[o];
+    if (!p || orientationMode(p) !== 'manual') return;
+    const items = AZ_EASINGS.map(name => button(AZ_EASE_LABEL[name], () => {
+      closeMenu();
+      if ((p.azKeys?.[index]?.easing || 'linear') !== name) {
+        store.command({ op: 'path.setAzimuthKey', object: o, index, easing: name });
+      }
+    }, { role: 'menuitemradio', 'aria-checked': String(name === current), className: name === current ? 'on' : '' }));
+    items.push(
+      element('hr', { className: 'tl-menu-sep' }),
+      button('Delete key', () => { closeMenu(); removeAzKey(o, index); }, { role: 'menuitem' })
+    );
+    menu = element('div', { className: 'tl-menu', role: 'menu', 'aria-label': 'Azimuth key easing' }, items);
+    document.body.append(menu);
+    const w = menu.offsetWidth, h = menu.offsetHeight;
+    menu.style.left = `${Math.max(2, Math.min(e.clientX, window.innerWidth - w - 2))}px`;
+    menu.style.top = `${Math.max(2, Math.min(e.clientY - 4, window.innerHeight - h - 2))}px`;
+    menu.querySelector('button')?.focus({ preventScroll: true });
+    window.addEventListener('pointerdown', outside, true); window.addEventListener('keydown', menuKey, true);
+  }
+
   // ---- building one row -----------------------------------------------------------------------------------------------------------
   function buildRow(row, inGroup) {
     const o = row.object, selected = selectedObjects.has(o);
@@ -170,7 +237,13 @@ export function timelinePanel(ctx) {
     const hEnd = element('div', { className: 'tl-h tl-h-end', role: 'slider', tabIndex: 0, 'aria-label': `${row.label} End %`, 'aria-valuemin': 0, 'aria-valuemax': 100, 'data-handle': 'end' });
     const lapsLabel = row.closed && row.laps > 1 ? element('span', { className: 'tl-laps', text: `×${row.laps} laps` }) : null;
     const ph = element('div', { className: 'tl-ph', 'data-driver': String(row.driver) });
-    inner.append(grid, restL, restR, bar, ph);
+    const lfoCfg = store.state.document.paths?.[row.driver]?.lfo;
+    const lfoDepthPct = lfoCfg?.enabled && lfoCfg.depth > 0 ? lfoCfg.depth * 100 : 0;
+    const lfoCreative = (store.state.parameters?.values?.mode ?? 0) >= 0.5;
+    const lfoBand = lfoDepthPct > 0
+      ? element('div', { className: `tl-lfo-band${lfoCreative ? '' : ' dim'}`, title: `Path LFO ±${Math.round(lfoDepthPct)}% (${lfoCfg.shape}, ${Number((lfoCfg.rateHz ?? 0.5).toFixed(2))} Hz · Creative mode only)` })
+      : null;
+    inner.append(grid, restL, restR, bar, ...(lfoBand ? [lfoBand] : []), ph);
     row.holds.forEach(() => { const d = element('i', { className: 'tl-hold', title: 'Hold: the object rests here' }); parts.holdEls.push(d); inner.append(d); });
     row.lapMarks.forEach(() => { const d = element('i', { className: 'tl-lap' }); parts.lapEls.push(d); inner.append(d); });
     for (const k of row.autos) { const d = element('div', { className: 'tl-auto', tabIndex: 0, role: 'button', 'data-point': String(k.index) }); parts.autoEls.set(k.index, d); inner.append(d); }
@@ -186,6 +259,7 @@ export function timelinePanel(ctx) {
       restL.style.left = '0'; restL.style.width = pct(Math.max(0, viewFrac(view, r.start)));
       restR.style.left = pct(viewFrac(view, r.end)); restR.style.width = pct(Math.max(0, 1 - viewFrac(view, r.end)));
       setLeft(hStart, r.start); setLeft(hEnd, r.end); setLeft(ph, r.position);
+      if (lfoBand) setBar(lfoBand, Math.max(0, r.position - lfoDepthPct), Math.min(100, r.position + lfoDepthPct));
       hStart.setAttribute('aria-valuenow', String(r.start)); hEnd.setAttribute('aria-valuenow', String(r.end));
       hStart.title = `Start ${fmt(r.start)} % · drag to change · right-click: easing of point 1 (${EASE_LABEL[r.keys[0]?.easing || 'linear']})`;
       hEnd.title = `End ${fmt(r.end)} %`;
@@ -207,7 +281,8 @@ export function timelinePanel(ctx) {
       }
     };
     paint(row);
-    refs.set(o, { row, paint, parts, current: row });
+    const paintLfoBand = pos => { if (lfoBand) setBar(lfoBand, Math.max(0, pos - lfoDepthPct), Math.min(100, pos + lfoDepthPct)); };
+    refs.set(o, { row, paint, paintLfoBand, parts, current: row });
 
     // empty track = scrub this row's Position driver
     track.addEventListener('pointerdown', e => {
@@ -271,7 +346,206 @@ export function timelinePanel(ctx) {
       });
     };
     parts.keyEls.forEach((d, i) => pointEl(d, i, false)); parts.autoEls.forEach((d, i) => pointEl(d, i, true));
-    return rowEl;
+
+    // ---- azimuth keyframe sub-row ------------------------------------------------------------------------------------------------
+    const azDim = row.azMode !== 'manual' || !row.enabled;
+    const azInactive = row.azMode !== 'manual';
+    const azRowEl = element('div', {
+      className: `tl-row tl-az-row${selected ? ' az-obj-selected' : ''}${azDim ? ' dim' : ''}${azInactive ? ' az-inactive' : ''}${inGroup ? ' in-group' : ''}`,
+      'data-az-object': String(o),
+      style: `--c:${row.colour}`
+    });
+    const azReadout = element('span', { className: 'tl-az-readout', 'data-az-readout': String(o), text: fmtAz(row.azCurrent) });
+    const azAddBtn = button('+ Key', async e => {
+      e.stopPropagation();
+      if (!store.ready) return;
+      const curRow = refs.get(o)?.current || row;
+      if (curRow.azMode !== 'manual') return;
+      const t = Number(clamp(curRow.position, 0, 100).toFixed(4));
+      await addAzKeyAt(o, t);
+    }, {
+      className: 'tl-az-add',
+      disabled: azInactive,
+      'aria-label': `Add azimuth key at playhead for ${row.label}`,
+      title: azInactive
+        ? `Angle is driven by ${row.azMode === 'along' ? 'Along path' : 'Look at'}`
+        : 'Add an azimuth key at the playhead using the current angle'
+    });
+    const azLeft = element('div', { className: 'tl-az-name' }, [
+      element('span', { className: 'tl-az-caption', text: 'Azimuth', title: `${row.label} azimuth keys` }),
+      azReadout,
+      azAddBtn
+    ]);
+
+    const azSvg = document.createElementNS(SVG_NS, 'svg');
+    azSvg.setAttribute('class', 'tl-az-curve');
+    azSvg.setAttribute('viewBox', '0 0 1000 24');
+    azSvg.setAttribute('preserveAspectRatio', 'none');
+    azSvg.setAttribute('aria-hidden', 'true');
+    const azZero = document.createElementNS(SVG_NS, 'line');
+    azZero.setAttribute('class', 'tl-az-zero');
+    azZero.setAttribute('x1', '0'); azZero.setAttribute('y1', '12');
+    azZero.setAttribute('x2', '1000'); azZero.setAttribute('y2', '12');
+    const azCurve = document.createElementNS(SVG_NS, 'path');
+    azCurve.setAttribute('class', 'tl-az-path');
+    azSvg.append(azZero, azCurve);
+
+    const azPh = element('div', { className: 'tl-ph', 'data-driver': String(row.driver) });
+    const azInner = element('div', { className: 'tl-inner' }, [element('div', { className: 'tl-grid' }), azSvg, azPh]);
+    if (azInactive) {
+      const hintText = row.azMode === 'along' ? 'Angle is driven by Along path' : 'Angle is driven by Look at';
+      azInner.append(element('span', { className: 'tl-az-hint', text: hintText, title: `${hintText} · stored keys are kept` }));
+    }
+
+    const azKeyEls = new Map();
+    for (const k of row.azKeys) {
+      const kd = element('div', {
+        className: 'tl-az-key',
+        tabIndex: 0,
+        role: 'button',
+        'data-az-key': String(k.index),
+        'data-focus-key': `tl-az-key-${o}-${k.index}`
+      });
+      azKeyEls.set(k.index, kd);
+      azInner.append(kd);
+    }
+    const azTrack = element('div', {
+      className: 'tl-track tl-az-track',
+      tabIndex: -1,
+      role: 'group',
+      'aria-label': `${row.label} azimuth strip`,
+      title: azInactive
+        ? `Angle is driven by ${row.azMode === 'along' ? 'Along path' : 'Look at'} · stored keys are kept`
+        : 'Double-click to add an azimuth key · drag key to move · right-click for easing/delete'
+    }, [element('div', { className: 'tl-clip' }, [azInner])]);
+    azRowEl.append(azLeft, azTrack);
+
+    const yPct = az => ((12 - (clamp(az, -180, 180) / 180) * 9) / 24) * 100;
+    const paintAz = r => {
+      setLeft(azPh, r.position);
+      azReadout.textContent = fmtAz(r.azCurrent);
+      azCurve.setAttribute('d', azimuthCurvePath(r.azKeys, view, 1000, 24));
+      for (const k of r.azKeys) {
+        const kd = azKeyEls.get(k.index);
+        if (!kd) continue;
+        setLeft(kd, k.t);
+        kd.style.top = `${yPct(k.az).toFixed(2)}%`;
+        kd.dataset.ease = k.easing;
+        kd.classList.toggle('sel', selAzKey?.object === o && selAzKey.index === k.index);
+        kd.classList.toggle('at-ph', Math.abs(k.t - r.position) <= AZ_AT_PLAYHEAD_TOL);
+        kd.title = `Azimuth key ${k.index + 1} · ${fmtAz(k.az)} @ ${fmt(k.t)} % · ${AZ_EASE_LABEL[k.easing]}`;
+        kd.setAttribute('aria-label', `${r.label} azimuth key ${k.index + 1}, ${fmtAz(k.az)} at ${fmt(k.t)} percent, ${AZ_EASE_LABEL[k.easing]}`);
+      }
+    };
+    const paintAzPosition = (pos, u) => {
+      setLeft(azPh, pos);
+      const p = store.state.document.paths?.[o];
+      let curAz = row.azCurrent;
+      if (p) {
+        const prefix = o === 32 ? 'l' : `s${o + 1}`;
+        if (orientationMode(p) === 'manual') {
+          const evAz = p.enabled && p.azKeys?.length ? evaluateAzimuthKeys(p.azKeys, u) : null;
+          curAz = evAz !== null ? evAz : (store.state.parameters?.values?.[prefix + 'az'] ?? 0);
+        } else {
+          const patched = {
+            ...store.state,
+            parameters: {
+              ...store.state.parameters,
+              values: { ...store.state.parameters.values, [pathId(row.driver)]: u }
+            }
+          };
+          curAz = withPathPoses(patched).parameters.values[prefix + 'az'] ?? 0;
+        }
+      }
+      azReadout.textContent = fmtAz(curAz);
+      for (const k of refs.get(o).current.azKeys) {
+        const kd = azKeyEls.get(k.index);
+        if (kd) kd.classList.toggle('at-ph', Math.abs(k.t - pos) <= AZ_AT_PLAYHEAD_TOL);
+      }
+    };
+
+    paintAz(row);
+    const entry = refs.get(o);
+    entry.paint = r => { paint(r); paintAz(r); };
+    entry.paintAzPosition = paintAzPosition;
+    entry.azRowEl = azRowEl;
+    entry.azKeyEls = azKeyEls;
+
+    azTrack.addEventListener('pointerdown', e => {
+      if (e.target.closest('.tl-az-key')) return;
+      selectObject(o);
+      scrub(e, azTrack, row.driver);
+    });
+    azTrack.addEventListener('dblclick', async e => {
+      if (e.target.closest('.tl-az-key') || !store.ready) return;
+      const p = store.state.document.paths?.[o];
+      if (!p || orientationMode(p) !== 'manual') return;
+      const rawT = clamp(valueAt(e, azTrack), 0, 100);
+      let t = snap(rawT, e.shiftKey);
+      if (p.azKeys?.some(k => Math.abs(k.t - t) < 0.01)) {
+        t = Number(rawT.toFixed(4));
+        if (p.azKeys.some(k => Math.abs(k.t - t) < 1e-4)) return;
+      }
+      await addAzKeyAt(o, t);
+    });
+
+    azKeyEls.forEach((kd, keyIndex) => {
+      kd.addEventListener('dblclick', e => { e.stopPropagation(); });
+      kd.addEventListener('pointerdown', e => {
+        e.stopPropagation(); kd.focus({ preventScroll: true });
+        const p0 = store.state.document.paths[o];
+        if (orientationMode(p0) !== 'manual') { selectObject(o); return; }
+        let moved = false;
+        drag(e, kd, {
+          label: `Move ${row.label} azimuth key`,
+          onClick: () => selectAzKey(o, keyIndex),
+          onMove: (ev, g) => {
+            moved = true;
+            const t = newAzKeyTime(p0, keyIndex, valueAt(ev, kd), ev.shiftKey);
+            const azKeys = (p0.azKeys || []).map((ak, i) => i === keyIndex ? { ...ak, t } : ak);
+            const nextRow = withPatch(o, { azKeys });
+            refs.get(o).current = nextRow;
+            refs.get(o).paint(nextRow);
+            g.send([{ op: 'path.setAzimuthKey', object: o, index: keyIndex, t }]);
+            showTip(kd, t, `${fmt(t)} % · ${fmtAz(p0.azKeys[keyIndex].az)}`);
+          },
+          onEnd: cancelled => {
+            if (moved && !cancelled) selectAzKey(o, keyIndex);
+          }
+        });
+      });
+      kd.addEventListener('contextmenu', e => {
+        const curKey = store.state.document.paths?.[o]?.azKeys?.[keyIndex];
+        if (curKey) openAzMenu(e, o, keyIndex, curKey.easing || 'linear');
+      });
+      kd.addEventListener('keydown', e => {
+        const p = store.state.document.paths?.[o];
+        if (!p || orientationMode(p) !== 'manual') return;
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          e.preventDefault(); e.stopPropagation();
+          removeAzKey(o, keyIndex);
+          return;
+        }
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault(); e.stopPropagation();
+          selectAzKey(o, keyIndex);
+          return;
+        }
+        const dir = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+        if (!dir) return;
+        e.preventDefault(); e.stopPropagation();
+        const curKey = p.azKeys?.[keyIndex];
+        if (!curKey) return;
+        const step = e.shiftKey ? 0.05 : 0.5;
+        const t = clampAzKeyTime(p, keyIndex, curKey.t + dir * step);
+        if (Math.abs(t - curKey.t) > 1e-9) {
+          pendingFocusAzKey = { o, index: keyIndex };
+          store.command({ op: 'path.setAzimuthKey', object: o, index: keyIndex, t });
+        }
+      });
+    });
+
+    return [rowEl, azRowEl];
   }
 
   // ---- group header ---------------------------------------------------------------------------------------------------------------
@@ -329,18 +603,203 @@ export function timelinePanel(ctx) {
     const o = [...selectedObjects].find(x => refs.has(x)) ?? [...refs.keys()][0]; if (o === undefined) return;
     scrub(e, ruler.querySelector('.tl-track'), refs.get(o).row.driver);
   });
-  const body = element('div', { className: 'tl-body scroll' });
+  const bodyScroll = scrollArea([], { className: 'tl-body' });
+  const body = bodyScroll.view;
   if (!sections.length) body.append(element('p', { className: 'note tl-empty', text: 'No moving objects yet. Draw a path for a source or the listener, then it appears here.' }));
   for (const sec of sections) {
     if (sec.type === 'group') {
       const [head, gbar] = buildGroup(sec); body.append(head);
-      if (!collapsed[sec.group]) { body.append(gbar); sec.rows.forEach(r => body.append(buildRow(r, true))); }
+      if (!collapsed[sec.group]) { body.append(gbar); sec.rows.forEach(r => body.append(...buildRow(r, true))); }
       else { body.append(gbar); }
     } else {
       body.append(element('div', { className: 'tl-row tl-head' }, [element('div', { className: 'tl-name tl-group-name' }, [element('b', { text: sec.label })]), element('div', { className: 'tl-head-main' }, [element('span', { className: 'tl-note', text: 'each path follows its own Position' })])]));
-      sec.rows.forEach(r => body.append(buildRow(r, false)));
+      sec.rows.forEach(r => body.append(...buildRow(r, false)));
     }
   }
+  // ---- selected azimuth key angle editor ----------------------------------------------------------------------------------------
+  function buildAzEditor() {
+    if (!selAzKey) return null;
+    const o = selAzKey.object, idx = selAzKey.index;
+    const r = refs.get(o)?.row || pathRow(state, o);
+    const k = r?.azKeys?.[idx];
+    if (!r || !k) return null;
+    const disabled = r.azMode !== 'manual';
+    const editor = element('div', { className: `tl-az-editor${disabled ? ' dim' : ''}`, 'data-az-editor': `${o}:${idx}` });
+    editor.append(element('span', {
+      className: 'tl-az-editor-info',
+      text: `${r.label} · Key ${idx + 1} @ ${fmt(k.t)} %`,
+      title: `${r.label} · Azimuth key ${idx + 1} at ${fmt(k.t)} %`
+    }));
+    if (disabled) {
+      editor.append(element('span', {
+        className: 'tl-az-editor-dim',
+        text: r.azMode === 'along' ? 'Angle is driven by Along path' : 'Angle is driven by Look at'
+      }));
+      return editor;
+    }
+    const currentAz = () => store.state.document.paths?.[o]?.azKeys?.[idx]?.az ?? k.az;
+    const snapAz = (v, fine) => {
+      const step = fine ? 0.1 : 1;
+      const s = clamp(Math.round(v / step) * step, -180, 180);
+      const n = Number(s.toFixed(1));
+      return n === 0 ? 0 : n;
+    };
+    const sliderEl = element('div', {
+      className: 'track tl-az-slider',
+      role: 'slider',
+      tabIndex: 0,
+      'aria-label': 'Selected azimuth key angle',
+      'aria-valuemin': -180,
+      'aria-valuemax': 180,
+      'data-focus-key': 'tl-az-slider',
+      title: 'Drag to set angle (−180…180°) · Shift = fine 0.1°'
+    }, [element('i')]);
+    const fieldEl = element('input', {
+      type: 'text',
+      className: 'readout tl-az-angle-input',
+      'aria-label': 'Selected azimuth key angle value',
+      'data-focus-key': 'tl-az-angle',
+      inputMode: 'decimal'
+    });
+    const paintEditor = az => {
+      const norm = clamp((az + 180) / 360, 0, 1);
+      sliderEl.style.setProperty('--normal', String(norm));
+      sliderEl.setAttribute('aria-valuenow', String(az));
+      sliderEl.setAttribute('aria-valuetext', fmtAz(az));
+      if (document.activeElement !== fieldEl || fieldEl.readOnly) fieldEl.value = fmtAz(az);
+      const entry = refs.get(o);
+      if (entry) {
+        const p0 = store.state.document.paths?.[o];
+        if (p0?.azKeys?.[idx]) {
+          const azKeys = p0.azKeys.map((ak, i) => i === idx ? { ...ak, az } : ak);
+          const nextRow = withPatch(o, { azKeys });
+          entry.current = nextRow;
+          entry.paint(nextRow);
+        }
+      }
+    };
+    paintEditor(k.az);
+
+    sliderEl.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || !store.ready) return;
+      e.preventDefault(); sliderEl.focus({ preventScroll: true });
+      if (!tryCapture(sliderEl, e)) return;
+      root.setAttribute('data-gesture-active', 'true'); pointerInside = true;
+      const g = gesture(`Edit ${r.label} key angle`);
+      const rect = sliderEl.getBoundingClientRect();
+      const startX = e.clientX;
+      const startNorm = e.shiftKey ? clamp((currentAz() + 180) / 360, 0, 1) : clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+      let active = true;
+      const applyAngle = (ev, fine) => {
+        const delta = (ev.clientX - startX) / Math.max(1, rect.width);
+        const norm = clamp(startNorm + (ev === e ? 0 : delta * (fine ? 0.1 : 1)), 0, 1);
+        const az = snapAz(-180 + norm * 360, fine);
+        paintEditor(az);
+        g.send([{ op: 'path.setAzimuthKey', object: o, index: idx, az }]);
+      };
+      if (!e.shiftKey) applyAngle(e, false);
+      const move = ev => { if (active && ev.pointerId === e.pointerId) applyAngle(ev, ev.shiftKey); };
+      const finish = async cancelled => {
+        if (!active) return; active = false;
+        sliderEl.removeEventListener('pointermove', move);
+        sliderEl.removeEventListener('pointerup', up);
+        sliderEl.removeEventListener('pointercancel', cancel);
+        sliderEl.removeEventListener('lostpointercapture', cancel);
+        window.removeEventListener('verb-gestures-reset', cancel);
+        window.removeEventListener('verb-ui-error', cancel);
+        if (cancelled) g.cancel(); else await g.end();
+        root.removeAttribute('data-gesture-active');
+        window.dispatchEvent(new Event('verb-control-end'));
+      };
+      const up = () => finish(false), cancel = () => finish(true);
+      sliderEl.addEventListener('pointermove', move);
+      sliderEl.addEventListener('pointerup', up);
+      sliderEl.addEventListener('pointercancel', cancel);
+      sliderEl.addEventListener('lostpointercapture', cancel);
+      window.addEventListener('verb-gestures-reset', cancel);
+      window.addEventListener('verb-ui-error', cancel);
+    });
+    sliderEl.addEventListener('keydown', e => {
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) return;
+      e.preventDefault(); e.stopPropagation();
+      const dir = ['ArrowRight', 'ArrowUp'].includes(e.key) ? 1 : -1;
+      const step = e.shiftKey ? 0.1 : 1;
+      const next = e.key === 'Home' ? -180 : e.key === 'End' ? 180 : snapAz(currentAz() + dir * step, e.shiftKey);
+      if (Math.abs(next - currentAz()) > 1e-6) {
+        pendingFocusAzSlider = true;
+        store.command({ op: 'path.setAzimuthKey', object: o, index: idx, az: next });
+      }
+    });
+
+    let textCommitted = false, fieldG = null, fieldCommitted = false;
+    const submitField = () => {
+      if (textCommitted) return;
+      const raw = fieldEl.value.trim().replace(/°$/, '').trim();
+      const n = Number(raw);
+      if (!raw || !Number.isFinite(n) || n < -180 || n > 180) {
+        fieldEl.setCustomValidity('Enter −180…180');
+        fieldEl.reportValidity();
+        return;
+      }
+      textCommitted = true;
+      fieldEl.setCustomValidity('');
+      const az = Number(n.toFixed(3)) === 0 ? 0 : Number(n.toFixed(3));
+      paintEditor(az);
+      if (Math.abs(az - currentAz()) > 1e-6) {
+        store.command({ op: 'path.setAzimuthKey', object: o, index: idx, az });
+      }
+    };
+    fieldEl.addEventListener('input', () => { textCommitted = false; });
+    fieldEl.addEventListener('change', submitField);
+    fieldEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); submitField(); fieldEl.blur(); }
+      if (e.key === 'Escape') { e.preventDefault(); textCommitted = true; fieldEl.setCustomValidity(''); fieldEl.value = fmtAz(currentAz()); fieldEl.blur(); }
+    });
+    const offField = valueField(fieldEl, {
+      get: currentAz,
+      min: -180,
+      max: 180,
+      step: 0.1,
+      display: fmtAz,
+      edit: v => String(Number(v.toFixed(2))),
+      start: () => {
+        fieldCommitted = false;
+        root.setAttribute('data-gesture-active', 'true');
+        fieldG = gesture(`Edit ${r.label} key angle`);
+      },
+      preview: v => {
+        const az = Number(clamp(v, -180, 180).toFixed(2));
+        const clean = az === 0 ? 0 : az;
+        paintEditor(clean);
+        fieldG?.send([{ op: 'path.setAzimuthKey', object: o, index: idx, az: clean }]);
+      },
+      commit: v => {
+        const az = Number(clamp(v, -180, 180).toFixed(2));
+        const clean = az === 0 ? 0 : az;
+        if (fieldG) {
+          fieldCommitted = true;
+          fieldG.send([{ op: 'path.setAzimuthKey', object: o, index: idx, az: clean }]);
+        } else if (Math.abs(clean - currentAz()) > 1e-6) {
+          store.command({ op: 'path.setAzimuthKey', object: o, index: idx, az: clean });
+        }
+      },
+      end: async () => {
+        const fg = fieldG; fieldG = null;
+        if (fg) { if (fieldCommitted) await fg.end(); else fg.cancel(); }
+        root.removeAttribute('data-gesture-active');
+        window.dispatchEvent(new Event('verb-control-end'));
+      }
+    });
+    const delBtn = button('Delete', () => removeAzKey(o, idx), {
+      className: 'tl-az-del',
+      'aria-label': 'Delete selected azimuth key',
+      title: 'Delete selected azimuth key (Del)'
+    });
+    editor.append(element('span', { className: 'tl-az-editor-lbl', text: 'Angle' }), sliderEl, fieldEl, delBtn);
+    editor.dispose = offField;
+    return editor;
+  }
+  const azEditor = buildAzEditor();
   // ruler is built before the rows exist in `refs`, so its scrub looks them up lazily (done above).
   const header = element('div', { className: 'tl-header' }, [
     element('b', { text: 'Path timeline' }),
@@ -352,7 +811,7 @@ export function timelinePanel(ctx) {
   ]);
   const bounds = () => root.parentElement?.getBoundingClientRect() || { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
   const grip = element('div', { className: 'tl-grip', 'aria-label': 'Resize timeline', title: 'Drag to resize' });
-  root.append(header, ruler, body, grip);
+  root.append(header, ruler, bodyScroll, ...(azEditor ? [azEditor] : []), grip);
   root.classList.toggle('collapsed', !!store.view.timelineMin);
   // move by the header, resize by the corner grip; double-click the header to reset. Offsets are kept in the view state.
   const box = { dx: 0, dy: 0, w: 0, h: 0, ...(store.view.timelineBox || {}) };
@@ -364,7 +823,7 @@ export function timelinePanel(ctx) {
   applyBox(box);
   const panelDrag = (e, el, onMove) => {
     if (e.button !== 0) return;
-    e.preventDefault(); root.setAttribute('data-gesture-active', 'true'); pointerInside = true; el.setPointerCapture?.(e.pointerId);
+    e.preventDefault(); if (!tryCapture(el, e)) return; root.setAttribute('data-gesture-active', 'true'); pointerInside = true;
     const x0 = e.clientX, y0 = e.clientY, r0 = root.getBoundingClientRect(), b0 = { ...box };
     const move = ev => { if (ev.pointerId === e.pointerId) onMove(ev.clientX - x0, ev.clientY - y0, r0, b0); };
     const end = () => {
@@ -399,7 +858,43 @@ export function timelinePanel(ctx) {
     store.view.timelineBox = box.dx || box.dy || box.w || box.h ? { ...box } : null;
   };
   let resizeObs = null;
-  requestAnimationFrame(() => { if (!root.isConnected) return; fit(); if (typeof ResizeObserver !== 'undefined' && root.parentElement) { resizeObs = new ResizeObserver(fit); resizeObs.observe(root.parentElement); } });
+  const focusTarget = store.view.timelineFocusAz;
+  if (focusTarget != null) store.view.timelineFocusAz = null;
+  requestAnimationFrame(() => {
+    if (!root.isConnected) return;
+    fit();
+    bodyScroll.update?.();
+    if (typeof ResizeObserver !== 'undefined' && root.parentElement) { resizeObs = new ResizeObserver(() => { fit(); bodyScroll.update?.(); }); resizeObs.observe(root.parentElement); }
+    if (pendingFocusAzKey) {
+      const target = refs.get(pendingFocusAzKey.o)?.azKeyEls?.get(pendingFocusAzKey.index);
+      pendingFocusAzKey = null;
+      target?.focus({ preventScroll: true });
+    } else if (pendingFocusAzSlider) {
+      pendingFocusAzSlider = false;
+      azEditor?.querySelector('.tl-az-slider')?.focus({ preventScroll: true });
+    } else if (focusTarget != null) {
+      const entry = refs.get(focusTarget);
+      if (entry?.azRowEl) {
+        entry.azRowEl.scrollIntoView({ block: 'nearest' });
+        const target = entry.azRowEl.querySelector('.tl-az-key.sel')
+          || entry.azRowEl.querySelector('.tl-az-key')
+          || entry.azRowEl.querySelector('.tl-az-add:not(:disabled)')
+          || entry.azRowEl.querySelector('.tl-az-track');
+        target?.focus({ preventScroll: true });
+      }
+    }
+  });
+  const offParams = store.subscribe(({ reason }) => {
+    if (reason !== 'parameters' || !root.isConnected || !store.state) return;
+    const seen = new Set();
+    for (const [, entry] of refs) {
+      const d = entry.row.driver;
+      if (seen.has(d)) continue;
+      seen.add(d);
+      const u = clamp(Number(store.state.parameters?.values?.[pathId(d)]) || 0, 0, 1);
+      paintDriverPosition(d, u);
+    }
+  });
   // wheel = zoom around the cursor (Shift = pan); never below a 5 % view
   root.addEventListener('wheel', e => {
     const track = e.target.closest?.('.tl-track'); if (!track) return;
@@ -409,18 +904,29 @@ export function timelinePanel(ctx) {
     store.setView({ timelineView: next.lo <= 0 && next.hi >= 100 ? null : next }, false);
   }, { passive: false });
   root.addEventListener('pointerdown', () => { pointerInside = true; }, true);
-  root.dispose = () => { resizeObs?.disconnect(); closeMenu(); if (live?.root === root) live = null; };
+  root.dispose = () => { offParams(); bodyScroll.dispose?.(); azEditor?.dispose?.(); resizeObs?.disconnect(); closeMenu(); if (live?.root === root) live = null; };
   live = { root, store };
   return root;
 }
 
-// Delete on a key the user just picked in the timeline clears its explicit time (never deletes the geometry point).
+// Delete on a key the user just picked in the timeline clears its explicit time or removes the selected azimuth key (never deletes the geometry point).
 if (typeof window !== 'undefined' && !window.__verbTimelineKeys) {
   window.__verbTimelineKeys = true;
   window.addEventListener('pointerdown', e => { if (live && !live.root.contains(e.target)) pointerInside = false; }, true);
   window.addEventListener('keydown', e => {
-    if (!live || !pointerInside || !['Delete', 'Backspace'].includes(e.key) || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
-    const { store } = live, pt = store.view.pathPoint, p = pt && store.state.document.paths?.[pt.object];
+    if (!live || (!pointerInside && !live.root.contains(document.activeElement)) || !['Delete', 'Backspace'].includes(e.key) || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    const { store } = live;
+    const azKey = store.view.azKey;
+    if (azKey) {
+      const p = store.state.document.paths?.[azKey.object];
+      if (p && orientationMode(p) === 'manual' && p.azKeys?.[azKey.index]) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        store.setView({ azKey: null }, false);
+        store.command({ op: 'path.removeAzimuthKey', object: azKey.object, index: azKey.index });
+      }
+      return;
+    }
+    const pt = store.view.pathPoint, p = pt && store.state.document.paths?.[pt.object];
     if (!p || pt.index <= 0) return;
     e.preventDefault(); e.stopImmediatePropagation();
     if (p.times?.[pt.index] !== null && p.times?.[pt.index] !== undefined) store.command({ op: 'path.setPointTiming', object: pt.object, index: pt.index, time: null });

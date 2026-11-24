@@ -76,18 +76,29 @@ receiver L 6 3 1.5  55 0.5
 receiver R 6 3 1.5 -55 0.5
 )";
 
-juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
+std::array<std::shared_ptr<verbp::AxisRangeStore>, 3> makeRangeStores() {
+    return {
+        std::make_shared<verbp::AxisRangeStore>((float)verbp::AutomationRange::kGlobalMinXY, (float)verbp::AutomationRange::kGlobalMaxXY),
+        std::make_shared<verbp::AxisRangeStore>((float)verbp::AutomationRange::kGlobalMinXY, (float)verbp::AutomationRange::kGlobalMaxXY),
+        std::make_shared<verbp::AxisRangeStore>((float)verbp::AutomationRange::kGlobalMinZ,  (float)verbp::AutomationRange::kGlobalMaxZ)
+    };
+}
+
+juce::AudioProcessorValueTreeState::ParameterLayout makeLayout(const std::array<std::shared_ptr<verbp::AxisRangeStore>, 3>& rangeStores) {
     using namespace verbp;
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
     auto add = [&](const juce::String& id, const juce::String& name, float lo, float hi, float def, const char* unit) {
         p.push_back(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{id, 1}, name, juce::NormalisableRange<float>(lo, hi, 0.001f), def,
                                                                 juce::AudioParameterFloatAttributes().withLabel(unit)));
     };
+    auto addPos = [&](const juce::String& id, const juce::String& name, int axis, float def, const char* unit) {
+        p.push_back(std::make_unique<verbp::DynamicPositionParameter>(juce::ParameterID{id, 1}, name, rangeStores[(size_t)axis], def, unit));
+    };
     for (int o = 0; o <= kMaxSources; ++o) {
         const juce::String nm = o == kListener ? "Listener" : "Source " + juce::String(o + 1);
-        add(paramId(o, 0), nm + " X", -200.f, 200.f, 0.f, "m");
-        add(paramId(o, 1), nm + " Y", -200.f, 200.f, 0.f, "m");
-        add(paramId(o, 2), nm + " Z", 0.f, 30.f, 1.5f, "m");
+        addPos(paramId(o, 0), nm + " X", 0, 0.f, "m");
+        addPos(paramId(o, 1), nm + " Y", 1, 0.f, "m");
+        addPos(paramId(o, 2), nm + " Z", 2, 1.5f, "m");
         add(paramId(o, 3), nm + (o == kListener ? " Yaw" : " Azimuth"), -180.f, 180.f, 0.f, "deg");
         if (o != kListener) add(paramId(o, 4), nm + " Gain", -60.f, 12.f, 0.f, "dB");
     }
@@ -124,6 +135,108 @@ juce::AudioProcessorValueTreeState::ParameterLayout makeLayout() {
     return {p.begin(), p.end()};
 }
 
+juce::String fmtModDouble(double val) {
+    std::ostringstream number;
+    number.imbue(std::locale::classic());
+    number << std::setprecision(std::numeric_limits<double>::max_digits10) << val;
+    return juce::String(number.str());
+}
+
+double parseModDouble(const juce::var& value) {
+    if (!value.isString()) return (double)value;
+    std::istringstream number(value.toString().toStdString());
+    number.imbue(std::locale::classic());
+    double result = std::numeric_limits<double>::quiet_NaN();
+    number >> result;
+    return result;
+}
+
+juce::ValueTree modRoutesToValueTree(const std::vector<verbp::ModulationRoute>& routes) {
+    juce::ValueTree modTree("Modulation");
+    for (int i = 0; i < (int)routes.size() && i < verbp::kMaxModRoutes; ++i) {
+        const auto& r = routes[(size_t)i];
+        juce::ValueTree rt("Route");
+        rt.setProperty("enabled", r.enabled, nullptr);
+        rt.setProperty("object", r.object, nullptr);
+        rt.setProperty("driver", juce::String(verbp::modDriverName(r.driver)), nullptr);
+        if (r.driver == verbp::ModDriver::DistanceToPoint) {
+            rt.setProperty("pointX", fmtModDouble(r.pointX), nullptr);
+            rt.setProperty("pointY", fmtModDouble(r.pointY), nullptr);
+            rt.setProperty("pointZ", fmtModDouble(r.pointZ), nullptr);
+        }
+        rt.setProperty("targetObject", r.targetObject, nullptr);
+        rt.setProperty("target", juce::String(verbp::modTargetName(r.target)), nullptr);
+        if (r.hostOut > 0)
+            rt.setProperty("hostOut", r.hostOut, nullptr);
+        rt.setProperty("attackMs", fmtModDouble(r.attackMs), nullptr);
+        rt.setProperty("releaseMs", fmtModDouble(r.releaseMs), nullptr);
+        juce::ValueTree cv("Curve");
+        cv.setProperty("inputMin", fmtModDouble(r.curve.inputMin), nullptr);
+        cv.setProperty("inputMax", fmtModDouble(r.curve.inputMax), nullptr);
+        cv.setProperty("outputMin", fmtModDouble(r.curve.outputMin), nullptr);
+        cv.setProperty("outputMax", fmtModDouble(r.curve.outputMax), nullptr);
+        cv.setProperty("invert", r.curve.invert, nullptr);
+        cv.setProperty("clamp", r.curve.clamp, nullptr);
+        for (int ni = 0; ni < r.curve.nodeCount && ni < verbp::kMaxCurveNodes; ++ni) {
+            const auto& nd = r.curve.nodes[(size_t)ni];
+            juce::ValueTree nt("Node");
+            nt.setProperty("x", fmtModDouble(nd.x), nullptr);
+            nt.setProperty("y", fmtModDouble(nd.y), nullptr);
+            if (nd.smooth) nt.setProperty("smooth", true, nullptr);
+            cv.appendChild(nt, nullptr);
+        }
+        rt.appendChild(cv, nullptr);
+        modTree.appendChild(rt, nullptr);
+    }
+    return modTree;
+}
+
+std::vector<verbp::ModulationRoute> modRoutesFromValueTree(const juce::ValueTree& modTree) {
+    std::vector<verbp::ModulationRoute> out;
+    if (!modTree.isValid()) return out;
+    for (int i = 0; i < modTree.getNumChildren() && (int)out.size() < verbp::kMaxModRoutes; ++i) {
+        const auto rt = modTree.getChild(i);
+        if (!rt.hasType("Route")) continue;
+        verbp::ModulationRoute r;
+        r.enabled = (bool)rt.getProperty("enabled", true);
+        r.object = (int)rt.getProperty("object", -1);
+        verbp::ModDriver drv{};
+        if (!verbp::parseModDriver(rt.getProperty("driver", "").toString().toStdString(), drv)) continue;
+        r.driver = drv;
+        if (rt.hasProperty("pointX")) r.pointX = parseModDouble(rt.getProperty("pointX"));
+        if (rt.hasProperty("pointY")) r.pointY = parseModDouble(rt.getProperty("pointY"));
+        if (rt.hasProperty("pointZ")) r.pointZ = parseModDouble(rt.getProperty("pointZ"));
+        r.targetObject = (int)rt.getProperty("targetObject", -1);
+        verbp::ModTarget tgt{};
+        if (!verbp::parseModTarget(rt.getProperty("target", "").toString().toStdString(), tgt)) continue;
+        r.target = tgt;
+        if (rt.hasProperty("hostOut")) r.hostOut = (int)rt.getProperty("hostOut", 0);
+        if (rt.hasProperty("attackMs")) r.attackMs = parseModDouble(rt.getProperty("attackMs"));
+        if (rt.hasProperty("releaseMs")) r.releaseMs = parseModDouble(rt.getProperty("releaseMs"));
+        const auto cv = rt.getChildWithName("Curve");
+        if (cv.isValid()) {
+            if (cv.hasProperty("inputMin")) r.curve.inputMin = parseModDouble(cv.getProperty("inputMin"));
+            if (cv.hasProperty("inputMax")) r.curve.inputMax = parseModDouble(cv.getProperty("inputMax"));
+            if (cv.hasProperty("outputMin")) r.curve.outputMin = parseModDouble(cv.getProperty("outputMin"));
+            if (cv.hasProperty("outputMax")) r.curve.outputMax = parseModDouble(cv.getProperty("outputMax"));
+            r.curve.invert = (bool)cv.getProperty("invert", false);
+            r.curve.clamp = (bool)cv.getProperty("clamp", true);
+            int nc = 0;
+            for (int ni = 0; ni < cv.getNumChildren() && nc < verbp::kMaxCurveNodes; ++ni) {
+                const auto nt = cv.getChild(ni);
+                if (!nt.hasType("Node")) continue;
+                r.curve.nodes[(size_t)nc].x = parseModDouble(nt.getProperty("x"));
+                r.curve.nodes[(size_t)nc].y = parseModDouble(nt.getProperty("y"));
+                r.curve.nodes[(size_t)nc].smooth = (bool)nt.getProperty("smooth", false);
+                ++nc;
+            }
+            if (nc > 0) r.curve.nodeCount = nc;
+        }
+        if (verbp::validModRoute(r)) out.push_back(r);
+    }
+    return out;
+}
+
 }  // namespace
 
 VerbProcessor::VerbProcessor()
@@ -131,7 +244,11 @@ VerbProcessor::VerbProcessor()
                          .withInput("Sources", juce::AudioChannelSet::discreteChannels(2), true)
                          .withOutput("Room", juce::AudioChannelSet::stereo(), true)),
       juce::Thread("Verb scene loader"),
-      apvts(*this, nullptr, "VerbState", makeLayout()) {
+      axisStores(makeRangeStores()),
+      apvts(*this, nullptr, "VerbState", makeLayout(axisStores)),
+      modMailbox(std::make_unique<verbp::ModRoutesMailbox>()),
+      wallMailbox(std::make_unique<verbp::WallSnapshotMailbox>()),
+      modProc(std::make_unique<verbp::ModulationProcessor>()) {
     for (int o = 0; o <= verbp::kMaxSources; ++o)
         for (int k = 0; k < (o == verbp::kListener ? 4 : 5); ++k) pv[o][k] = apvts.getRawParameterValue(verbp::paramId(o, k));
     for(int o=0;o<=verbp::kMaxSources;++o) pathParams[o]=apvts.getRawParameterValue(pathParamId(o));
@@ -156,6 +273,13 @@ VerbProcessor::VerbProcessor()
     for (int s = 0; s < verbp::kMaxSources; ++s) {
         sourceMute[s] = apvts.getRawParameterValue(verbp::sourceSwitchId(s, false));
         sourceSolo[s] = apvts.getRawParameterValue(verbp::sourceSwitchId(s, true));
+    }
+    // Append 16 read-only host modulation outputs AFTER apvts so indices 0..282 stay untouched
+    // and Mo parameters never enter APVTS copyState/presets or Web UI parameter lists.
+    for (int s = 0; s < verbp::kMaxModHostOuts; ++s) {
+        auto p = std::make_unique<verbp::ModOutParameter>(s + 1);
+        modOutParams[(size_t)s] = p.get();
+        addParameter(p.release());
     }
     session = std::make_unique<verbp::EditorSession>(*this);
     sceneText = kDefaultScene;
@@ -197,6 +321,8 @@ void VerbProcessor::prepareToPlay(double sr, int block) {
     serialSeen = ~0ull;
     haveLastProcessWall = false;
     havePlayHead = false;
+    modProc->reset();
+    modFallbackClock = 0;
     lfeSoloGain.reset(sr, 0.01);
     bool needRebuild;
     {
@@ -297,8 +423,14 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     }
     for (int k = 0; k < 4; ++k) cur[verbp::kListener][k] = pv[verbp::kListener][k]->load(std::memory_order_relaxed);
     cur[verbp::kListener][2] = std::min(std::max(cur[verbp::kListener][2], 0.0), zTop);
+    double baseManualAz[verbp::kMaxSources + 1] = {};
+    for (int o = 0; o <= verbp::kMaxSources; ++o) baseManualAz[o] = cur[o][3];
+    float baseGainDb[verbp::kMaxSources] = {};
+    for (int i = 0; i < NS; ++i) baseGainDb[i] = pv[i][4]->load(std::memory_order_relaxed);
     const verbp::CompiledPath* cp[verbp::kMaxSources + 1] = {};
     for(int o=0;o<=verbp::kMaxSources;++o) cp[o] = &pathMailboxes[(size_t)o].consume();
+    const auto& modSet = modMailbox->consume();
+    const auto& wallSnap = wallMailbox->consume();
     double pathTangent[verbp::kMaxSources + 1] = {};
     bool pathActive[verbp::kMaxSources + 1] = {};
     for(int o=0;o<=verbp::kMaxSources;++o) {
@@ -306,9 +438,11 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
         if(!path.enabled || (o>=NS && o!=verbp::kListener))continue;
         int driver=o;
         if(path.group>=0)for(int d=0;d<NS;++d)if(cp[d]->enabled && cp[d]->group==path.group){driver=d;break;}
-        double yaw=0;const auto q=path.evaluate(pathParams[driver]->load(std::memory_order_relaxed),&yaw);
+        const double u=pathParams[driver]->load(std::memory_order_relaxed);
+        double yaw=0;const auto q=path.evaluate(u,&yaw);
         for(int k=0;k<3;++k)cur[o][k]=q[(size_t)k];
         cur[o][2]=std::clamp(cur[o][2],0.0,zTop);
+        cur[o][3]=path.evaluateAzimuth(u,cur[o][3]);
         pathTangent[o]=yaw;pathActive[o]=true;
     }
     // E19: orientation is resolved after every position is known (Look at needs the target's position this block).
@@ -340,6 +474,8 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
         for (int p = 0; p < P; ++p) std::memcpy(prevPtOff[p], curPtOff[p], sizeof prevPtOff[p]);
         havePlayHead = false;
         haveLastProcessWall = false;
+        modProc->reset();
+        modFallbackClock = 0;
         serialSeen = ser;
     }
     const double wallGap = haveLastProcessWall ? std::chrono::duration<double>(blockStart - lastProcessWall).count() : 0.0;
@@ -348,12 +484,20 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     haveLastProcessWall = true;
     bool transportJump = false;
     bool passPlaying=false;
+    bool phPresent = false, phPlaying = false;
+    int64_t phBaseSample = 0;
+    double phBaseSec = -1.0;
     if (auto* ph = getPlayHead()) {
         if (const auto posInfo = ph->getPosition()) {
+            phPresent = true;
             const bool isPlaying = posInfo->getIsPlaying();
+            phPlaying = isPlaying;
             passPlaying=isPlaying;
+            if (const auto sec = posInfo->getTimeInSeconds()) phBaseSec = *sec;
             if (const auto ts = posInfo->getTimeInSamples()) {
                 const int64_t curTs = *ts;
+                phBaseSample = curTs;
+                phBaseSec = -1.0;
                 if (!newEngine && havePlayHead) {
                     const int64_t expected = prevPlayHeadSample + (prevPlaying ? (int64_t)prevBlockSamples : 0);
                     const int64_t tol = std::max<int64_t>(n / 2 + 64, (int64_t)std::llround(0.02 * sampleRate));
@@ -435,6 +579,40 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     e.setReverbMix(positioned && !solo ? mixP : 1.f);
     if (positioned) { wetG1 = 1.f; dryG1 = 0.f; }
     const float wetG0 = prevWet, dryG0 = prevDry;
+    bool anyLfoActive = false;
+    for (int o = 0; o <= verbp::kMaxSources; ++o) {
+        if (o >= NS && o != verbp::kListener) continue;
+        if (!pathActive[o]) continue;
+        int driver = o;
+        if (cp[o]->group >= 0) {
+            for (int d = 0; d < NS; ++d)
+                if (cp[d]->enabled && cp[d]->group == cp[o]->group) { driver = d; break; }
+        }
+        if (cp[driver]->lfo.enabled && cp[driver]->lfo.depth > 0.0) { anyLfoActive = true; break; }
+    }
+    bool hasAudioModRoute = false;
+    for (int i = 0; i < modSet.count && i < verbp::kMaxModRoutes; ++i) {
+        if (modSet.routes[(size_t)i].target != verbp::ModTarget::None) {
+            hasAudioModRoute = true;
+            break;
+        }
+    }
+    const bool hasAudioModFeature = anyLfoActive || hasAudioModRoute;
+    const bool hasAnyModFeature = anyLfoActive || (modSet.count > 0);
+    const bool useModPath = (hasAudioModFeature && (creative || modProc->currentCreativeBlend() > 1e-6))
+                         || modProc->hasAnyWetFilter()
+                         || (modProc->currentCreativeBlend() > 0.0 && !creative && hasAudioModFeature);
+    const bool needModEval = useModPath
+                          || (hasAnyModFeature && (creative || modProc->currentCreativeBlend() > 1e-6))
+                          || modProc->hasPendingHostFade();
+    if (!needModEval) {
+        modProc->creativeBlend = creative ? 1.0 : 0.0;
+        modProc->snapped = false;
+        modProc->prevSegGainValid = false;
+        modProc->lastGen = modSet.generation;
+        if (modLiveCount.load(std::memory_order_relaxed) != 0)
+            modLiveCount.store(0, std::memory_order_release);
+    }
 
     // The automation value read at the start of a host block is the position AT THE START of that block. The block is
     // rendered along a cubic Hermite curve that leaves where the previous block ended (continuous position and velocity:
@@ -482,6 +660,15 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
 
     const float* ip[verbp::kMaxPoints];
     float* op[verbp::kMaxReceivers];
+    bool anySegMixMod = false;
+    float segWetCur = prevWet, segDryCur = prevDry;
+    double lastSegAz[verbp::kMaxSources + 1] = {};
+    for (int o = 0; o <= verbp::kMaxSources; ++o) lastSegAz[o] = cur[o][3];
+    float segModRaw[verbp::kMaxModRoutes] = {};
+    float segModValue[verbp::kMaxModRoutes] = {};
+    uint8_t segModActive[verbp::kMaxModRoutes] = {};
+    double segHostOutNorm[verbp::kMaxModHostOuts];
+    std::fill_n(segHostOutNorm, verbp::kMaxModHostOuts, verbp::kModHostOutNeutral);
     int done = 0;
     while (done < n) {
         const int m = std::min(n - done, b.maxBlock);
@@ -519,12 +706,12 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             }
             // never let a NaN/Inf/absurd sample from upstream into the filters and delay lines (it would stay there)
             for (int i = 0; i < m; ++i) if (!(std::fabs(d[i]) < 1e6f)) d[i] = 0.f;
-            if (cnt > 0) {  // source gain, ramped over the host block
+            if (!useModPath && cnt > 0) {  // source gain, ramped over the host block (bit-exact fast path)
                 const float g0 = prevGain[pm.source], g1 = curGain[pm.source];
                 for (int i = 0; i < m; ++i) d[i] *= g0 + (g1 - g0) * (float)(done + i + 1) / (float)n;
             }
         }
-        if (b.lfeOut >= 0)
+        if (!useModPath && b.lfeOut >= 0)
             for (int s = 0; s < NS; ++s) {
                 const verbp::SourceCfg& c = b.cfg[(size_t)s];
                 const int ch = c.lfeChannel() >= 0 ? c.firstIn + c.lfeChannel() : -1;
@@ -553,34 +740,207 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 return h00 * sg.p0 + h10 * sg.m0 + h01 * sg.p1 + h11 * sg.m1;
             };
             double mpx[verbp::kMaxSources + 1] = {}, mpy[verbp::kMaxSources + 1] = {}, mpz[verbp::kMaxSources + 1] = {}, mpt[verbp::kMaxSources + 1] = {};
-            for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) {
-                mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); mpz[o] = mix(o, 2);
-                if (pathActive[o] && !cp[o]->points.empty()) cp[o]->projectOnPath(mpx[o], mpy[o], mpz[o], &mpt[o]);
-            }
-            auto azOf = [&](int o) -> double {
-                const verbp::CompiledPath& cpa = *cp[o];
-                if (!cpa.lookAt) {
-                    if (cpa.orient && pathActive[o])
-                        return verbp::orientedAzimuth(verbp::OrientMode::AlongPath, manualAz[o], mpt[o], false, 0.0, cpa.orientOffset);
-                    return mix(o, 3);
+            if (!useModPath) {
+                for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) {
+                    mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); mpz[o] = mix(o, 2);
+                    if (pathActive[o] && !cp[o]->points.empty()) cp[o]->projectOnPath(mpx[o], mpy[o], mpz[o], &mpt[o]);
                 }
-                double tx = 0, ty = 0, look = 0; bool ok = false;
-                if (cpa.lookPoint) { tx = cpa.lookPos[0]; ty = cpa.lookPos[1]; ok = true; }
-                else { const int tt = cpa.lookTarget; if (tt >= 0 && tt != o && tt <= verbp::kListener && (tt < NS || tt == verbp::kListener)) { tx = mpx[tt]; ty = mpy[tt]; ok = true; } }
-                ok = ok && verbp::lookAtYaw(mpx[o], mpy[o], tx, ty, look);
-                return verbp::orientedAzimuth(verbp::OrientMode::LookAt, manualAz[o], 0.0, ok, look, cpa.orientOffset);
-            };
-            for (int s = 0; s < NS; ++s) {
-                const double az = azOf(s), x = mpx[s], y = mpy[s], z = mpz[s];
-                const double ca = std::cos(az * verb::kPi / 180.0), sa = std::sin(az * verb::kPi / 180.0);
-                for (int p = b.pointStart[(size_t)s]; p < b.pointStart[(size_t)s] + b.pointCount[(size_t)s]; ++p) {
-                    // live offset in the source's frame (x forward along the azimuth, y left, z up)
-                    const double ox = curPtOff[p][0], oy = curPtOff[p][1], oz = curPtOff[p][2];
-                    e.setSourcePosition(p, (x + ca * ox - sa * oy)*sizeScale, (y + sa * ox + ca * oy)*sizeScale, std::min(std::max(z + oz, 0.0), zTop)*sizeScale);
-                    e.setSourceAzimuth(p, az);
+                auto azOf = [&](int o) -> double {
+                    const verbp::CompiledPath& cpa = *cp[o];
+                    if (!cpa.lookAt) {
+                        if (cpa.orient && pathActive[o])
+                            return verbp::orientedAzimuth(verbp::OrientMode::AlongPath, manualAz[o], mpt[o], false, 0.0, cpa.orientOffset);
+                        return mix(o, 3);
+                    }
+                    double tx = 0, ty = 0, look = 0; bool ok = false;
+                    if (cpa.lookPoint) { tx = cpa.lookPos[0]; ty = cpa.lookPos[1]; ok = true; }
+                    else { const int tt = cpa.lookTarget; if (tt >= 0 && tt != o && tt <= verbp::kListener && (tt < NS || tt == verbp::kListener)) { tx = mpx[tt]; ty = mpy[tt]; ok = true; } }
+                    ok = ok && verbp::lookAtYaw(mpx[o], mpy[o], tx, ty, look);
+                    return verbp::orientedAzimuth(verbp::OrientMode::LookAt, manualAz[o], 0.0, ok, look, cpa.orientOffset);
+                };
+                for (int s = 0; s < NS; ++s) {
+                    const double az = azOf(s), x = mpx[s], y = mpy[s], z = mpz[s];
+                    const double ca = std::cos(az * verb::kPi / 180.0), sa = std::sin(az * verb::kPi / 180.0);
+                    for (int p = b.pointStart[(size_t)s]; p < b.pointStart[(size_t)s] + b.pointCount[(size_t)s]; ++p) {
+                        // live offset in the source's frame (x forward along the azimuth, y left, z up)
+                        const double ox = curPtOff[p][0], oy = curPtOff[p][1], oz = curPtOff[p][2];
+                        e.setSourcePosition(p, (x + ca * ox - sa * oy)*sizeScale, (y + sa * ox + ca * oy)*sizeScale, std::min(std::max(z + oz, 0.0), zTop)*sizeScale);
+                        e.setSourceAzimuth(p, az);
+                    }
                 }
+                e.setListener(mpx[verbp::kListener]*sizeScale, mpy[verbp::kListener]*sizeScale, mpz[verbp::kListener]*sizeScale, azOf(verbp::kListener));
+                if (needModEval) {
+                    const double blend = modProc->advanceCreativeBlend(creative, len, sampleRate);
+                    double segPoses[verbp::kMaxSources + 1][4] = {};
+                    double segU[verbp::kMaxSources + 1] = {};
+                    for (int o = 0; o <= verbp::kMaxSources; ++o) {
+                        if (o >= NS && o != verbp::kListener) continue;
+                        segPoses[o][0] = mpx[o];
+                        segPoses[o][1] = mpy[o];
+                        segPoses[o][2] = mpz[o];
+                        segPoses[o][3] = azOf(o);
+                        if (pathActive[o]) {
+                            int driver = o;
+                            if (cp[o]->group >= 0) {
+                                for (int d = 0; d < NS; ++d)
+                                    if (cp[d]->enabled && cp[d]->group == cp[o]->group) { driver = d; break; }
+                            }
+                            segU[o] = std::clamp((double)pathParams[driver]->load(std::memory_order_relaxed), 0.0, 1.0);
+                        }
+                        lastSegAz[o] = segPoses[o][3];
+                    }
+                    std::array<verbp::SourceModState, verbp::kModMaxSources> srcMod{};
+                    verbp::GlobalModState globMod{};
+                    modProc->evaluateSegment(modSet, NS, segPoses, segU, objJumped, wallSnap, creative, blend, len, sampleRate, srcMod, globMod, segModRaw, segModValue, segModActive, segHostOutNorm);
+                    modProc->snapped = false;
+                }
+                modProc->prevSegGainValid = false;
+            } else {
+                const bool segSnap = modProc->snapped;
+                const double blend = modProc->advanceCreativeBlend(creative, len, sampleRate);
+                const double tLfoSec = phPresent
+                    ? (phPlaying
+                        ? (phBaseSec >= 0.0 ? std::max(0.0, phBaseSec + (double)(done + off) / sampleRate)
+                                            : std::max(0.0, (double)(phBaseSample + done + off) / sampleRate))
+                        : 0.0)
+                    : (double)(modFallbackClock + done + off) / sampleRate;
+                double segPoses[verbp::kMaxSources + 1][4] = {};
+                double segU[verbp::kMaxSources + 1] = {};
+                bool segPathActive[verbp::kMaxSources + 1] = {};
+                for (int o = 0; o <= verbp::kMaxSources; ++o) {
+                    if (o >= NS && o != verbp::kListener) continue;
+                    segPathActive[o] = pathActive[o];
+                    if (pathActive[o]) {
+                        int driver = o;
+                        if (cp[o]->group >= 0) {
+                            for (int d = 0; d < NS; ++d)
+                                if (cp[d]->enabled && cp[d]->group == cp[o]->group) { driver = d; break; }
+                        }
+                        const double uBase = std::clamp((double)pathParams[driver]->load(std::memory_order_relaxed), 0.0, 1.0);
+                        double uEff = uBase;
+                        if (cp[driver]->lfo.enabled && cp[driver]->lfo.depth > 0.0 && blend > 1e-9) {
+                            uEff = cp[driver]->lfo.applyToU(uBase, tLfoSec, cp[o]->closed, blend);
+                            double yaw = 0.0;
+                            const auto q = cp[o]->evaluate(uEff, &yaw);
+                            mpx[o] = q[0]; mpy[o] = q[1]; mpz[o] = std::clamp(q[2], 0.0, zTop);
+                            mpt[o] = yaw;
+                            segPoses[o][3] = cp[o]->evaluateAzimuth(uEff, baseManualAz[o]);
+                        } else {
+                            mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); mpz[o] = mix(o, 2);
+                            if (!cp[o]->points.empty()) cp[o]->projectOnPath(mpx[o], mpy[o], mpz[o], &mpt[o]);
+                            segPoses[o][3] = (cp[o]->orient || cp[o]->lookAt) ? manualAz[o] : mix(o, 3);
+                        }
+                        segU[o] = uEff;
+                    } else {
+                        mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); mpz[o] = mix(o, 2);
+                        segPoses[o][3] = cp[o]->lookAt ? manualAz[o] : mix(o, 3);
+                    }
+                    segPoses[o][0] = mpx[o];
+                    segPoses[o][1] = mpy[o];
+                    segPoses[o][2] = mpz[o];
+                }
+                verbp::applyOrientation(NS, segPoses, mpt, segPathActive, [&](int o) -> const verbp::CompiledPath& { return *cp[o]; });
+                for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) lastSegAz[o] = segPoses[o][3];
+
+                std::array<verbp::SourceModState, verbp::kModMaxSources> srcMod{};
+                verbp::GlobalModState globMod{};
+                modProc->evaluateSegment(modSet, NS, segPoses, segU, objJumped, wallSnap, creative, blend, len, sampleRate, srcMod, globMod, segModRaw, segModValue, segModActive, segHostOutNorm);
+
+                float targetSegGain[verbp::kMaxSources] = {};
+                for (int s = 0; s < NS; ++s) {
+                    const auto& st = srcMod[(size_t)s];
+                    if (st.hasGain) {
+                        const double effDb = std::clamp((double)baseGainDb[s] + st.gainDb, -60.0, 12.0);
+                        targetSegGain[s] = juce::Decibels::decibelsToGain((float)effDb, -60.f) * sourceGate[s];
+                    } else {
+                        targetSegGain[s] = prevGain[s] + (curGain[s] - prevGain[s]) * (float)t;
+                    }
+                    if (!modProc->prevSegGainValid) modProc->prevSegGain[(size_t)s] = segSnap ? targetSegGain[s] : prevGain[s];
+                }
+                for (int p = 0; p < P; ++p) {
+                    const int s = b.points[(size_t)p].source;
+                    float* segBuf = b.in[(size_t)p].data() + off;
+                    const float g0 = modProc->prevSegGain[(size_t)s], g1 = targetSegGain[s];
+                    const float dg = len > 0 ? (g1 - g0) / (float)len : 0.f;
+                    for (int i = 0; i < len; ++i) segBuf[i] *= g0 + dg * (float)(i + 1);
+                    modProc->processPointFilters(p, segBuf, len, sampleRate, srcMod[(size_t)s], creative, segSnap);
+                }
+                if (b.lfeOut >= 0) {
+                    for (int s = 0; s < NS; ++s) {
+                        const verbp::SourceCfg& c = b.cfg[(size_t)s];
+                        const int ch = c.lfeChannel() >= 0 ? c.firstIn + c.lfeChannel() : -1;
+                        if (ch < 0 || ch >= nIn) continue;
+                        const float* src = buf.getReadPointer(inMap[(size_t)ch]) + done + off;
+                        const float g0 = modProc->prevSegGain[(size_t)s], g1 = targetSegGain[s];
+                        const float dg = len > 0 ? (g1 - g0) / (float)len : 0.f;
+                        for (int i = 0; i < len; ++i) {
+                            const float v = std::fabs(src[i]) < 1e6f ? src[i] : 0.f;
+                            b.lfe[(size_t)(off + i)] += v * (g0 + dg * (float)(i + 1));
+                        }
+                    }
+                }
+                for (int s = 0; s < NS; ++s) modProc->prevSegGain[(size_t)s] = targetSegGain[s];
+                modProc->prevSegGainValid = true;
+                modProc->snapped = false;
+
+                if (globMod.hasEarly || creative) {
+                    const double baseE = earlyParam->load(std::memory_order_relaxed);
+                    e.setEarlyLevel(creative ? std::clamp(baseE + globMod.earlyDb, -60.0, 6.0) : 0.0);
+                }
+                if (globMod.hasTail || creative) {
+                    const double baseT = tailParam->load(std::memory_order_relaxed);
+                    e.setTailLevel(creative ? std::clamp(baseT + globMod.tailDb, -48.0, 12.0) : 0.0);
+                }
+                if (globMod.hasMix && !solo) {
+                    const double baseM = mixParam->load(std::memory_order_relaxed);
+                    const float effM = std::clamp((float)(baseM + (creative ? globMod.mixPct : 0.0)) * 0.01f, 0.f, 1.f);
+                    e.setReverbMix(positioned ? effM : 1.f);
+                    if (!positioned) {
+                        if (!anySegMixMod && off > 0) {
+                            for (int i = 0; i < off; ++i) {
+                                const float ti = (float)(done + i + 1) / (float)n;
+                                b.wetMix[(size_t)i] = wetG0 + (wetG1 - wetG0) * ti;
+                                b.dryMix[(size_t)i] = dryG0 + (dryG1 - dryG0) * ti;
+                            }
+                            segWetCur = b.wetMix[(size_t)(off - 1)];
+                            segDryCur = b.dryMix[(size_t)(off - 1)];
+                        }
+                        anySegMixMod = true;
+                        float wTarget = std::sin(effM * 1.5707963f), dTarget = std::cos(effM * 1.5707963f);
+                        if (effM >= 0.9999f) { wTarget = 1.f; dTarget = 0.f; }
+                        if (effM <= 0.0001f) { wTarget = 0.f; dTarget = 1.f; }
+                        const float dw = len > 0 ? (wTarget - segWetCur) / (float)len : 0.f;
+                        const float dd = len > 0 ? (dTarget - segDryCur) / (float)len : 0.f;
+                        for (int i = 0; i < len; ++i) {
+                            b.wetMix[(size_t)(off + i)] = segWetCur + dw * (float)(i + 1);
+                            b.dryMix[(size_t)(off + i)] = segDryCur + dd * (float)(i + 1);
+                        }
+                        segWetCur = wTarget; segDryCur = dTarget;
+                    }
+                } else if (anySegMixMod && !positioned && !solo) {
+                    const float wTarget = wetG0 + (wetG1 - wetG0) * (float)t;
+                    const float dTarget = dryG0 + (dryG1 - dryG0) * (float)t;
+                    const float dw = len > 0 ? (wTarget - segWetCur) / (float)len : 0.f;
+                    const float dd = len > 0 ? (dTarget - segDryCur) / (float)len : 0.f;
+                    for (int i = 0; i < len; ++i) {
+                        b.wetMix[(size_t)(off + i)] = segWetCur + dw * (float)(i + 1);
+                        b.dryMix[(size_t)(off + i)] = segDryCur + dd * (float)(i + 1);
+                    }
+                    segWetCur = wTarget; segDryCur = dTarget;
+                }
+
+                for (int s = 0; s < NS; ++s) {
+                    const double az = segPoses[s][3], x = segPoses[s][0], y = segPoses[s][1], z = segPoses[s][2];
+                    const double ca = std::cos(az * verb::kPi / 180.0), sa = std::sin(az * verb::kPi / 180.0);
+                    for (int p = b.pointStart[(size_t)s]; p < b.pointStart[(size_t)s] + b.pointCount[(size_t)s]; ++p) {
+                        // live offset in the source's frame (x forward along the azimuth, y left, z up)
+                        const double ox = curPtOff[p][0], oy = curPtOff[p][1], oz = curPtOff[p][2];
+                        e.setSourcePosition(p, (x + ca * ox - sa * oy)*sizeScale, (y + sa * ox + ca * oy)*sizeScale, std::min(std::max(z + oz, 0.0), zTop)*sizeScale);
+                        e.setSourceAzimuth(p, az);
+                    }
+                }
+                e.setListener(segPoses[verbp::kListener][0]*sizeScale, segPoses[verbp::kListener][1]*sizeScale, segPoses[verbp::kListener][2]*sizeScale, segPoses[verbp::kListener][3]);
             }
-            e.setListener(mpx[verbp::kListener]*sizeScale, mpy[verbp::kListener]*sizeScale, mpz[verbp::kListener]*sizeScale, azOf(verbp::kListener));
             for (int p = 0; p < P; ++p) ip[p] = b.in[(size_t)p].data() + off;
             for (int r = 0; r < R; ++r) op[r] = b.out[(size_t)r].data() + off;
             e.acknowledgePoseScale(appliedSize/b.constructionSize);
@@ -598,11 +958,12 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 mapped = true; gate0 = std::max(gate0, prevSourceGate[s]); gate1 = std::max(gate1, sourceGate[s]);
             }
             if (!mapped) { gate0 = prevAnySourceSolo ? 0.f : 1.f; gate1 = anySourceSolo ? 0.f : 1.f; }
-            const bool hasDry = ch < nIn && (dryG1 > 0.f || dryG0 > 0.f);
-            auto wetAt = [&](int i) { return wetG0 + (wetG1 - wetG0) * (float)(done + i + 1) / (float)n; };
+            const bool hasDry = ch < nIn && (anySegMixMod || dryG1 > 0.f || dryG0 > 0.f);
+            auto wetAt = [&](int i) { return anySegMixMod ? b.wetMix[(size_t)i] : (wetG0 + (wetG1 - wetG0) * (float)(done + i + 1) / (float)n); };
             auto dryAt = [&](int i) {
+                const float g = anySegMixMod ? b.dryMix[(size_t)i] : (dryG0 + (dryG1 - dryG0) * ((float)(done + i + 1) / (float)n));
                 const float t = (float)(done + i + 1) / (float)n;
-                return (dryG0 + (dryG1 - dryG0) * t) * (gate0 + (gate1 - gate0) * t);
+                return g * (gate0 + (gate1 - gate0) * t);
             };
             if (ch < R) {
                 const float* s = b.out[(size_t)ch].data();
@@ -636,9 +997,36 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             juce::FloatVectorOperations::multiply(buf.getWritePointer(ch) + done, ambisonics.gain(ch), m);
         done += m;
     }
-    prevWet = wetG1;
-    prevDry = dryG1;
-    for (int i = 0; i < NS; ++i) { std::memcpy(prev[i], cur[i], sizeof prev[i]); prevGain[i] = curGain[i]; prevSourceGate[i] = sourceGate[i]; }
+    if (needModEval && n > 0) {
+        for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) liveAz[(size_t)o].store((float)lastSegAz[o], std::memory_order_relaxed);
+        const int nRoutes = std::min(modSet.count, verbp::kMaxModRoutes);
+        for (int i = 0; i < nRoutes; ++i) {
+            modLiveRaw[(size_t)i].store(segModRaw[(size_t)i], std::memory_order_relaxed);
+            modLiveValue[(size_t)i].store(segModValue[(size_t)i], std::memory_order_relaxed);
+            modLiveActive[(size_t)i].store(segModActive[(size_t)i], std::memory_order_relaxed);
+        }
+        modLiveCount.store(nRoutes, std::memory_order_relaxed);
+        modLiveGen.store(modSet.generation, std::memory_order_release);
+    }
+    if (n > 0) {
+        if (needModEval) {
+            for (int s = 0; s < verbp::kMaxModHostOuts; ++s)
+                if (modOutParams[(size_t)s])
+                    modOutParams[(size_t)s]->pushBlockValue((float)segHostOutNorm[s]);
+        } else {
+            for (int s = 0; s < verbp::kMaxModHostOuts; ++s)
+                if (modOutParams[(size_t)s])
+                    modOutParams[(size_t)s]->resetToNeutralIfChanged();
+        }
+    }
+    if (!phPresent || phPlaying) modFallbackClock += n;
+    prevWet = anySegMixMod ? segWetCur : wetG1;
+    prevDry = anySegMixMod ? segDryCur : dryG1;
+    for (int i = 0; i < NS; ++i) {
+        std::memcpy(prev[i], cur[i], sizeof prev[i]);
+        prevGain[i] = (useModPath && modProc->prevSegGainValid) ? modProc->prevSegGain[(size_t)i] : curGain[i];
+        prevSourceGate[i] = sourceGate[i];
+    }
     prevAnySourceSolo = anySourceSolo;
     std::memcpy(prev[verbp::kListener], cur[verbp::kListener], sizeof prev[verbp::kListener]);
 }
@@ -658,6 +1046,14 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
     {
         juce::ScopedLock l(dispLock);
         st.setProperty("sceneText", sceneText, nullptr);
+        if (!automationRange.isDefault()) {
+            st.setProperty("autoXMin", automationRange.xMin, nullptr);
+            st.setProperty("autoXMax", automationRange.xMax, nullptr);
+            st.setProperty("autoYMin", automationRange.yMin, nullptr);
+            st.setProperty("autoYMax", automationRange.yMax, nullptr);
+            st.setProperty("autoZMin", automationRange.zMin, nullptr);
+            st.setProperty("autoZMax", automationRange.zMax, nullptr);
+        }
         st.setProperty("sceneName", sceneName, nullptr);
         st.setProperty("inputMeters", inputMetersOn.load(), nullptr);
         st.setProperty("keepRouting", keepRouting.load(), nullptr);
@@ -729,7 +1125,7 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
     st.removeChild(st.getChildWithName("MovementPaths"),nullptr);
     juce::ValueTree paths("MovementPaths");
     for(int o=0;o<=verbp::kMaxSources;++o) {
-        const auto path=getMovementPath(o);if(path.points.empty()&&!path.lookAt&&path.orientOffset==0.0)continue;
+        const auto path=getMovementPath(o);if(path.points.empty()&&!path.lookAt&&path.orientOffset==0.0&&path.azKeys.empty()&&path.lfo.isDefault())continue;
         juce::ValueTree v("Path");v.setProperty("object",o,nullptr);
         v.setProperty("enabled",path.enabled,nullptr);v.setProperty("closed",path.closed,nullptr);
         v.setProperty("smooth",path.smooth,nullptr);v.setProperty("orient",path.orient,nullptr);v.setProperty("laps",path.laps,nullptr);
@@ -758,9 +1154,38 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
             }
             v.appendChild(pt,nullptr);
         }
+        for(const auto& k:path.azKeys){
+            juce::ValueTree ak("AzKey");
+            ak.setProperty("t",fmtDouble(k.t),nullptr);
+            ak.setProperty("az",fmtDouble(k.azDeg),nullptr);
+            if(k.easing!=verbp::AzimuthEasing::Linear){
+                const char* eName="linear";
+                if(k.easing==verbp::AzimuthEasing::EaseIn)eName="easeIn";
+                else if(k.easing==verbp::AzimuthEasing::EaseOut)eName="easeOut";
+                else if(k.easing==verbp::AzimuthEasing::EaseInOut)eName="easeInOut";
+                else if(k.easing==verbp::AzimuthEasing::Hold)eName="hold";
+                ak.setProperty("easing",juce::String(eName),nullptr);
+            }
+            v.appendChild(ak,nullptr);
+        }
+        if(!path.lfo.isDefault()){
+            juce::ValueTree lfoTree("Lfo");
+            lfoTree.setProperty("enabled",path.lfo.enabled,nullptr);
+            lfoTree.setProperty("shape",juce::String(verbp::lfoShapeName(path.lfo.shape)),nullptr);
+            lfoTree.setProperty("rateHz",fmtDouble(path.lfo.rateHz),nullptr);
+            lfoTree.setProperty("depth",fmtDouble(path.lfo.depth),nullptr);
+            lfoTree.setProperty("phaseDeg",fmtDouble(path.lfo.phaseDeg),nullptr);
+            lfoTree.setProperty("seed",(int)path.lfo.seed,nullptr);
+            v.appendChild(lfoTree,nullptr);
+        }
         paths.appendChild(v,nullptr);
     }
     if(paths.getNumChildren())st.appendChild(paths,nullptr);
+    st.removeChild(st.getChildWithName("Modulation"), nullptr);
+    {
+        const auto routes = getModulationRoutes();
+        if (!routes.empty()) st.appendChild(modRoutesToValueTree(routes), nullptr);
+    }
     st.removeChild(st.getChildWithName("RecordedPass"),nullptr);
     {
         std::shared_ptr<verb::Engine> eng;
@@ -817,6 +1242,20 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
     if (!xml) return;
     auto st = juce::ValueTree::fromXml(*xml);
     if (!st.isValid()) return;
+    const verbp::AutomationRange prevRange = getAutomationRange();
+    verbp::AutomationRange loadedRange;
+    if (st.hasProperty("autoXMin") && st.hasProperty("autoXMax")
+        && st.hasProperty("autoYMin") && st.hasProperty("autoYMax")
+        && st.hasProperty("autoZMin") && st.hasProperty("autoZMax")) {
+        loadedRange.xMin = (double)st.getProperty("autoXMin", loadedRange.xMin);
+        loadedRange.xMax = (double)st.getProperty("autoXMax", loadedRange.xMax);
+        loadedRange.yMin = (double)st.getProperty("autoYMin", loadedRange.yMin);
+        loadedRange.yMax = (double)st.getProperty("autoYMax", loadedRange.yMax);
+        loadedRange.zMin = (double)st.getProperty("autoZMin", loadedRange.zMin);
+        loadedRange.zMax = (double)st.getProperty("autoZMax", loadedRange.zMax);
+        loadedRange = verbp::AutomationRange::sanitised(loadedRange);
+    }
+    setAutomationRange(loadedRange, false, false);
     verb::Engine::RecordedPassData loadedPass;
     if (auto rpTree = st.getChildWithName("RecordedPass"); rpTree.isValid()) {
         const int objs = (int)rpTree.getProperty("objects", 0);
@@ -965,31 +1404,76 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
             std::vector<verbp::PathEasing> loadedEasings;
             bool anyTime=false,anyEase=false;
             for(auto pt:v) {
-                if(path.points.size()>64)break;
-                path.points.push_back({coordinate(pt.getProperty("x")),coordinate(pt.getProperty("y")),coordinate(pt.getProperty("z"))});
-                if(pt.hasProperty("time")){anyTime=true;loadedTimes.push_back(coordinate(pt.getProperty("time")));}
-                else loadedTimes.emplace_back();
-                auto ease=verbp::PathEasing::Linear;
-                if(pt.hasProperty("easing")){
-                    anyEase=true;
-                    const auto es=pt.getProperty("easing").toString();
-                    if(es=="linear")ease=verbp::PathEasing::Linear;
-                    else if(es=="easeIn")ease=verbp::PathEasing::EaseIn;
-                    else if(es=="easeOut")ease=verbp::PathEasing::EaseOut;
-                    else if(es=="easeInOut")ease=verbp::PathEasing::EaseInOut;
-                    else ease=(verbp::PathEasing)255;
+                if(pt.hasType("Point")){
+                    if(path.points.size()>64)continue;
+                    path.points.push_back({coordinate(pt.getProperty("x")),coordinate(pt.getProperty("y")),coordinate(pt.getProperty("z"))});
+                    if(pt.hasProperty("time")){anyTime=true;loadedTimes.push_back(coordinate(pt.getProperty("time")));}
+                    else loadedTimes.emplace_back();
+                    auto ease=verbp::PathEasing::Linear;
+                    if(pt.hasProperty("easing")){
+                        anyEase=true;
+                        const auto es=pt.getProperty("easing").toString();
+                        if(es=="linear")ease=verbp::PathEasing::Linear;
+                        else if(es=="easeIn")ease=verbp::PathEasing::EaseIn;
+                        else if(es=="easeOut")ease=verbp::PathEasing::EaseOut;
+                        else if(es=="easeInOut")ease=verbp::PathEasing::EaseInOut;
+                        else ease=(verbp::PathEasing)255;
+                    }
+                    loadedEasings.push_back(ease);
+                }else if(pt.hasType("AzKey")){
+                    if(path.azKeys.size()>verbp::kMaxAzKeys)continue;
+                    verbp::AzimuthKey ak;
+                    ak.t=coordinate(pt.getProperty("t"));
+                    ak.azDeg=coordinate(pt.getProperty("az"));
+                    if(pt.hasProperty("easing")){
+                        const auto es=pt.getProperty("easing").toString();
+                        if(es=="linear")ak.easing=verbp::AzimuthEasing::Linear;
+                        else if(es=="easeIn")ak.easing=verbp::AzimuthEasing::EaseIn;
+                        else if(es=="easeOut")ak.easing=verbp::AzimuthEasing::EaseOut;
+                        else if(es=="easeInOut")ak.easing=verbp::AzimuthEasing::EaseInOut;
+                        else if(es=="hold")ak.easing=verbp::AzimuthEasing::Hold;
+                        else ak.easing=(verbp::AzimuthEasing)255;
+                    }
+                    path.azKeys.push_back(ak);
+                }else if(pt.hasType("Lfo")){
+                    path.lfo.enabled=(bool)pt.getProperty("enabled",false);
+                    if(pt.hasProperty("shape")){
+                        verbp::LfoShape sh{};
+                        if(verbp::parseLfoShape(pt.getProperty("shape").toString().toRawUTF8(),sh))path.lfo.shape=sh;
+                        else path.lfo.shape=(verbp::LfoShape)255;
+                    }
+                    if(pt.hasProperty("rateHz"))path.lfo.rateHz=coordinate(pt.getProperty("rateHz"));
+                    if(pt.hasProperty("depth"))path.lfo.depth=coordinate(pt.getProperty("depth"));
+                    if(pt.hasProperty("phaseDeg"))path.lfo.phaseDeg=coordinate(pt.getProperty("phaseDeg"));
+                    if(pt.hasProperty("seed"))path.lfo.seed=(uint32_t)std::max(0,(int)pt.getProperty("seed",1));
                 }
-                loadedEasings.push_back(ease);
             }
             if(anyTime)path.times=std::move(loadedTimes);
             if(anyEase)path.easings=std::move(loadedEasings);
         }
         if(!verbp::validPath(path))path={};
-        else verbp::normalizePathTiming(path);
+        else {verbp::normalizePathTiming(path);verbp::normalizePathAzKeys(path);}
         setMovementPath(o,path);
         if(!st.getChildWithProperty("id",pathParamId(o)).isValid()) {juce::ValueTree p("PARAM");p.setProperty("id",pathParamId(o),nullptr);p.setProperty("value",0.f,nullptr);st.appendChild(p,nullptr);}
     }
+    if (const auto modTree = st.getChildWithName("Modulation"); modTree.isValid())
+        setModulationRoutes(modRoutesFromValueTree(modTree));
+    else
+        setModulationRoutes({});
     apvts.replaceState(st);
+    if (!isCreativeMode() || modConfiguredCount.load(std::memory_order_acquire) == 0) {
+        modProc->reset();
+        for (int s = 0; s < verbp::kMaxModHostOuts; ++s)
+            if (modOutParams[(size_t)s])
+                modOutParams[(size_t)s]->resetToNeutralIfChanged();
+    }
+    if (prevRange != loadedRange) {
+        for (int o = 0; o <= verbp::kMaxSources; ++o)
+            for (int k = 0; k < 3; ++k)
+                if (auto* p = apvts.getParameter(verbp::paramId(o, k)))
+                    p->sendValueChangedMessageToListeners(p->getValue());
+        updateHostDisplay(ChangeDetails().withParameterInfoChanged(true).withNonParameterStateChanged(true));
+    }
     const juce::String text = st.getProperty("sceneText").toString(), name = st.getProperty("sceneName").toString();
     if (text.isNotEmpty()) loadSceneText(text, name, false);
 }
@@ -1009,11 +1493,22 @@ void VerbProcessor::loadSceneText(const juce::String& text, const juce::String& 
     if(applyDefaults) {
         // Only explicit room/geometry loads own per-room overrides. State/preset
         // restores call this with false and retain their complete saved values.
-        try { std::istringstream check(text.toStdString()); verb::parseScene(check,name.toStdString());
+        verbp::AutomationRange nextRange;
+        bool parsedOk = false;
+        try { std::istringstream check(text.toStdString()); const auto parsed = verb::parseScene(check,name.toStdString());
+            parsedOk = true;
+            if (parsed.hasAutomationRange) {
+                nextRange.xMin = parsed.automationRange[0]; nextRange.xMax = parsed.automationRange[1];
+                nextRange.yMin = parsed.automationRange[2]; nextRange.yMax = parsed.automationRange[3];
+                nextRange.zMin = parsed.automationRange[4]; nextRange.zMax = parsed.automationRange[5];
+                nextRange = verbp::AutomationRange::sanitised(nextRange);
+            }
             cancelTargetRT60();
             for(const char* id:{"absorption","decayLow","decayMid","decayHigh"})setParamValue(id,1.);
         } catch(const std::exception&) { /* loader reports invalid scene without changing knobs */ }
+        if (parsedOk) setAutomationRange(nextRange, false, true);
         for(int o=0;o<=verbp::kMaxSources;++o)setMovementPath(o,{});
+        setModulationRoutes({});
         { juce::ScopedLock l(dispLock); savedRecordedPass = {}; }
     }
     queueScene(text, name, applyDefaults, keepPendingDefaults, false, 0);
@@ -1093,6 +1588,16 @@ void VerbProcessor::applyDefaultsFrom(const verb::Scene& sc, const double* home)
 void VerbProcessor::updateBounds(const verb::Scene& sc) {
     sceneHeight = sc.height;
     ceilOpen = sc.ceilMat < 0;
+    {
+        auto ws = std::make_unique<verbp::WallSnapshot>();
+        ws->count = std::min((int)sc.walls.size(), verbp::kMaxWallSnapshotSegs);
+        for (int i = 0; i < ws->count; ++i) {
+            const auto& w = sc.walls[(size_t)i];
+            ws->segs[(size_t)i] = {w.ax, w.ay, w.bx, w.by, w.z0, w.z1};
+        }
+        juce::ScopedLock wl(wallMailLock);
+        wallMailbox->publish(*ws);
+    }
     if (!sc.walls.empty()) {  // suggested slider range: bounding box plus a generous margin (not a limit)
         double x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
         for (auto& w : sc.walls) {
@@ -1220,6 +1725,14 @@ void VerbProcessor::removeSource(int index) {
         setParamValue(verbp::sourceSwitchId(i, true), sourceSolo[i + 1]->load());
     }
     v.erase(v.begin() + index);
+    {
+        auto routes = getModulationRoutes();
+        verbp::remapModRoutesOnSourceRemove(routes, index);
+        juce::ScopedLock ml(modLock);
+        modRoutes = std::move(routes);
+        modMailbox->publish(modRoutes.data(), (int)modRoutes.size());
+        modConfiguredCount.store((int)modRoutes.size(), std::memory_order_release);
+    }
     setSources(v);
 }
 
@@ -1362,6 +1875,18 @@ void VerbProcessor::scaleRoom(double f, bool includeObjects) {
         // positions are drawn from the seeded generator inside the scaled walls), the scene's own source / receiver / listener
         // poses (the live ones are the plugin parameters, scaled below).
     });
+    const auto curRange = getAutomationRange();
+    if (!curRange.isDefault()) {
+        auto nextRange = curRange.scaled(cx, cy, f, includeObjects);
+        if (!includeObjects) {
+            const int ns = (int)getSources().size();
+            for (int o = 0; o <= ns; ++o) {
+                const int obj = o == ns ? verbp::kListener : o;
+                nextRange.expandPoint(pv[obj][0]->load(), pv[obj][1]->load(), pv[obj][2]->load());
+            }
+        }
+        setAutomationRange(nextRange, false, true);
+    }
     if (includeObjects) {
         const int ns = (int)getSources().size();
         for (int o = 0; o <= ns; ++o) {
@@ -1371,6 +1896,88 @@ void VerbProcessor::scaleRoom(double f, bool includeObjects) {
             setParamValue(verbp::paramId(obj, 2), pv[obj][2]->load() * f);
         }
     }
+}
+
+verbp::AutomationRange VerbProcessor::getAutomationRange() const {
+    juce::ScopedLock l(dispLock);
+    return automationRange;
+}
+
+void VerbProcessor::setAutomationRange(const verbp::AutomationRange& rangeRaw, bool clampObjects, bool notifyHost) {
+    const auto next = verbp::AutomationRange::sanitised(rangeRaw);
+    verbp::AutomationRange prev;
+    bool changed = false;
+    {
+        juce::ScopedLock l(dispLock);
+        prev = automationRange;
+        changed = (prev != next);
+        automationRange = next;
+    }
+    axisStores[0]->setRange((float)next.xMin, (float)next.xMax);
+    axisStores[1]->setRange((float)next.yMin, (float)next.yMax);
+    axisStores[2]->setRange((float)next.zMin, (float)next.zMax);
+
+    for (int o = 0; o <= verbp::kMaxSources; ++o) {
+        for (int k = 0; k < 3; ++k) {
+            const float cur = pv[o][k]->load();
+            const float target = clampObjects ? (float)next.clampAxis(k, (double)cur) : cur;
+            const bool clamped = clampObjects && std::abs(target - cur) > 1e-6f;
+            if (clamped) {
+                if (auto* p = apvts.getParameter(verbp::paramId(o, k)))
+                    p->setValueNotifyingHost(p->convertTo0to1(target));
+            } else if (notifyHost && changed) {
+                if (auto* p = apvts.getParameter(verbp::paramId(o, k))) {
+                    p->sendValueChangedMessageToListeners(p->convertTo0to1(cur));
+                    // Restore exact unnormalised metre value: ParameterAdapter's
+                    // denormalise(convertTo0to1(cur)) can drift by 1-2 ULPs on non-power-of-two ranges.
+                    if (auto* raw = apvts.getRawParameterValue(verbp::paramId(o, k)))
+                        raw->store(cur, std::memory_order_relaxed);
+                }
+            }
+        }
+    }
+    if (changed) {
+        bumpRevision();
+        if (notifyHost)
+            updateHostDisplay(ChangeDetails().withParameterInfoChanged(true).withNonParameterStateChanged(true));
+    }
+}
+
+verbp::AutomationRange VerbProcessor::computeFitAutomationRange(double marginM) const {
+    verb::Scene sc;
+    std::vector<verbp::SourceCfg> sources;
+    verbp::OutputCfg output;
+    {
+        juce::ScopedLock l(dispLock);
+        sc = display;
+        sources = srcCfg;
+        output = outCfg;
+    }
+    std::array<verbp::MovementPath, verbp::kMaxSources + 1> allPaths;
+    {
+        juce::ScopedLock l(pathLock);
+        allPaths = movementPaths;
+    }
+    auto readParam = [this](const char* id) -> double {
+        if (auto* p = apvts.getRawParameterValue(id)) return (double)p->load();
+        return 0.0;
+    };
+    return verbp::computeFitAutomationRange(sc, sources, output.layout, output.radius, allPaths, readParam, marginM);
+}
+
+verbp::AutomationRange VerbProcessor::fitAutomationRangeToScene(bool clampObjects, bool notifyHost, double marginM) {
+    const auto fitted = computeFitAutomationRange(marginM);
+    setAutomationRange(fitted, clampObjects, notifyHost);
+    return fitted;
+}
+
+int VerbProcessor::countObjectsOutsideRange(const verbp::AutomationRange& range) const {
+    const int nSrc = (int)getSources().size();
+    auto readParam = [this](const char* id) -> double {
+        if (auto* p = apvts.getRawParameterValue(id)) return (double)p->load();
+        return 0.0;
+    };
+    return verbp::countObjectsOutsideRange(range, nSrc, readParam);
 }
 
 void VerbProcessor::setPointOffset(int source, int channel, float ox, float oy, float oz) {
@@ -1624,7 +2231,9 @@ void VerbProcessor::publishWebDiagnostics() {
     if (listenerActive) activeObjects.push_back(verbp::kListener);
     const double scale=engineSize.load()*.01,top=webMaximumZ();
     auto yawMatchFor=[&](int o,double x,double y)->verb::BakedYawMatch{
-        if(verbp::orientModeOf(rawPaths[(size_t)o])!=verbp::OrientMode::Manual)return {};
+        const auto& rp=rawPaths[(size_t)o];
+        const bool hasActiveKeys=rp.enabled&&rp.points.size()>=2&&!rp.azKeys.empty();
+        if(verbp::orientModeOf(rp)!=verbp::OrientMode::Manual||hasActiveKeys)return {};
         return {true,x*scale,y*scale};
     };
     auto groupMemberCount=[&](int g)->int{
@@ -1679,26 +2288,54 @@ void VerbProcessor::publishWebDiagnostics() {
         // E28: owner that looks at a moving member of the SAME Group with a different time map (Start/End/keys/easing/laps). Inside one Group
         // everything is a function of the single Position u, so the owner is described indexed by u itself (identity map: startU=0,endU=1,
         // laps=1, distance[i]=u_i*D). Stations are the exact joint states: position = own.evaluate(u), yaw from the target's evaluate(u).
-        if(dyn&&!rider&&!own.lookPoint&&movingObj(own.lookTarget)&&own.group>=0&&own.group==rawPaths[(size_t)own.lookTarget].group&&!timingEqual(own,rawPaths[(size_t)own.lookTarget])){
+        // E28 / G1: owner looking at a moving Group member with different timing, OR Manual path with active azimuth keys.
+        // Everything is a function of Position u in [0, 1], described with uIndexed=true and distance[i]=u_i*D.
+        const bool lookDiffTiming=dyn&&!rider&&!own.lookPoint&&movingObj(own.lookTarget)&&own.group>=0&&own.group==rawPaths[(size_t)own.lookTarget].group&&!timingEqual(own,rawPaths[(size_t)own.lookTarget]);
+        const bool hasActiveKeys=!rider&&verbp::orientModeOf(own)==verbp::OrientMode::Manual&&own.enabled&&own.points.size()>=2&&!own.azKeys.empty();
+        if(lookDiffTiming||hasActiveKeys){
             verbp::CompiledPath liveO=compiled;liveO.laps=origLaps;
-            verbp::CompiledPath liveT;liveT.build(rawPaths[(size_t)own.lookTarget]);
+            verbp::CompiledPath liveT;
+            if(lookDiffTiming)liveT.build(rawPaths[(size_t)own.lookTarget]);
             struct US{double u;verbp::PathPoint q;double yaw;};
             auto stAt=[&](double u)->US{
-                const auto q=liveO.evaluate(u),tp=liveT.evaluate(u);double look=0;
+                const auto q=liveO.evaluate(u);
+                if(hasActiveKeys)
+                    return {u,q,liveO.evaluateAzimuth(u,baseYaw)};
+                const auto tp=liveT.evaluate(u);double look=0;
                 const bool ok=verbp::lookAtYaw(q[0],q[1],tp[0],tp[1],look);
                 return {u,q,verbp::orientedAzimuth(verbp::OrientMode::LookAt,baseYaw,0.0,ok,look,own.orientOffset)};
             };
             std::vector<double> bp{0.0,1.0};
+            std::vector<double> keyBp;
+            if(hasActiveKeys){
+                for(size_t ki=0;ki<own.azKeys.size();++ki){
+                    const double tk=std::clamp(own.azKeys[ki].t*0.01,0.0,1.0);
+                    keyBp.push_back(tk);
+                    if(ki>0&&own.azKeys[ki-1].easing==verbp::AzimuthEasing::Hold){
+                        const double prevTk=std::clamp(own.azKeys[ki-1].t*0.01,0.0,1.0);
+                        if(tk-prevTk>5e-9)keyBp.push_back(tk-std::min(1e-8,0.25*(tk-prevTk)));
+                    }
+                }
+            }
+            auto nearKeyBp=[&](double u){
+                for(double kv:keyBp)if(std::abs(u-kv)<=2e-8)return true;
+                return false;
+            };
             auto addBreaks=[&](const verbp::CompiledPath& c){
-                if(c.hasTiming){bp.push_back(c.startNorm);bp.push_back(c.endNorm);for(const auto& k:c.timeKeys)bp.push_back(c.startNorm+k.t*(c.endNorm-c.startNorm));}
+                if(c.hasTiming){
+                    for(double u:{c.startNorm,c.endNorm})if(!nearKeyBp(u))bp.push_back(u);
+                    for(const auto& k:c.timeKeys){const double u=c.startNorm+k.t*(c.endNorm-c.startNorm);if(!nearKeyBp(u))bp.push_back(u);}
+                }
                 if(c.closed&&c.laps>1)for(int l=1;l<c.laps;++l){   // u where the arc fraction completes lap l (time map is monotone)
                     const double target=(double)l/c.laps;double lo=0,hi=1;
                     for(int it=0;it<60;++it){const double mid=.5*(lo+hi);if(c.evaluateTimeMap(mid)<target)lo=mid;else hi=mid;}
-                    bp.push_back(hi);
+                    if(!nearKeyBp(hi))bp.push_back(hi);
                 }
             };
-            addBreaks(liveO);addBreaks(liveT);
-            for(int i=1;i<64;++i)bp.push_back((double)i/64.);
+            addBreaks(liveO);
+            if(lookDiffTiming)addBreaks(liveT);
+            for(int i=1;i<64;++i){const double u=(double)i/64.;if(!nearKeyBp(u))bp.push_back(u);}
+            for(double kv:keyBp)bp.push_back(kv);
             for(auto& v:bp)v=std::clamp(v,0.0,1.0);
             std::sort(bp.begin(),bp.end());
             std::vector<double> grid;for(double v:bp)if(grid.empty()||v-grid.back()>1e-9)grid.push_back(v);
@@ -2224,6 +2861,8 @@ void VerbProcessor::run() {
             nb->out.assign((size_t)nb->R, std::vector<float>((size_t)nb->maxBlock, 0.f));
             nb->detector.assign((size_t)nb->maxBlock,0.f);
             nb->lfe.assign((size_t)nb->maxBlock, 0.f);
+            nb->wetMix.assign((size_t)nb->maxBlock, 1.f);
+            nb->dryMix.assign((size_t)nb->maxBlock, 0.f);
             const auto spk = verb::speakersFor(lay, hostCh);
             for (size_t i = 0; i < spk.size() && i < (size_t)nb->R; ++i)
                 if (spk[i].lfe) nb->lfeOut = (int)i;
@@ -2371,8 +3010,10 @@ verb::Scene VerbProcessor::getEnergyScene(int source, bool webSnapshot) const {
             if (rp.enabled && rp.points.size() >= 2) {
                 verbp::CompiledPath c; c.build(rp);
                 const int driver = verbp::pathGroupDriver(rawPaths, (int)cfg.size(), o);
-                double yaw = 0; const auto q = c.evaluate(pathParams[driver]->load(), &yaw);
+                const double u = pathParams[driver]->load();
+                double yaw = 0; const auto q = c.evaluate(u, &yaw);
                 for (int k = 0; k < 3; ++k) orient[o][k] = q[(size_t)k];
+                orient[o][3] = c.evaluateAzimuth(u, orient[o][3]);
                 tan[o] = yaw; act[o] = true;
             }
         }
@@ -2577,6 +3218,111 @@ bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& e
             st.removeChild(st.getChildWithName(child), nullptr);
             st.appendChild(local.getChildWithName(child).createCopy(), nullptr);
         }
+        {
+            const auto localSourcesCount = (int)getSources().size();
+            const auto localMod = modRoutesFromValueTree(local.getChildWithName("Modulation"));
+            const auto presetMod = modRoutesFromValueTree(st.getChildWithName("Modulation"));
+            std::vector<verbp::ModulationRoute> merged;
+            for (const auto& r : localMod) {
+                if ((int)merged.size() >= verbp::kMaxModRoutes) break;
+                if (verbp::modTargetIsRoomGlobal(r.target)) continue;
+                const bool objOk = (r.object == verbp::kListener) || (r.object >= 0 && r.object < localSourcesCount);
+                const bool tgtOk = verbp::modTargetIsGlobal(r.target)
+                                || (r.targetObject < 0 && r.object < localSourcesCount)
+                                || (r.targetObject >= 0 && r.targetObject < localSourcesCount);
+                if (objOk && tgtOk) merged.push_back(r);
+            }
+            for (const auto& r : presetMod) {
+                if ((int)merged.size() >= verbp::kMaxModRoutes) break;
+                if (!verbp::modTargetIsRoomGlobal(r.target)) continue;
+                const bool objOk = (r.object == verbp::kListener) || (r.object >= 0 && r.object < localSourcesCount);
+                if (objOk) merged.push_back(r);
+            }
+            st.removeChild(st.getChildWithName("Modulation"), nullptr);
+            if (!merged.empty()) st.appendChild(modRoutesToValueTree(merged), nullptr);
+        }
+        if (st.hasProperty("autoXMin") && st.hasProperty("autoXMax")
+            && st.hasProperty("autoYMin") && st.hasProperty("autoYMax")
+            && st.hasProperty("autoZMin") && st.hasProperty("autoZMax")) {
+            verbp::AutomationRange ar;
+            ar.xMin = (double)st.getProperty("autoXMin", ar.xMin);
+            ar.xMax = (double)st.getProperty("autoXMax", ar.xMax);
+            ar.yMin = (double)st.getProperty("autoYMin", ar.yMin);
+            ar.yMax = (double)st.getProperty("autoYMax", ar.yMax);
+            ar.zMin = (double)st.getProperty("autoZMin", ar.zMin);
+            ar.zMax = (double)st.getProperty("autoZMax", ar.zMax);
+            ar = verbp::AutomationRange::sanitised(ar);
+            if (!ar.isDefault()) {
+                const auto localSources = getSources();
+                const auto localOutput = getOutputCfg();
+                auto expandObjExtents = [&](int obj, double x, double y, double z, double azDeg, const verbp::SourceCfg* cfg) {
+                    ar.expandPoint(x, y, z);
+                    if (cfg && !cfg->sum) {
+                        const int nCh = cfg->effectiveChannels();
+                        if (cfg->freePoints && nCh > 0) {
+                            const double rad = azDeg * verb::kPi / 180.0;
+                            const double cs = std::cos(rad), sn = std::sin(rad);
+                            const auto pts = verbp::buildPoints(std::vector<verbp::SourceCfg>{*cfg});
+                            for (const auto& pt : pts) {
+                                if (pt.channel < 0 || pt.channel >= (int)cfg->ox.size()) continue;
+                                const double ox = (double)cfg->ox[(size_t)pt.channel];
+                                const double oy = (double)cfg->oy[(size_t)pt.channel];
+                                const double oz = (double)cfg->oz[(size_t)pt.channel];
+                                ar.expandPoint(x + ox * cs - oy * sn, y + ox * sn + oy * cs, z + oz);
+                            }
+                        } else if (nCh > 1 && cfg->spread > 0.0) {
+                            ar.expandPoint(x - cfg->spread, y - cfg->spread, z);
+                            ar.expandPoint(x + cfg->spread, y + cfg->spread, z);
+                        }
+                    } else if (!cfg && localOutput.radius > 0.0) {
+                        ar.expandPoint(x - localOutput.radius, y - localOutput.radius, z);
+                        ar.expandPoint(x + localOutput.radius, y + localOutput.radius, z);
+                    }
+                };
+                for (int i = 0; i < (int)localSources.size() && i < verbp::kMaxSources; ++i) {
+                    expandObjExtents(i, pv[i][0]->load(), pv[i][1]->load(), pv[i][2]->load(), pv[i][3]->load(), &localSources[(size_t)i]);
+                    const auto lp = getMovementPath(i);
+                    for (const auto& pt : lp.points) ar.expandPoint(pt[0], pt[1], pt[2]);
+                    if (lp.lookAt && lp.lookPoint) ar.expandPoint(lp.lookPos[0], lp.lookPos[1], lp.lookPos[2]);
+                }
+                expandObjExtents(verbp::kListener, pv[verbp::kListener][0]->load(), pv[verbp::kListener][1]->load(), pv[verbp::kListener][2]->load(), pv[verbp::kListener][3]->load(), nullptr);
+                {
+                    const auto lp = getMovementPath(verbp::kListener);
+                    for (const auto& pt : lp.points) ar.expandPoint(pt[0], pt[1], pt[2]);
+                    if (lp.lookAt && lp.lookPoint) ar.expandPoint(lp.lookPos[0], lp.lookPos[1], lp.lookPos[2]);
+                }
+                auto paramVal = [&](const juce::String& id, double fallback) -> double {
+                    auto p = st.getChildWithProperty("id", id);
+                    return p.isValid() && p.hasProperty("value") ? (double)p.getProperty("value") : fallback;
+                };
+                for (int i = 0; i < (int)localSources.size() && i < verbp::kMaxSources; ++i) {
+                    expandObjExtents(i, paramVal(verbp::paramId(i, 0), 0.0), paramVal(verbp::paramId(i, 1), 0.0),
+                                     paramVal(verbp::paramId(i, 2), 1.5), paramVal(verbp::paramId(i, 3), 0.0), &localSources[(size_t)i]);
+                }
+                expandObjExtents(verbp::kListener, paramVal("lx", 0.0), paramVal("ly", 0.0), paramVal("lz", 1.5), paramVal("laz", 0.0), nullptr);
+                if (auto pathsTree = st.getChildWithName("MovementPaths"); pathsTree.isValid()) {
+                    for (auto pathNode : pathsTree) {
+                        for (auto pt : pathNode)
+                            if (pt.hasType("Point"))
+                                ar.expandPoint((double)pt.getProperty("x", 0.0), (double)pt.getProperty("y", 0.0), (double)pt.getProperty("z", 0.0));
+                        if ((bool)pathNode.getProperty("lookAt", false) && (bool)pathNode.getProperty("lookPoint", false))
+                            ar.expandPoint((double)pathNode.getProperty("lookX", 0.0), (double)pathNode.getProperty("lookY", 0.0), (double)pathNode.getProperty("lookZ", 1.5));
+                    }
+                }
+                ar = verbp::AutomationRange::sanitised(ar);
+                if (ar.isDefault()) {
+                    for (const char* prop : {"autoXMin", "autoXMax", "autoYMin", "autoYMax", "autoZMin", "autoZMax"})
+                        st.removeProperty(prop, nullptr);
+                } else {
+                    st.setProperty("autoXMin", ar.xMin, nullptr);
+                    st.setProperty("autoXMax", ar.xMax, nullptr);
+                    st.setProperty("autoYMin", ar.yMin, nullptr);
+                    st.setProperty("autoYMax", ar.yMax, nullptr);
+                    st.setProperty("autoZMin", ar.zMin, nullptr);
+                    st.setProperty("autoZMax", ar.zMax, nullptr);
+                }
+            }
+        }
     }
     juce::MemoryBlock data;
     auto stateXml = st.createXml();
@@ -2734,4 +3480,43 @@ bool VerbProcessor::setMovementPath(int object,const verbp::MovementPath& path) 
     if(object<0 || object>verbp::kMaxSources || !verbp::validPath(path))return false;
     {juce::ScopedLock lock(pathLock);movementPaths[(size_t)object]=path;pathMailboxes[(size_t)object].publish(path);}
     bumpRevision();updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));return true;
+}
+std::vector<verbp::ModulationRoute> VerbProcessor::getModulationRoutes() const {
+    juce::ScopedLock lock(modLock);
+    return modRoutes;
+}
+bool VerbProcessor::setModulationRoutes(const std::vector<verbp::ModulationRoute>& routes) {
+    if ((int)routes.size() > verbp::kMaxModRoutes) return false;
+    for (const auto& r : routes)
+        if (!verbp::validModRoute(r)) return false;
+    {
+        juce::ScopedLock lock(modLock);
+        modRoutes = routes;
+        modMailbox->publish(modRoutes.data(), (int)modRoutes.size());
+        modConfiguredCount.store((int)modRoutes.size(), std::memory_order_release);
+    }
+    bumpRevision();
+    updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
+    return true;
+}
+
+bool VerbProcessor::webModTelemetry(ModLiveSample* out, int maxCount, int& outCount) const noexcept {
+    const int cfgCount = std::clamp(modConfiguredCount.load(std::memory_order_acquire), 0, verbp::kMaxModRoutes);
+    outCount = cfgCount;
+    if (!out || maxCount <= 0 || cfgCount == 0) return false;
+    const uint64_t liveGen = modLiveGen.load(std::memory_order_acquire);
+    const uint64_t wantGen = modMailbox ? modMailbox->publishedGeneration() : 0;
+    const int liveCount = modLiveCount.load(std::memory_order_relaxed);
+    const bool fresh = isCreativeMode() && (wantGen != 0 && liveGen == wantGen && liveCount == cfgCount);
+    const int nCopy = std::min(cfgCount, maxCount);
+    for (int i = 0; i < nCopy; ++i) {
+        if (fresh) {
+            out[i].raw = modLiveRaw[(size_t)i].load(std::memory_order_relaxed);
+            out[i].value = modLiveValue[(size_t)i].load(std::memory_order_relaxed);
+            out[i].active = modLiveActive[(size_t)i].load(std::memory_order_relaxed) != 0;
+        } else {
+            out[i] = ModLiveSample{};
+        }
+    }
+    return fresh;
 }

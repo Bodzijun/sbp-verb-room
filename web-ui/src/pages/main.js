@@ -1,9 +1,10 @@
 import { autoNumberSources } from '../viewport/t13.js';
 import { applySourceBatch, canSum, planSourceFormat, planSourceSum, sumState } from './source-actions.js';
-import { element, button, select, check, row, note, unavailable, scrollArea } from '../components/dom.js';
+import { element, button, select, check, row, note, unavailable, scrollArea, accordionSection } from '../components/dom.js';
 import { tabs } from '../components/tabs.js';
 import { parameterToggle, outputParts, makeupControls, sourceParts, listenerParts, sceneFacts, parameterSwitch, heading } from '../components/inspector.js';
 import { decayPanel } from '../components/decay.js';
+import { modulationPanel } from '../components/modulation.js';
 import { outputMeters, sourceMeters, METER_MODES, getMeterMode, setMeterMode } from '../components/meters.js';
 import { slider, numericField } from '../components/slider.js';
 import { FORMATS, LAYOUTS, MICS, channels, budget } from '../state/selectors.js';
@@ -49,11 +50,38 @@ function selectedCard(ctx) {
   const body = element('div', { className: 'card-grid' });
   let disposeScene = null;
   if (ref?.kind === 'source') {
-    const p = sourceParts(ctx, ref.index);
-    if (p) body.append(element('div', { className: 'stack pose-column' }, [heading('Pose'), ...p.position]), element('div', { className: 'stack settings-column' }, [...p.identity, ...p.routing, ...p.level, ...p.points]));
+    const p = sourceParts(ctx, ref.index, { collapsible: true });
+    if (p) {
+      const poseSections = [
+        accordionSection(store, 'main.pose', { title: 'Pose', className: 'main-acc-pose', nodes: p.pose }),
+        accordionSection(store, 'main.orientation', { title: 'Orientation / Azimuth keys', nodes: p.orientation }),
+        accordionSection(store, 'main.path', { title: 'Path', hint: p.pathHint, hintClass: 'path-meta', nodes: p.path })
+      ].filter(Boolean);
+      const settingsSections = [
+        accordionSection(store, 'main.source.routing', { title: 'Source & routing', nodes: [...p.identity, ...p.routingOnly] }),
+        accordionSection(store, 'main.source.directivity', { title: 'Directivity', hint: p.directivityHint, nodes: p.directivity }),
+        accordionSection(store, 'main.source.level', { title: 'Level', nodes: p.level }),
+        p.points.length ? accordionSection(store, 'main.source.points', { title: 'Channel points', nodes: p.points }) : null
+      ].filter(Boolean);
+      body.append(
+        element('div', { className: 'stack pose-column' }, [scrollArea(poseSections, { rootClass: 'col-sa', className: 'col-scroll pose-scroll stack' })]),
+        element('div', { className: 'stack settings-column' }, [scrollArea(settingsSections, { rootClass: 'col-sa', className: 'col-scroll settings-scroll stack' })])
+      );
+    }
   } else if (ref?.kind === 'listener') {
-    const p = listenerParts(ctx);
-    body.append(element('div', { className: 'stack pose-column' }, [heading('Pose'), ...p.position]), element('div', { className: 'stack settings-column' }, [heading('Output / microphones'), ...p.output.main]));
+    const p = listenerParts(ctx, { collapsible: true });
+    const poseSections = [
+      accordionSection(store, 'main.pose', { title: 'Pose', className: 'main-acc-pose', nodes: p.pose }),
+      accordionSection(store, 'main.orientation', { title: 'Orientation / Azimuth keys', nodes: p.orientation }),
+      accordionSection(store, 'main.path', { title: 'Path', hint: p.pathHint, hintClass: 'path-meta', nodes: p.path })
+    ].filter(Boolean);
+    const settingsSections = [
+      accordionSection(store, 'main.listener.output', { title: 'Output / microphones', nodes: p.output.main })
+    ].filter(Boolean);
+    body.append(
+      element('div', { className: 'stack pose-column' }, [scrollArea(poseSections, { rootClass: 'col-sa', className: 'col-scroll pose-scroll stack' })]),
+      element('div', { className: 'stack settings-column' }, [scrollArea(settingsSections, { rootClass: 'col-sa', className: 'col-scroll settings-scroll stack' })])
+    );
   } else {
     const usage = budget(state.document);
     const effScene = viewportState(state, false).document.scene;
@@ -239,9 +267,9 @@ export function outputPanel(ctx) {
 }
 export function mainBottom(ctx) {
   const { store } = ctx, root = element('section', { className: `bottom panel bottom-${store.view.tab}` });
-  root.append(tabs([['decay', 'Decay'], ['sources', 'Sources'], ['mix', 'Mix'], ['output', 'Settings']], store.view.tab, tab => store.setView({ tab })));
+  root.append(tabs([['decay', 'Decay'], ['sources', 'Sources'], ['mix', 'Mix'], ['modulation', 'Modulation'], ['output', 'Settings']], store.view.tab, tab => store.setView({ tab })));
   const content = element('div', { className: 'bottom-content', role: 'tabpanel', 'aria-labelledby': `tab-${store.view.tab}` });
-  content.append(({ decay: decayPanel, sources: sourcesPanel, mix: mixPanel, output: outputPanel })[store.view.tab](ctx)); root.append(content); return root;
+  content.append(({ decay: decayPanel, sources: sourcesPanel, mix: mixPanel, modulation: modulationPanel, output: outputPanel })[store.view.tab](ctx)); root.append(content); return root;
 }
 
 // Both actions use the same begin/change/end protocol as every host-bound control.

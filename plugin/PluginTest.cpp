@@ -179,12 +179,19 @@ static int testPresetsSuite();
 static int testVslHallSuite();
 
 #include "F8Test.h"
+#include "AzimuthKeysTest.h"
+#include "AutomationRangeTest.h"
+#include "ModulationTest.h"
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
     struct EnvSuite { const char* name; int (*fn)(); };
     static const EnvSuite suites[] = {
+        {"VERB_ONLY_G4", testG4Modulation},
+        {"VERB_ONLY_G8", testG8ModulationHostOutputs},
+        {"VERB_ONLY_G3", testG3AutomationRangeFast},
+        {"VERB_ONLY_G1", testAzimuthKeys},
         {"VERB_ONLY_E12_METERS", testE12Meters},
         {"VERB_ONLY_E12_STRESS", testE12Stress},
         {"VERB_ONLY_E11", testE11Processor},
@@ -2536,6 +2543,10 @@ receiver R 0 0 1.5 0 0
         auto sc2 = verb::parseScene(is2, "room text");
         check(std::fabs(sc2.listenerPos.x - 3.3) < 0.01, "the saved room carries the current positions");
     }
+    testAzimuthKeysFast();
+    testG3AutomationRangeFast();
+    testG4ModulationFast();
+    testG8ModulationHostOutputs();
     std::printf(fails ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", fails);
     return fails ? 1 : 0;
 }

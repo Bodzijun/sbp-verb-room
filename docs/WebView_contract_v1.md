@@ -445,3 +445,62 @@ Persistence: `VerbState` і format2 `.verbroom` зберігають Size/Predel
 - `path.recordClear` скасовує також чернетку запису у станах Armed і Recording. Таблиці та поточний розрахунок із цього запису втрачають чинність. Намальовані шляхи та їхні таблиці зберігаються. `path.bakeClear` видаляє таблиці й зберігає запис. Після Stop запікання запускається вручну.
 - У `status.load.pathBake` додано необов'язкові `bakeSource` (`none`, `drawn`, `recorded`), `bakeSourceGroup` (номер групи від 1, якщо всі намальовані шляхи запікаються як одна іменована група) і `recordingNote` (ASCII-пояснення для збереженого запису, якщо запікання вибирає намальовані шляхи). Число відліків береться з чинного `passSamples`. Джерело визначає рушій. Придатні намальовані шляхи мають пріоритет, а придатний запис використовується за порожніх або заблокованих намальованих шляхів.
 - `reason` зі значенням `Live motion is outside the baked recording - estimating the tail` означає, що під час відтворення пози вийшли за межі вже запеченого запису. Записані пози, як і раніше, зберігаються в стані проєкту (`RecordedPass`). `.verbroom` їх пропускає.
+
+## G1 · Ключі азимуту (core)
+
+- `document.paths[]` отримує необов'язкове поле `azKeys?: Array<{t: number, az: number, easing: "linear"|"easeIn"|"easeOut"|"easeInOut"|"hold"}>` (до 128 елементів, строго зростаючі `t ∈ [0, 100]`, `az ∈ [-180, 180]`). Якщо ключів немає, `EditorBridge` властивість `azKeys` опускає.
+- Ключі азимуту діють **лише** в режимі орієнтації `manual` (`!orient && !lookAt`) і **лише** для об'єктів з увімкненим рухомим шляхом (`enabled && points.length >= 2`), замінюючи ручний хост-параметр азимуту (`s{n}az` / `laz`) інтерпольованим кутом уздовж осі `Position` (`0..100 %`, найкоротша дуга через `±180°`). В `along` та `lookAt` ключі зберігаються без впливу на кут.
+- Додано undoable-команди (`KeyType::Path`):
+  - `path.setAzimuthKey {object, t, az, easing?, index?}` — створення ключа на позиції `t` (або оновлення існуючого за `index` чи збігом `|t - k.t| < 1e-6`), із `coalesceKey = object + "/az/" + index`, коли передано `index`.
+  - `path.removeAzimuthKey {object, index}` — видалення ключа за індексом.
+  - `path.setAzimuthKeys {object, keys}` — пакетне встановлення масиву ключів (`0..128`).
+  - `path.set` приймає необов'язкове `azKeys`; за відсутності поля наявні ключі зберігаються. `path.clear` очищує `azKeys` разом із точками шляху (оскільки ключі прив'язані до рухомого шляху), залишаючи налаштування орієнтації `lookAt`/`orientOffset`.
+
+## G3 · Поекземплярний діапазон позиційної автоматизації
+
+- Ідентифікатори параметрів APVTS лишаються незмінними (`s1x..s32z`, `lx..lz`; 283 параметри). Внутрішній рушій, `pv[][]`, запис і запікання працюють у фізичних метрах.
+- `document.scene.automationRange?: { xM: [number, number], yM: [number, number], zM: [number, number] }` описує поточні межі автоматизації позицій екземпляра (типово `xM: [-200, 200]`, `yM: [-200, 200]`, `zM: [0, 30]`; мін. ширина `1.0 м` по X/Y, `0.5 м` по Z).
+- Поточний `automationRange` одразу відображається в динамічних `min`/`max`/`default` дескрипторів `parameters.descriptors` і перевіряється в `WebParameterBindings::apply` та `listener.set`. `validPath`/`path.*` лишаються у глобальних межах `[-200, 200] / [0, 30]`.
+- Додано undoable-команди (`KeyType::AutomationRange`, non-acoustic якщо жоден об'єкт не clamped, тому без інвалідації `BakeCache`; разом з обтиснутими параметрами `Param` — один крок `history.undo`/`redo`):
+  - `room.fitAutomationRange { marginM? }` — розраховує межі за стінами, зонами, активними габаритами джерел/слухача та всіма точками траєкторій і `lookPos`, із запасом (за замовчуванням `clamp(0.1 * span, 1, 5)` м по X/Y, `+1 м` або `+2 м` при open sky по Z) та округленням назовні до `0.5 м`.
+  - `room.setAutomationRange { reset?: boolean, xM?: [min, max], yM?: [min, max], zM?: [min, max] }` — встановлює межі вручну (або скидає на глобальні при `reset: true`), обтискаючи об'єкти поза новим боксом.
+- `room.scale` при не-default `automationRange` масштабує межі разом із кімнатою (центр `(cx, cy)`, `z * factor` за `includeObjects`) перед обтисканням позицій. Персистентність: атрибути `autoXMin..autoZMax` на `<VerbState>` (лише коли не-default); при імпорті `.verbroom` із `Keep I/O` межі розширюються (`union`) для локальних позицій/шляхів; `.txt` без `#@verbroom-editor-v2 automationRange` скидають діапазон на глобальний.
+
+## G4 · Ядро модуляції руху (етапи M1 + M2)
+
+- Нові необов’язкові поля документа (без зміни 283 APVTS-параметрів і без зміни `formatVersion="2"`):
+  - `document.modulation?: { routes: ModRoute[] }` (до `64` маршрутів; якщо маршрутів немає — поле опускається).
+  - `document.paths[].lfo?: { enabled: boolean, shape: "sine"|"triangle"|"saw"|"square"|"smoothRandom", rateHz: number, depth: number, phaseDeg: number, seed: integer }` (`rateHz ∈ [0, 8]`, без прив’язки до темпу хоста; якщо значення типові — поле опускається).
+- Кожен маршрут `ModRoute` має: `enabled`, `object` (`0..31` джерело або `32` слухач), `driver` (`distanceToListener`, `distanceToPoint`, `azimuthToListener`, `elevation`, `x`, `y`, `z`, `speed`, `radialSpeed`, `pathPosition`, `distanceToNearestWall`), необов’язкове `point: [x,y,z]`, `curve` (`inputRange: [min,max]`, `outputRange: [min,max]`, `invert`, `clamp`, `nodes` `2..8` вузлів `{x, y, smooth?}`), `targetObject` (`-1` сам об’єкт / глобальна ціль, або `0..31`), `target` (`sourceGain`, `sourceLowPass`, `sourceHighPass`, `sourceLowShelf`, `sourceHighShelf`, `earlyLevel`, `tailLevel`, `mix`), `attackMs` (`0..2000`), `releaseMs` (`0..5000`).
+- Діють **лише в режимі Creative** (у Physical — нульовий вплив, побітова ідентичність до стану без модуляції; живі перемикання без клацань). Кілька маршрутів на одну ціль додаються (у дБ/% та у log₂-октавах відносно відкритого зрізу 20 кГц / 20 Гц для LPF/HPF) і затискаються у робочому діапазоні цілі. Path LFO додає `depth * LFO(t)` до позиції на траєкторії (замкнені загортаються у `[0,1)`, відкриті затискаються в `[0,1]`), працює з транспортом (стоїть у фазі 0 при `PlayHead.isPlaying == false`) і не робить таблицю `Bake` застарілою (`lfo` виключено з хешу геометрії/траєкторії).
+- Додано undoable-команди (non-acoustic — не інвалідують `BakeCache`):
+  - `modulation.addRoute { route }`
+  - `modulation.setRoute { index, route }` (`coalesceKey = "mod/" + index + "/" + driver + "/" + target + "/" + hostOut`)
+  - `modulation.removeRoute { index }`
+  - `modulation.setRoutes { routes }`
+  - `path.setLfo { object, lfo }` (`coalesceKey = object + "/lfo"`), а також необов’язкове поле `lfo` у `path.set` та `path.setFlags`.
+- `source.remove` видаляє маршрути, що посилаються на видалене джерело, зсуває старші індекси `> index` та відновлює весь список через один крок `history.undo`/`redo`. При завантаженні `.verbroom` з `Keep I/O` зберігаються маршрути локальних джерел та імпортуються глобальні маршрути пресета.
+
+## G5 · Жива телеметрія модуляції (етап M3)
+
+- `status.load` може містити необов’язкове поле `modulation?: { routes: Array<{ raw: number, value: number, active: boolean }> }` (до 64 елементів у порядку `document.modulation.routes`).
+- Коли маршрутів `0`, поле `modulation` опускається для зворотної сумісності.
+- Під час активного аудіопотоку в режимі **Creative** `raw` відображає сире значення драйвера маршруту (у метрах / градусах / м/с / `[0..1]`), `value` — згладжену вихідну величину цілі (Гц для `sourceLowPass`/`sourceHighPass`, дБ для рівнів/фільтрів полиць або % для `mix`), а `active: true` для увімкнених валідних маршрутів. У режимі **Physical**, при вимкненому маршруті чи зупиненому аудіопотоці `active: false`.
+- Записується без алокацій у preallocated lock-free атоміки після сегментного розрахунку (`!useModPath` fast path у Physical залишається побітово недоторканим).
+
+## G8 / G9 · Вихідні параметри модуляції для хоста (`Mod Out 1…16`)
+
+- На рівні хоста (після всіх 283 параметрів APVTS, без включення у `<VerbState>` і без показу в `parameters.descriptors`/`values`) додано 16 вихідних параметрів **`Mod Out 1`** … **`Mod Out 16`** (`id`: `mo1`…`mo16`, діапазон `0..1`, нейтраль `0.5`). У G8 вони початково використовували категорію `outputMeter` (`kIsReadOnly`), а в **G9** їх переведено в `genericParameter` з `.withAutomatable(true)` / `isAutomatable() == true` (VST3-прапорець `kCanAutomate`, без `kIsReadOnly`/`kIsHidden`/`kIsBypass`), щоб DAW на кшталт REAPER дозволяли прив’язку (`Link from FX parameter`), тоді як зворотний запис із хоста (`setValue`) ігнорується (no-op).
+- Кожен `ModRoute` має:
+  - розширений `target` enum, що включає `"none"` (*Host output only*, вимагає `targetObject: -1` і не змінює звук Verb Room);
+  - необов’язкове ціле `hostOut?: integer` (`0..16`, де `0` = вимкнено; у стані й XML опускається, коли `0`).
+- Слот `hostOut` отримує нормалізований (`0..1`) згладжений вихід кривої маршруту перед мапінгом у цільовий діапазон (для кількох активних маршрутів на один слот перемагає останній у списку). Діє лише в **Creative mode** (у **Physical** тримається `0.5`); у `processBlock` оновлюється на частоті блоку лише за зміни `> 1e-4` без алокацій.
+- При завантаженні `.verbroom` із `Keep I/O` маршрути з `target == "none"` зберігаються локально (разом із їхнім `hostOut`), а кімнатні глобальні маршрути (`earlyLevel`, `tailLevel`, `mix`) беруться з пресета.
+- У `status.load.modulation.routes[i].value` для `target == "none"` передається згладжений нормалізований вихід `[0..1]`.
+
+## G10 · Діалог «About» і зовнішні посилання (`app.openExternal`)
+
+- Додано адитивну команду `app.openExternal { url: string }` (не прив’язану до `baseRevision`, щоб відкриття документації чи сторінок підтримки не зривалося фоновими змінами ревізії).
+- `EditorBridge` перевіряє `url` за суворим білим списком HTTPS-хостів: `ko-fi.com`, `send.monobank.ua`, `github.com`, `bodzijun.github.io` (відкидає інші схеми, піддомени/схожі домени, `userinfo@`, порти, пробільні/керівні символи, `\\`, лапки та нерядкові аргументи кодом `invalid`).
+- У робочому плагіні дозволений URL відкривається через `juce::URL::launchInDefaultBrowser()` (для тестів передбачено хук `EditorBridge::setExternalUrlLauncher(...)`); у разі збою запуску повертається `ioError`. Успішне виконання повертає `ack`. `ShellBrowser` і далі блокує пряму навігацію всередині WebView.
+

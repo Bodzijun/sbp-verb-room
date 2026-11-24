@@ -231,6 +231,8 @@ struct Scene {
     // 0 shown, 1 locked (drawn, clicks pass through), 2 hidden. Written as `#@verbroom-editor-v2 layers W F C P`
     // (only when not all zero): the v1 parser of older releases takes that line for a plain comment.
     std::array<int, 4> layerModes{};
+    bool hasAutomationRange = false;
+    std::array<double, 6> automationRange{-200.0, 200.0, -200.0, 200.0, 0.0, 30.0};
 };
 
 inline bool pointInZone(const Zone& z, double x, double y) {  // even-odd rule
@@ -408,6 +410,16 @@ inline Scene parseScene(std::istream& in, const std::string& path) {
                     if (m < 0 || m > 2) m = 0;
                 }
                 if (ok) s.layerModes = modes;
+            } else if (kind == "automationRange") {
+                std::array<double, 6> ar{};
+                bool ok = true;
+                for (double& v : ar) {
+                    if (!(meta >> v) || !std::isfinite(v)) { ok = false; break; }
+                }
+                if (ok) {
+                    s.hasAutomationRange = true;
+                    s.automationRange = ar;
+                }
             }
             continue;
         }

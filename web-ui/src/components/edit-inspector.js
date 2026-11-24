@@ -1,20 +1,10 @@
-import { element, button, note, scrollArea } from './dom.js';
-import { sourceParts, listenerParts, surfaceParts, scenePartsRoom, heading } from './inspector.js';
+import { element, button, note, scrollArea, accordion } from './dom.js';
+import { sourceParts, listenerParts, surfaceParts, scenePartsRoom } from './inspector.js';
 import { sourceStripColour } from '../viewport/colour.js';
 import { cornerRepair } from '../pages/edit-room.js';
 // Edit-page inspector: two tabs (Selected object / Scene) with accordion sections.
 // Open/closed state and the active tab live in the session view state; only the
 // first section of a tab is open until the user changes it.
-function accordion(store, tabKey, sections) {
-  const state = store.view.accordion || {};
-  return sections.filter(s => s.nodes.length).map((s, i) => {
-    const id = `${tabKey}.${s.key}`, open = state[id] ?? i === 0;
-    // Section factories also create subscriptions/observers. Release discarded content.
-    if (!open) for (const node of s.nodes) for (const child of [node, ...node.querySelectorAll('*')]) child.dispose?.();
-    const head = element('button', { type: 'button', className: 'acc-head', 'aria-expanded': String(open), 'aria-controls': `acc-${id}`, onclick: () => store.setView({ accordion: { ...(store.view.accordion || {}), [id]: !open } }) }, [element('i', { className: 'acc-caret', 'aria-hidden': 'true' }), element('span', { text: s.title }), s.hint ? element('small', { text: s.hint }) : null]);
-    return element('section', { className: `acc${open ? ' open' : ''}` }, [head, open ? element('div', { className: 'acc-body stack', id: `acc-${id}` }, s.nodes) : null]);
-  });
-}
 export function editInspector(ctx) {
   const { store } = ctx, view = store.view, tab = view.inspectorTab === 'scene' ? 'scene' : 'selected';
   const selection = view.selection, isObject = r => ['source', 'listener'].includes(r.kind);
@@ -26,7 +16,14 @@ export function editInspector(ctx) {
   const body = [];
   if (tab === 'scene') {
     const p = scenePartsRoom(ctx);
-    body.push(...accordion(store, 'scene', [{ key: 'room', title: 'Room', nodes: [...p.room, ...cornerRepair(ctx)] }, { key: 'air', title: 'Air', hint: 'temperature · humidity', nodes: p.air }, { key: 'clutter', title: 'Clutter', nodes: p.clutter }, { key: 'rough', title: 'Roughness', nodes: p.roughness }, { key: 'scale', title: 'Scale room', hint: 'one-time command', nodes: p.scale }]));
+    body.push(...accordion(store, 'scene', [
+      { key: 'room', title: 'Room', nodes: [...p.room, ...cornerRepair(ctx)] },
+      { key: 'air', title: 'Air', hint: 'temperature · humidity', nodes: p.air },
+      { key: 'clutter', title: 'Clutter', nodes: p.clutter },
+      { key: 'rough', title: 'Roughness', nodes: p.roughness },
+      { key: 'autoRange', title: 'Automation range', hint: p.autoRangeHint, nodes: p.automationRange },
+      { key: 'scale', title: 'Scale room', hint: 'one-time command', nodes: p.scale }
+    ]));
   } else if (ref?.kind === 'source') {
     const p = sourceParts(ctx, ref.index);
     if (p) body.push(element('div', { className: 'obj-title' }, [element('i', { className: 'source-color-dot', style: `background:${sourceStripColour(p.source, ref.index)}`, 'aria-hidden': 'true' }), `Source ${String(ref.index + 1).padStart(2, '0')} · ${p.source.name}`]), ...accordion(store, 'source', [{ key: 'pos', title: 'Position & level', nodes: p.position }, { key: 'route', title: 'Routing & channels', nodes: [...p.identity, ...p.routing, ...p.level] }, { key: 'points', title: 'Channel points', nodes: p.points }]));

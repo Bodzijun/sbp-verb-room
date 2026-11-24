@@ -88,6 +88,7 @@ int main() {
     check(hello.isArray() && prop((*hello.getArray())[0], "kind").toString() == "snapshot", "ready returns full validated snapshot");
     const auto snap = prop((*hello.getArray())[0], "payload");
     check((int)prop(prop(prop(snap,"parameters"),"descriptors"),"count") == 283, "snapshot contains all 283 live APVTS descriptors including P1");
+    check(p.getParameters().size() == 283 + verbp::kMaxModHostOuts && !prop(prop(snap,"parameters"),"values").getDynamicObject()->hasProperty("mo1"), "G8 processor exposes 299 host parameters while Web UI snapshot keeps 283 without mo1..mo16");
     juce::File("out/T4/live-snapshot.json").replaceWithText(juce::JSON::toString((*hello.getArray())[0]));
     check((bool)prop(prop(prop(snap,"capabilities"),"features"),"output.meters").getProperty("available",false),"E12 native output meters capability available");
     command(R"({"op":"telemetry.subscribe","topics":["meters"]})");captured.clear();bridge.tick(true,980);bool outputEvent=false;
@@ -880,6 +881,187 @@ int main() {
         command(R"({"op":"source.setConfig","index":0,"color":null})");
         const auto srcsCleared = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "sources");
         check(!srcsCleared[0].getDynamicObject()->hasProperty("color"), "C1 bridge color:null restores automatic");
+    }
+    {   // G4: modulation commands, path.setLfo, snapshot omission when empty, schema/error checks, undo/redo
+        const auto doc0 = prop(prop(bridge.snapshot(), "payload"), "document");
+        check(!doc0.getDynamicObject()->hasProperty("modulation"), "G4 default snapshot omits modulation field when empty");
+        const uint64_t load0 = p.getLoadSerial();
+        const auto addRes = command(R"({"op":"modulation.addRoute","route":{"enabled":true,"object":0,"driver":"distanceToListener","curve":{"inputRange":[1,10],"outputRange":[20000,800],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"sourceLowPass","attackMs":15,"releaseMs":80}})");
+        check(prop((*addRes.getArray())[0], "kind").toString() == "ack", "G4 bridge accepts modulation.addRoute");
+        check(p.getLoadSerial() == load0, "G4 modulation.addRoute does not rebuild engine");
+        const auto doc1 = prop(prop(bridge.snapshot(), "payload"), "document");
+        const auto mod1 = prop(doc1, "modulation");
+        check(mod1.isObject() && prop(mod1, "routes").isArray() && prop(mod1, "routes").size() == 1,
+              "G4 snapshot exposes document.modulation.routes");
+
+        command(R"({"op":"path.set","object":0,"points":[[1,1,1.5],[4,1,1.5]]})");
+        const auto lfoRes = command(R"({"op":"path.setLfo","object":0,"lfo":{"enabled":true,"shape":"triangle","rateHz":2.5,"depth":0.3,"phaseDeg":0,"seed":5}})");
+        check(prop((*lfoRes.getArray())[0], "kind").toString() == "ack", "G4 bridge accepts path.setLfo");
+        const auto docLfo = prop(prop(bridge.snapshot(), "payload"), "document");
+        const auto p0Lfo = prop(prop(docLfo, "paths")[0], "lfo");
+        check(p0Lfo.isObject() && (bool)prop(p0Lfo, "enabled") && prop(p0Lfo, "shape").toString() == "triangle",
+              "G4 snapshot carries document.paths[0].lfo");
+
+        command(R"({"op":"history.undo"})");
+        const auto docUndoLfo = prop(prop(bridge.snapshot(), "payload"), "document");
+        check(!prop(docUndoLfo, "paths")[0].getDynamicObject()->hasProperty("lfo"), "G4 bridge undo removes lfo and omits default key");
+        command(R"({"op":"path.clear","object":0})");
+        command(R"({"op":"modulation.setRoutes","routes":[]})");
+        const auto docCleared = prop(prop(bridge.snapshot(), "payload"), "document");
+        check(!docCleared.getDynamicObject()->hasProperty("modulation"), "G4 snapshot omits modulation again after clearing routes");
+    }
+    {   // G5: status.load.modulation live telemetry (present only when routes configured; active only in Creative with audio)
+        captured.clear();
+        bridge.tick(true, 100000);
+        bool sawLoadNoMod = false;
+        for (const auto& m : captured) {
+            auto pl = prop(m, "payload");
+            if (prop(pl, "event").toString() == "status.load" && !pl.getDynamicObject()->hasProperty("modulation"))
+                sawLoadNoMod = true;
+        }
+        check(sawLoadNoMod, "G5 status.load omits modulation when no routes configured");
+
+        command(R"({"op":"modulation.addRoute","route":{"enabled":true,"object":0,"driver":"distanceToListener","curve":{"inputRange":[0,10],"outputRange":[0,-20],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"sourceGain","attackMs":0,"releaseMs":0}})");
+        if (auto* mp = p.apvts.getParameter("mode")) mp->setValueNotifyingHost(1.0f);
+        juce::AudioBuffer<float> blk(std::max(2, p.getTotalNumOutputChannels()), 128);
+        juce::MidiBuffer midi;
+        for (int i = 0; i < 8; ++i) { blk.clear(); stage2Process(p, blk, midi); }
+        captured.clear();
+        bridge.tick(true, 100100);
+        bool sawActiveMod = false;
+        for (const auto& m : captured) {
+            auto pl = prop(m, "payload");
+            if (prop(pl, "event").toString() == "status.load" && pl.getDynamicObject()->hasProperty("modulation")) {
+                auto mod = prop(pl, "modulation");
+                auto rts = prop(mod, "routes");
+                if (rts.isArray() && rts.size() == 1 && (bool)prop(rts[0], "active") && std::isfinite((double)prop(rts[0], "raw")) && std::isfinite((double)prop(rts[0], "value")))
+                    sawActiveMod = true;
+            }
+        }
+        check(sawActiveMod, "G5 status.load emits active modulation route telemetry in Creative mode");
+
+        if (auto* mp = p.apvts.getParameter("mode")) mp->setValueNotifyingHost(0.0f);
+        for (int i = 0; i < 64; ++i) { blk.clear(); stage2Process(p, blk, midi); }
+        captured.clear();
+        bridge.tick(true, 100200);
+        bool sawInactivePhys = false;
+        for (const auto& m : captured) {
+            auto pl = prop(m, "payload");
+            if (prop(pl, "event").toString() == "status.load" && pl.getDynamicObject()->hasProperty("modulation")) {
+                auto rts = prop(prop(pl, "modulation"), "routes");
+                if (rts.isArray() && rts.size() == 1 && !(bool)prop(rts[0], "active"))
+                    sawInactivePhys = true;
+            }
+        }
+        check(sawInactivePhys, "G5 status.load marks modulation telemetry inactive in Physical mode");
+        check(std::abs(p.modOutParameter(0)->getValue() - 0.5f) < 1e-6f, "G5/G8 Mod Out stays neutral 0.5 in Physical mode");
+        command(R"({"op":"modulation.setRoutes","routes":[]})");
+    }
+    {   // G8: target=none + hostOut snapshot, live normalized telemetry, host Mod Out update & Physical reset
+        command(R"({"op":"modulation.addRoute","route":{"enabled":true,"object":0,"driver":"distanceToListener","curve":{"inputRange":[0,10],"outputRange":[0,1],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"none","hostOut":2,"attackMs":0,"releaseMs":0}})");
+        const auto g8Doc = prop(prop(bridge.snapshot(), "payload"), "document");
+        const auto g8Rts = prop(prop(g8Doc, "modulation"), "routes");
+        check(g8Rts.isArray() && g8Rts.size() == 1 && prop(g8Rts[0], "target").toString() == "none" && (int)prop(g8Rts[0], "hostOut") == 2,
+              "G8 bridge snapshot exposes target=none and hostOut=2");
+        if (auto* mp = p.apvts.getParameter("mode")) mp->setValueNotifyingHost(1.0f);
+        juce::AudioBuffer<float> g8blk(std::max(2, p.getTotalNumOutputChannels()), 128);
+        juce::MidiBuffer g8midi;
+        for (int i = 0; i < 8; ++i) { g8blk.clear(); stage2Process(p, g8blk, g8midi); }
+        check(p.modOutParameter(1)->getValue() >= 0.0f && p.modOutParameter(1)->getValue() <= 1.0f,
+              "G8 Mod Out 2 receives valid [0,1] value in Creative mode");
+        captured.clear();
+        bridge.tick(true, 100300);
+        bool sawNoneTel = false;
+        for (const auto& m : captured) {
+            auto pl = prop(m, "payload");
+            if (prop(pl, "event").toString() == "status.load" && pl.getDynamicObject()->hasProperty("modulation")) {
+                auto rts = prop(prop(pl, "modulation"), "routes");
+                if (rts.isArray() && rts.size() == 1 && (bool)prop(rts[0], "active")
+                    && (double)prop(rts[0], "value") >= 0.0 && (double)prop(rts[0], "value") <= 1.0)
+                    sawNoneTel = true;
+            }
+        }
+        check(sawNoneTel, "G8 status.load reports active normalized [0,1] telemetry for target=none");
+        if (auto* mp = p.apvts.getParameter("mode")) mp->setValueNotifyingHost(0.0f);
+        for (int i = 0; i < 128; ++i) { g8blk.clear(); stage2Process(p, g8blk, g8midi); }
+        check(std::abs(p.modOutParameter(1)->getValue() - 0.5f) < 1e-6f,
+              "G8 Mod Out 2 returns smoothly to neutral 0.5 in Physical mode");
+        command(R"({"op":"modulation.setRoutes","routes":[]})");
+    }
+    {
+        // G10: app.openExternal allow-list validation, launcher hook, and ioError handling
+        std::vector<juce::String> launched;
+        bool launchResult = true;
+        bridge.setExternalUrlLauncher([&](const juce::String& url) {
+            launched.push_back(url);
+            return launchResult;
+        });
+
+        const char* const validUrls[] = {
+            "https://ko-fi.com/s/405ebacfcc",
+            "https://send.monobank.ua/jar/7uwNLVbptd",
+            "https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Manual_en.md",
+            "https://bodzijun.github.io/sbp-verb-room/",
+            "https://github.com/Bodzijun/sbp-verb-room",
+        };
+        for (const auto* u : validUrls) {
+            check(EditorBridge::isAllowedExternalUrl(u), std::string("G10 allow-list accepts ") + u);
+            const auto rep = send(obj({{"op", "app.openExternal"}, {"url", u}}));
+            check(rep.isArray() && rep.size() == 1 && prop((*rep.getArray())[0], "kind").toString() == "ack",
+                  std::string("G10 app.openExternal acks ") + u);
+        }
+        check(launched.size() == 5 && launched[0] == validUrls[0] && launched[4] == validUrls[4],
+              "G10 launcher hook receives exact allow-listed URLs without opening real browser");
+
+        launched.clear();
+        const char* const badUrls[] = {
+            "http://ko-fi.com/s/405ebacfcc",
+            "javascript:alert(1)",
+            "file:///C:/Windows/win.ini",
+            "mailto:bodzik@gmail.com",
+            "https://evil.com/phish",
+            "https://notko-fi.com/s/405ebacfcc",
+            "https://ko-fi.com.evil.com/x",
+            "https://sub.github.com/x",
+            "https://ko-fi.com@evil.com/x",
+            "https://ko-fi.com:443/x",
+            "https://ko-fi.com/x y",
+            "https://ko-fi.com\\x",
+            "https://",
+            ""
+        };
+        int badIdx = 0;
+        for (const auto* u : badUrls) {
+            check(!EditorBridge::isAllowedExternalUrl(u), std::string("G10 allow-list rejects ") + u);
+            auto badCmd = obj({{"schemaVersion", 1}, {"sessionId", "test-live"}, {"kind", "command"},
+                {"requestId", "g10-bad-" + juce::String(++badIdx)},
+                {"baseRevision", decimal(p.getRevision())},
+                {"payload", obj({{"op", "app.openExternal"}, {"url", u}})}});
+            const auto rep = bridge.handle(badCmd);
+            if (const auto* a = rep.getArray()) for (const auto& r : *a) record(r);
+            check(rep.isArray() && rep.size() == 1 && prop((*rep.getArray())[0], "kind").toString() == "error"
+                  && prop(prop((*rep.getArray())[0], "payload"), "code").toString() == "invalid",
+                  std::string("G10 app.openExternal rejects ") + u);
+        }
+        {
+            auto nonStrCmd = obj({{"schemaVersion", 1}, {"sessionId", "test-live"}, {"kind", "command"},
+                {"requestId", "g10-bad-nonstr"},
+                {"baseRevision", decimal(p.getRevision())},
+                {"payload", obj({{"op", "app.openExternal"}, {"url", 123}})}});
+            const auto rep = bridge.handle(nonStrCmd);
+            if (const auto* a = rep.getArray()) for (const auto& r : *a) record(r);
+            check(rep.isArray() && rep.size() == 1 && prop((*rep.getArray())[0], "kind").toString() == "error"
+                  && prop(prop((*rep.getArray())[0], "payload"), "code").toString() == "invalid",
+                  "G10 app.openExternal rejects non-string url");
+        }
+        check(launched.empty(), "G10 rejected URLs never call external launcher");
+
+        launchResult = false;
+        const auto failRep = send(obj({{"op", "app.openExternal"}, {"url", "https://ko-fi.com/s/405ebacfcc"}}));
+        check(failRep.isArray() && failRep.size() == 1 && prop((*failRep.getArray())[0], "kind").toString() == "error"
+              && prop(prop((*failRep.getArray())[0], "payload"), "code").toString() == "ioError",
+              "G10 app.openExternal returns ioError when OS launcher returns false");
+        bridge.setExternalUrlLauncher({});
     }
     std::printf("FINAL web_bridge: %d pass, %d fail\n", passes, fails);
     return fails ? 1 : 0;

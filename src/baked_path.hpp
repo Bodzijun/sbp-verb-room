@@ -233,6 +233,24 @@ struct BakedTable {
                     cand.push_back(ul);
                 }
             }
+            if(p.uIndexed&&p.distance.size()==p.poses.size()&&p.poses.size()>=2&&p.distance.back()>0.){
+                const double denom=p.distance.back();
+                auto uAt=[&](size_t idx){return std::clamp(p.distance[idx]/denom,0.,1.);};
+                if(p.poses.size()<=512){
+                    for(size_t idx=0;idx<p.distance.size();++idx)cand.push_back(uAt(idx));
+                }else{
+                    cand.push_back(uAt(0));
+                    for(size_t idx=1;idx+1<p.poses.size();++idx){
+                        const double uPrev=uAt(idx-1),uCur=uAt(idx),uNext=uAt(idx+1);
+                        if(uCur-uPrev<=1e-5||uNext-uCur<=1e-5){cand.push_back(uCur);continue;}
+                        const double s0Yaw=std::remainder(p.poses[idx][3]-p.poses[idx-1][3],360.);
+                        const double s1Yaw=std::remainder(p.poses[idx+1][3]-p.poses[idx][3],360.);
+                        const double r0=s0Yaw/(uCur-uPrev),r1=s1Yaw/(uNext-uCur);
+                        if(std::abs(r1-r0)*std::min(uCur-uPrev,uNext-uCur)>0.25)cand.push_back(uCur);
+                    }
+                    cand.push_back(uAt(p.poses.size()-1));
+                }
+            }
         }
         std::sort(cand.begin(),cand.end());
         jointU.reserve(cand.size());
@@ -266,10 +284,21 @@ struct BakedTable {
     }
     std::vector<double> initialStationsForJoint(double roomMin) const {
         if(jointU.size()<2||jointDist.empty()||jointDist.back()<=1e-12||activeUEnd<=activeUStart)return {0.,1.};
+        std::vector<std::pair<double,double>> jumps;
+        for(size_t i=1;i<jointU.size();++i){
+            const double du=jointU[i]-jointU[i-1], dd=jointDist[i]-jointDist[i-1];
+            if(du<=1e-6&&dd>1e-5&&jointU[i-1]>=activeUStart-1e-12&&jointU[i]<=activeUEnd+1e-12)
+                jumps.push_back({jointU[i-1],jointU[i]});
+        }
+        const int maxUniform=std::max(1,std::min(31,(int)kBakeNodeCap-16-(int)jumps.size()*2));
         const double totalD=jointDist.back();
-        const int intervals=std::clamp((int)std::ceil(totalD/std::clamp(.1*roomMin,.1,.5)),1,31);
+        const int intervals=std::clamp((int)std::ceil(totalD/std::clamp(.1*roomMin,.1,.5)),1,maxUniform);
         std::vector<double> out;
         out.push_back(activeUStart);
+        auto inJump=[&](double v){
+            for(const auto& j:jumps)if(v>=j.first-1e-6&&v<=j.second+1e-6)return true;
+            return false;
+        };
         for(int j=1;j<intervals;++j){
             const double target=totalD*(double)j/(double)intervals;
             auto it=std::upper_bound(jointDist.begin(),jointDist.end(),target);
@@ -277,11 +306,18 @@ struct BakedTable {
             const double span=jointDist[idx]-jointDist[idx-1];
             const double f=span>0.?std::clamp((target-jointDist[idx-1])/span,0.,1.):0.;
             const double uVal=jointU[idx-1]+f*(jointU[idx]-jointU[idx-1]);
-            if(uVal>out.back()+1e-12 && uVal<activeUEnd-1e-12)out.push_back(uVal);
+            if(uVal>activeUStart+1e-6 && uVal<activeUEnd-1e-6 && !inJump(uVal))out.push_back(uVal);
         }
-        if(activeUEnd>out.back()+1e-12)out.push_back(activeUEnd);
-        if(out.size()<2)return {0.,1.};
-        return out;
+        for(const auto& j:jumps){
+            out.push_back(std::clamp(j.first,activeUStart,activeUEnd));
+            out.push_back(std::clamp(j.second,activeUStart,activeUEnd));
+        }
+        out.push_back(activeUEnd);
+        std::sort(out.begin(),out.end());
+        std::vector<double> clean;clean.reserve(out.size());
+        for(double v:out)if(clean.empty()||v-clean.back()>1e-12)clean.push_back(v);
+        if(clean.size()<2)return {0.,1.};
+        return clean;
     }
     bool projectDeclared(const double* pose,double& uOut,size_t* hint=nullptr) const noexcept {
         const size_t N=jointU.size(), M=movingPaths.size();

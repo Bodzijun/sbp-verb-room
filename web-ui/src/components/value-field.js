@@ -1,10 +1,11 @@
 // Shared instrument readout: vertical drag, Shift fine, double-click precise entry.
 export function valueField(input, { get, min, max, step=0.001, display=String, edit=String, start=()=>{}, preview=()=>{}, commit, end=()=>{} }) {
   let grab=null;
+  const minVal=()=>typeof min==='function'?min():min, maxVal=()=>typeof max==='function'?max():max, stepVal=()=>typeof step==='function'?step():step;
   input.readOnly=true;
   input.title=`${input.getAttribute('aria-label') || 'Value'} · drag vertically · Shift fine · double-click to type`;
   const paint=()=>{ input.value=display(get()); };
-  const snap=n=>Number(Math.max(min,Math.min(max,min+Math.round((n-min)/step)*step)).toFixed(7));
+  const snap=n=>{ const lo=minVal(),hi=maxVal(),st=stepVal(); return Number(Math.max(lo,Math.min(hi,lo+Math.round((n-lo)/st)*st)).toFixed(7)); };
   const finish=cancel=>{
     if(!grab) return;
     const g=grab; grab=null; if(input.hasPointerCapture(g.id))input.releasePointerCapture(g.id);
@@ -20,7 +21,7 @@ export function valueField(input, { get, min, max, step=0.001, display=String, e
     if(!grab||grab.id!==e.pointerId) return;
     const dy=grab.y-e.clientY;
     if(!grab.moved&&Math.abs(dy)>3) { grab.moved=true; input.setAttribute('data-gesture-active','true'); start(); }
-    if(grab.moved) { grab.value=snap(grab.initial+dy*(max-min)/(e.shiftKey?2400:240)); preview(grab.value); input.value=display(grab.value); }
+    if(grab.moved) { grab.value=snap(grab.initial+dy*(maxVal()-minVal())/(e.shiftKey?2400:240)); preview(grab.value); input.value=display(grab.value); }
   });
   input.addEventListener('pointerup',()=>finish(false));
   input.addEventListener('pointercancel',()=>finish(true));
@@ -34,7 +35,7 @@ export function valueField(input, { get, min, max, step=0.001, display=String, e
   input.addEventListener('keydown',e=>{ resetAncestors(); if(e.key==='Enter'||e.key==='Escape') { input.readOnly=true; requestAnimationFrame(()=>{paint();resetAncestors();}); } });
   input.addEventListener('wheel',e=>{
     if(input.disabled||!input.readOnly||!(document.documentElement.dataset.wheelValues==='on'||e.altKey)) return;
-    e.preventDefault(); start(); const v=snap(get()-Math.sign(e.deltaY)*step*(e.shiftKey?1:10)); preview(v); commit(v); end(); paint();
+    e.preventDefault(); start(); const v=snap(get()-Math.sign(e.deltaY)*stepVal()*(e.shiftKey?1:10)); preview(v); commit(v); end(); paint();
   },{passive:false});
   const cancel=()=>finish(true),visibility=()=>{if(document.hidden) cancel();};
   window.addEventListener('blur',cancel); window.addEventListener('verb-ui-error',cancel); window.addEventListener('verb-gestures-reset',cancel); document.addEventListener('visibilitychange',visibility);

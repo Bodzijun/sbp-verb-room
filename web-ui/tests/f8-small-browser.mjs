@@ -22,6 +22,7 @@ try {
   browser = await playwright.chromium.launch({ headless: true, executablePath });
   for (const [width, height] of [[1000, 600], [900, 560], [900, 600], [1280, 720], [1920, 1080]]) {
     const page = await browser.newPage({ viewport: { width, height }, reducedMotion: 'reduce' });
+    page.setDefaultTimeout(5000);
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
     await page.goto(`${url}/?fixture=large-hall`);
@@ -91,10 +92,33 @@ try {
       if (failures.length) defects.push({ width, height, label, failures: [...new Set(failures)] });
     };
 
-    for (const [tab, selector] of [['decay', '.bottom-decay'], ['sources', '.sources-panel'], ['mix', '.mix-columns'], ['output', '.output-panel']]) {
+    for (const [tab, selector] of [['decay', '.bottom-decay'], ['sources', '.sources-panel'], ['mix', '.mix-columns'], ['modulation', '.mod-panel'], ['output', '.output-panel']]) {
       await view({ page: 'main', tab, selection: [] });
       await audit(`Main / ${tab}, Scene, Reverb time, Listen, Macros`, selector);
     }
+    await page.evaluate(() => {
+      const { bridge } = window.verbRoom;
+      bridge.parameters.begin('mode'); bridge.parameters.change('mode', 1); bridge.parameters.end('mode');
+    });
+    await command({
+      op: 'modulation.addRoute',
+      route: {
+        enabled: true, object: 0, driver: 'distanceToPoint', point: [2, 3, 1.5],
+        curve: { inputRange: [0, 12], outputRange: [20000, 1000], invert: false, clamp: true, nodes: [{ x: 0, y: 0, smooth: true }, { x: 0.5, y: 0.4, smooth: true }, { x: 1, y: 1, smooth: false }] },
+        targetObject: -1, target: 'sourceLowPass', attackMs: 15, releaseMs: 80
+      }
+    });
+    await view({ page: 'main', tab: 'modulation', selection: [{ kind: 'source', index: 0 }], modRoute: 0, modEditorOpen: false });
+    await audit('Main / Modulation active route + point + curve (docked editor)', '.bottom-modulation .mod-dock-editor-col .mod-curve-svg');
+    await view({ modEditorOpen: true });
+    await audit('Main / Modulation active route + point + curve (detached editor)', '.mod-editor-panel .mod-curve-svg');
+    await page.evaluate(() => {
+      const { bridge } = window.verbRoom;
+      bridge.parameters.begin('mode'); bridge.parameters.change('mode', 0); bridge.parameters.end('mode');
+    });
+    await audit('Main / Modulation Physical detached editor', '.mod-editor-panel .mod-mode-banner');
+    await view({ modEditorOpen: false });
+    await command({ op: 'modulation.setRoutes', routes: [] });
     await view({ tab: 'decay' });
     await page.locator('.decay-effective summary').click();
     await audit('Main / Decay, effective diagnostics', '.decay-effective[open]');
@@ -102,6 +126,10 @@ try {
     await page.locator('.theme-menu summary').click();
     await audit('Theme panel', '.theme-menu[open] button[aria-label="Close theme"]');
     await page.getByRole('button', { name: 'Close theme' }).click();
+    await page.getByRole('button', { name: 'About' }).click();
+    await audit('About dialog', 'dialog.about-dialog[open] .about-kofi-btn');
+    await page.keyboard.press('Escape');
+    await page.locator('dialog.about-dialog').waitFor({ state: 'hidden', timeout: 5000 });
     await pickOption(page, 'Output layout', 'AmbiX (3rd order)');
     await page.getByRole('combobox', { name: 'Ambisonics normalization' }).waitFor();
     await audit('Main / Settings, Ambisonics', '.output-panel [aria-label="Ambisonics level"]');
@@ -134,8 +162,19 @@ try {
     await audit('Main / Populated path, point timing and bake', '.path-pt-timing');
     await page.evaluate(() => window.verbRoom.bridge.setBakeStatus({ passState: 3, passSamples: 4096 }));
     await audit('Main / Populated path with a kept recording', '.path-recording-note:not([hidden])');
+    await page.evaluate(() => {
+      const { bridge } = window.verbRoom;
+      bridge.parameters.begin('mode'); bridge.parameters.change('mode', 1); bridge.parameters.end('mode');
+    });
+    await command({ op: 'path.setLfo', object: 0, lfo: { enabled: true, shape: 'sine', rateHz: 2, depth: 0.3, phaseDeg: 45, seed: 1 } });
+    await audit('Main / Populated path LFO', '.path-lfo [aria-label="LFO depth"]');
     await view({ timelineOpen: true });
     await audit('Main / Populated timeline', '.timeline-panel .tl-bar');
+    await command({ op: 'path.setLfo', object: 0, lfo: { enabled: false, shape: 'sine', rateHz: 0.5, depth: 0, phaseDeg: 0, seed: 1 } });
+    await page.evaluate(() => {
+      const { bridge } = window.verbRoom;
+      bridge.parameters.begin('mode'); bridge.parameters.change('mode', 0); bridge.parameters.end('mode');
+    });
     await view({ timelineOpen: false, energy: true });
     await audit('Main / Energy', '.viewport .analysis');
     await page.locator('.energy-advanced summary').click();

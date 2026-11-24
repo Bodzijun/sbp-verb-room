@@ -5,8 +5,11 @@ namespace {
 bool creativeOnly(const juce::String& id) { return id == "early" || id == "tail" || id == "doppler" || id.startsWith("decay") || id=="predelay" || id=="stereoWidth" || id=="freeze" || id=="duck" || id=="duckRelease"; }
 }
 WebParameterBindings::WebParameterBindings(VerbProcessor& p) : proc(p) {
-    for (auto* base : p.getParameters()) if (auto* param = dynamic_cast<juce::RangedAudioParameter*>(base))
-        bindings.push_back({param->paramID, param, p.apvts.getRawParameterValue(param->paramID)});
+    for (auto* base : p.getParameters())
+        if (base->isAutomatable())
+            if (auto* param = dynamic_cast<juce::RangedAudioParameter*>(base))
+                if (auto* raw = p.apvts.getRawParameterValue(param->paramID))
+                    bindings.push_back({param->paramID, param, raw});
 }
 WebParameterBindings::~WebParameterBindings() { endAll(); }
 // A rebuild (source/output/preset load) ends every native gesture before the page learns about the new load serial.

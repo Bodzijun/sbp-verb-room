@@ -9,7 +9,7 @@ static int testE7Makeup() {
  VerbProcessor p; p.setPlayConfigDetails(2,2,48000,128);p.prepareToPlay(48000,128);
  check(waitReady(p,90),"E7 processor ready");
  auto* makeup=p.apvts.getParameter("makeup"); auto* gain=p.apvts.getParameter("gain");
- check(makeup&&makeup->getParameterIndex()==249&&p.getParameters().size()==283,"Makeup appended at index249; all legacy indices retained");
+ check(makeup&&makeup->getParameterIndex()==249&&p.getParameters().size()==283+verbp::kMaxModHostOuts&&p.apvts.getParameter("lpath")->getParameterIndex()==282,"First 283 legacy indices retained (Makeup at 249, lpath at 282) + 16 Mod Out");
  check(gain->getNormalisableRange().start==-36&&gain->getNormalisableRange().end==12&&makeup->getNormalisableRange().start==0&&makeup->getNormalisableRange().end==36,"Output range unchanged; Makeup 0..36");
  check(p.apvts.getRawParameterValue("makeup")->load()==0,"Makeup defaults to zero");
  setP(p,"makeup",18);juce::MemoryBlock saved;p.getStateInformation(saved);

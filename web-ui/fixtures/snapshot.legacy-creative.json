@@ -35,7 +35,7 @@
         "sceneSerial": "1",
         "capabilities": {
           "contractVersion": 1,
-          "pluginVersion": "0.2.3",
+          "pluginVersion": "0.3.0",
           "engine": {
             "erOrder": 1,
             "maxWallsForOrder": 128

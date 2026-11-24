@@ -34,7 +34,7 @@ static int testP1() {
     check(pathDistance(seam0,seam1)<1e-10 && yaw0==yaw1,"P1 closed orient endpoint has identical pose across exact 1 to 0");
     raw.closed=false;raw.orient=false;
     VerbProcessor p;p.setPlayConfigDetails(2,2,48000,256);p.prepareToPlay(48000,256);check(waitReady(p,90),"P1 processor ready without web editor");
-    check(p.getParameters().size()==283 && p.apvts.getParameter("makeup")->getParameterIndex()==249 && p.apvts.getParameter("s1path")->getParameterIndex()==250 && p.apvts.getParameter("lpath")->getParameterIndex()==282,"P1 appended parameter indices");
+    check(p.getParameters().size()==283+verbp::kMaxModHostOuts && p.apvts.getParameter("makeup")->getParameterIndex()==249 && p.apvts.getParameter("s1path")->getParameterIndex()==250 && p.apvts.getParameter("lpath")->getParameterIndex()==282 && p.modOutParameter(0) && p.modOutParameter(0)->getParameterIndex()==283 && p.modOutParameter(15) && p.modOutParameter(15)->getParameterIndex()==298,"First 283 parameter indices unchanged + 16 appended Mod Out");
     raw.smooth=false;raw.points={PathPoint{1,3,1.5},PathPoint{15,3,1.5}};check(p.setMovementPath(0,raw),"P1 set path");
     juce::MemoryBlock saved;p.getStateInformation(saved);
     setP(p,"s1path",.75);p.setMovementPath(0,{});p.setStateInformation(saved.getData(),(int)saved.getSize());check(waitReady(p,90),"P1 state reload ready");

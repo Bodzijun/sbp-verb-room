@@ -1119,6 +1119,128 @@ static std::pair<int, int> joinCounts(const juce::var& details) {
     return {(int)details.getProperty("joined", -1), (int)details.getProperty("skipped", -1)};
 }
 
+static void testG1AzimuthKeys(Rig& r) {
+    std::printf("G1: azimuth key commands, schema, coalescing, undo/redo, source.remove, path.clear\n");
+    r.reset("G1");
+    auto& s = r.session();
+    const int d0 = s.undoDepth();
+
+    // 1. Rejections before path exists (< 2 points)
+    {
+        r.validateCommands = false;
+        auto noPath = r.send(R"({"op":"path.setAzimuthKey","object":0,"t":25,"az":45})");
+        auto noPathBulk = r.send(R"({"op":"path.setAzimuthKeys","object":0,"keys":[{"t":10,"az":20}]})");
+        r.validateCommands = true;
+        check(!noPath.ok && noPath.code == "invalid" && !noPathBulk.ok && noPathBulk.code == "invalid" && s.undoDepth() == d0,
+              "G1 commands reject azKeys when object has < 2 path points");
+    }
+
+    // 2. Set moving path + add/update/remove azimuth keys (schema-validated!)
+    check(r.send(R"({"op":"path.set","object":0,"points":[[1,1,1.5],[4,1,1.5]]})").ok, "G1 path.set on source 0");
+    check(r.send(R"({"op":"path.setAzimuthKey","object":0,"t":60,"az":-90,"easing":"easeInOut"})").ok, "G1 add first azKey");
+    check(r.send(R"({"op":"path.setAzimuthKey","object":0,"t":20,"az":45,"easing":"hold"})").ok, "G1 add earlier azKey sorts before t=60");
+    auto mp = r.p.getMovementPath(0);
+    check(mp.azKeys.size() == 2 && mp.azKeys[0].t == 20 && mp.azKeys[0].easing == verbp::AzimuthEasing::Hold
+          && mp.azKeys[1].t == 60 && mp.azKeys[1].azDeg == -90,
+          "G1 keys stay sorted by t");
+
+    // Update by matching t preserves easing when omitted
+    check(r.send(R"({"op":"path.setAzimuthKey","object":0,"t":20,"az":135})").ok, "G1 update by matching t");
+    mp = r.p.getMovementPath(0);
+    check(mp.azKeys.size() == 2 && mp.azKeys[0].azDeg == 135 && mp.azKeys[0].easing == verbp::AzimuthEasing::Hold,
+          "G1 matching-t update preserves easing when easing is omitted");
+
+    // Coalescing on index drag (same object/az/index within 750ms)
+    const int depthBeforeDrag = s.undoDepth();
+    check(r.send(R"({"op":"path.setAzimuthKey","object":0,"index":0,"az":100})").ok, "G1 coalesce step 1");
+    r.clockMs += 100;
+    check(r.send(R"({"op":"path.setAzimuthKey","object":0,"index":0,"az":110})", nullptr, nullptr, nullptr, false).ok, "G1 coalesce step 2");
+    r.clockMs += 100;
+    check(r.send(R"({"op":"path.setAzimuthKey","object":0,"index":0,"t":25,"az":120})", nullptr, nullptr, nullptr, false).ok, "G1 coalesce step 3");
+    check(s.undoDepth() == depthBeforeDrag + 1, "G1 repeated index edits within 750ms coalesce into ONE undo step");
+    check(s.undo().ok && r.p.getMovementPath(0).azKeys[0].t == 20 && r.p.getMovementPath(0).azKeys[0].azDeg == 135,
+          "G1 undo of coalesced drag reverts to state before step 1");
+    check(s.redo().ok && r.p.getMovementPath(0).azKeys[0].t == 25 && r.p.getMovementPath(0).azKeys[0].azDeg == 120,
+          "G1 redo restores final coalesced drag value");
+
+    // Editing different index starts a new step
+    check(r.send(R"({"op":"path.setAzimuthKey","object":0,"index":1,"easing":"linear","az":-45})").ok, "G1 update index 1");
+    check(s.undoDepth() == depthBeforeDrag + 2, "G1 editing another index does not coalesce with index 0");
+
+    // Invalid rejections
+    {
+        const auto rev = r.p.getRevision();
+        const int ud = s.undoDepth();
+        r.validateCommands = false;
+        for (const char* bad : {
+                 R"({"op":"path.setAzimuthKey","object":0,"t":-1,"az":0})",
+                 R"({"op":"path.setAzimuthKey","object":0,"t":101,"az":0})",
+                 R"({"op":"path.setAzimuthKey","object":0,"t":50,"az":-181})",
+                 R"({"op":"path.setAzimuthKey","object":0,"t":50,"az":181})",
+                 R"({"op":"path.setAzimuthKey","object":0,"t":50,"az":0,"easing":"bounce"})",
+                 R"({"op":"path.setAzimuthKey","object":0,"index":9,"az":0})",
+                 R"({"op":"path.setAzimuthKey","object":0,"index":0})",
+                 R"({"op":"path.removeAzimuthKey","object":0,"index":9})"
+             }) {
+            auto res = r.send(bad);
+            check(!res.ok && res.code == "invalid", std::string("G1 invalid command rejected: ") + bad);
+        }
+        r.validateCommands = true;
+        check(r.p.getRevision() == rev && s.undoDepth() == ud, "G1 rejected commands leave revision & history untouched");
+    }
+
+    // Remove key + bulk set + 128-key cap check
+    check(r.send(R"({"op":"path.removeAzimuthKey","object":0,"index":0})").ok && r.p.getMovementPath(0).azKeys.size() == 1,
+          "G1 path.removeAzimuthKey removes key cleanly");
+    {
+        std::string keys128 = R"({"op":"path.setAzimuthKeys","object":0,"keys":[)";
+        for (int i = 0; i < 128; ++i) {
+            if (i) keys128 += ",";
+            keys128 += R"({"t":)" + std::to_string(100.0 * i / 127.0) + R"(,"az":)" + std::to_string((i % 2) ? 10 : -10) + "}";
+        }
+        keys128 += "]}";
+        check(r.send(keys128).ok && r.p.getMovementPath(0).azKeys.size() == 128, "G1 bulk path.setAzimuthKeys accepts 128 keys");
+        r.validateCommands = false;
+        auto over = r.send(R"({"op":"path.setAzimuthKey","object":0,"t":50.1234,"az":15})");
+        r.validateCommands = true;
+        check(!over.ok && over.code == "invalid" && r.p.getMovementPath(0).azKeys.size() == 128, "G1 129th distinct key rejected");
+    }
+
+    // path.set preserving azKeys when omitted, path.clear clearing azKeys + undo restoring both
+    check(r.send(R"({"op":"path.setAzimuthKeys","object":0,"keys":[{"t":10,"az":30,"easing":"hold"},{"t":90,"az":-30}]})").ok,
+          "G1 set 2 keys before path.set/clear");
+    check(r.send(R"({"op":"path.set","object":0,"points":[[1,1,1.5],[4,2,1.5],[4,3,1.5]]})").ok && r.p.getMovementPath(0).azKeys.size() == 2,
+          "G1 path.set preserves azKeys when azKeys field is omitted");
+    check(r.send(R"({"op":"path.setFlags","object":0,"orientMode":"lookAt","lookTarget":32,"orientOffset":15})").ok, "G1 set orientation flags");
+    check(r.send(R"({"op":"path.clear","object":0})").ok, "G1 path.clear");
+    check(r.p.getMovementPath(0).points.empty() && r.p.getMovementPath(0).azKeys.empty()
+          && r.p.getMovementPath(0).lookAt && r.p.getMovementPath(0).orientOffset == 15,
+          "G1 path.clear clears azKeys along with points while keeping orientation settings");
+    check(s.undo().ok && r.p.getMovementPath(0).azKeys.size() == 2 && r.p.getMovementPath(0).points.size() == 3,
+          "G1 undo of path.clear restores both points and azKeys");
+
+    // Scoped undo: unrelated air edit does not revert azKeys
+    const auto beforeAir = r.p.getMovementPath(0).azKeys;
+    check(r.send(R"({"op":"path.setAzimuthKey","object":0,"index":0,"az":-75})").ok, "G1 scoped edit key");
+    check(r.send(R"({"op":"room.setAir","tempC":15})").ok, "G1 unrelated air edit");
+    check(s.undo().ok && r.p.getMovementPath(0).azKeys[0].azDeg == -75 && r.p.getDisplayScene().tempC != 15,
+          "G1 air undo leaves azKeys alone");
+    check(s.undo().ok && r.p.getMovementPath(0).azKeys == beforeAir, "G1 next undo reverts only azKeys");
+
+    // source.remove reindexing shifts azKeys along with paths and undo restores both
+    check(r.send(R"({"op":"path.set","object":1,"points":[[2,2,1.5],[2,3,1.5]],"azKeys":[{"t":25,"az":111,"easing":"easeIn"}]})").ok,
+          "G1 path.set with inline azKeys on source 1");
+    check(r.send(R"({"op":"source.remove","index":0})").ok, "G1 remove source 0");
+    check(r.p.getMovementPath(0).azKeys.size() == 1 && r.p.getMovementPath(0).azKeys[0].azDeg == 111
+          && r.p.getMovementPath(0).azKeys[0].easing == verbp::AzimuthEasing::EaseIn,
+          "G1 source.remove shifts remaining source path + azKeys to index 0");
+    check(s.undo().ok && r.p.getSources().size() == 2 && r.p.getMovementPath(0).azKeys.size() == 2
+          && r.p.getMovementPath(1).azKeys.size() == 1 && r.p.getMovementPath(1).azKeys[0].azDeg == 111,
+          "G1 undo of source.remove restores both sources and their azKeys");
+
+    while (s.canUndo()) s.undo();
+}
+
 static void testCornerRepairClusters(Rig& r) {
     const auto* command = verbp::findDescriptor("scene.joinCorners");
     const auto model = [&](std::initializer_list<double> xs) {
@@ -1376,6 +1498,177 @@ static void testSourceSumAndFreePoints() {
           "F5 switching Sum off makes free points active again");
 }
 
+static void testG3AutomationRange(Rig& r) {
+    std::printf("G3: automation range commands, schema validation, clamping and 1-step undo/redo\n");
+    r.reset("G3 start");
+    check(r.send(R"({"op":"listener.set","xM":14.0,"yM":1.0,"zM":1.5})").ok, "G3 listener.set at 14m before narrowing");
+    check(r.send(R"({"op":"room.fitAutomationRange"})").ok, "G3 room.fitAutomationRange passes schema + executes");
+    check(!r.p.getAutomationRange().isDefault(), "G3 fitted range is non-default");
+    check(r.send(R"({"op":"room.setAutomationRange","xM":[0,8],"yM":[0,6],"zM":[0,4]})").ok,
+          "G3 manual room.setAutomationRange passes schema + executes");
+    check(std::abs(r.p.apvts.getRawParameterValue("lx")->load() - 8.0f) < 0.01f, "G3 lx=14 clamped to 8.0");
+    check(!r.send(R"({"op":"listener.set","xM":12.0})").ok, "G3 listener.set rejects xM=12 outside [0,8]");
+    check(r.session().undo().ok, "G3 undo restores pre-clamp coordinates and previous range in 1 step");
+    check(std::abs(r.p.apvts.getRawParameterValue("lx")->load() - 14.0f) < 0.01f, "G3 undo restores lx=14");
+    check(r.send(R"({"op":"room.setAutomationRange","reset":true})").ok && r.p.getAutomationRange().isDefault(),
+          "G3 reset:true restores ±200 / 0..30 range");
+    while (r.session().canUndo()) r.session().undo();
+    r.reset("G3 end");
+}
+
+static void testG4ModulationCommands(Rig& r) {
+    std::printf("G4: modulation.* and path.setLfo commands, schema validation, 64-route cap, source.remove reindex & undo\n");
+    r.reset("G4 start");
+
+    const std::string routeA = R"({"enabled":true,"object":0,"driver":"distanceToListener","curve":{"inputRange":[1,10],"outputRange":[20000,800],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":0.5,"y":0.6,"smooth":true},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"sourceLowPass","attackMs":15,"releaseMs":80})";
+    const std::string routeB = R"({"enabled":true,"object":0,"driver":"distanceToPoint","point":[2,3,1.5],"curve":{"inputRange":[0,5],"outputRange":[-12,0],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"target":"sourceGain"})";
+
+    check(r.send(R"({"op":"modulation.addRoute","route":)" + routeA + "}").ok && r.p.getModulationRoutes().size() == 1,
+          "G4 modulation.addRoute passes schema and adds route");
+    check(r.send(R"({"op":"modulation.setRoute","index":0,"route":)" + routeB + "}").ok
+          && r.p.getModulationRoutes()[0].target == verbp::ModTarget::SourceGain
+          && r.p.getModulationRoutes()[0].pointY == 3.0,
+          "G4 modulation.setRoute updates route with distanceToPoint");
+
+    // Undo coalesced/previous route step
+    check(r.session().undo().ok && r.p.getModulationRoutes()[0].target == verbp::ModTarget::SourceLowPass,
+          "G4 undo restores modulation.setRoute");
+    check(r.session().redo().ok && r.p.getModulationRoutes()[0].target == verbp::ModTarget::SourceGain,
+          "G4 redo restores modulation.setRoute");
+
+    // 64-route budget cap
+    std::string arr64 = "[";
+    for (int i = 0; i < 64; ++i) {
+        if (i > 0) arr64 += ",";
+        arr64 += routeA;
+    }
+    arr64 += "]";
+    check(r.send(R"({"op":"modulation.setRoutes","routes":)" + arr64 + "}").ok && r.p.getModulationRoutes().size() == 64,
+          "G4 modulation.setRoutes accepts 64 routes");
+    const auto capRes = r.send(R"({"op":"modulation.addRoute","route":)" + routeA + "}");
+    check(!capRes.ok && capRes.code == "budgetExceeded", "G4 modulation.addRoute rejects 65th route with budgetExceeded");
+
+    // Validation rejections
+    r.validateCommands = false;
+    check(!r.send(R"({"op":"path.setLfo","object":0,"lfo":{"enabled":true,"rateHz":9,"depth":0.5}})").ok,
+          "G4 path.setLfo rejects rateHz > 8");
+    check(!r.send(R"({"op":"path.setLfo","object":0,"lfo":{"enabled":true,"rateHz":2,"depth":0.5}})").ok,
+          "G4 path.setLfo rejects non-default LFO on empty path");
+    check(!r.send(R"({"op":"modulation.addRoute","route":{"object":32,"driver":"x","curve":{"inputRange":[0,10],"outputRange":[0,100],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"target":"mix","targetObject":0}})").ok,
+          "G4 rejects global target with non-negative targetObject");
+    r.validateCommands = true;
+
+    // Path set + setLfo + flags + undo
+    check(r.send(R"({"op":"path.set","object":0,"points":[[1,1,1.5],[4,1,1.5]]})").ok, "G4 path.set for LFO");
+    check(r.send(R"({"op":"path.setLfo","object":0,"lfo":{"enabled":true,"shape":"smoothRandom","rateHz":3,"depth":0.4,"phaseDeg":45,"seed":12}})").ok,
+          "G4 path.setLfo passes schema and updates PathLfo");
+    check(r.p.getMovementPath(0).lfo.enabled && r.p.getMovementPath(0).lfo.shape == verbp::LfoShape::SmoothRandom && r.p.getMovementPath(0).lfo.seed == 12,
+          "G4 processor stores PathLfo accurately");
+    check(r.send(R"({"op":"path.clear","object":0})").ok && r.p.getMovementPath(0).lfo.isDefault(),
+          "G4 path.clear resets PathLfo to default");
+
+    // source.remove reindexing + 1-step undo/redo (Rig loads box with 2 sources: A and B)
+    const std::string routeSrc1 = R"({"enabled":true,"object":1,"driver":"y","curve":{"inputRange":[0,10],"outputRange":[-6,0],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"target":"sourceHighShelf"})";
+    const std::string routeCross = R"({"enabled":true,"object":32,"driver":"z","curve":{"inputRange":[0,5],"outputRange":[20,1000],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"targetObject":1,"target":"sourceHighPass"})";
+    check(r.send(R"({"op":"modulation.setRoutes","routes":[)" + routeA + "," + routeSrc1 + "," + routeCross + "]}").ok
+          && r.p.getModulationRoutes().size() == 3, "G4 set 3 routes across 2 sources");
+    check(r.send(R"({"op":"source.remove","index":0})").ok, "G4 source.remove 0 succeeds");
+    {
+        const auto after = r.p.getModulationRoutes();
+        check(after.size() == 2 && after[0].object == 0 && after[0].target == verbp::ModTarget::SourceHighShelf
+              && after[1].object == verbp::kListener && after[1].targetObject == 0 && after[1].target == verbp::ModTarget::SourceHighPass,
+              "G4 source.remove drops removed source routes and reindexes source 1 -> 0");
+    }
+    check(r.session().undo().ok && r.p.getModulationRoutes().size() == 3 && r.p.getSources().size() == 2,
+          "G4 undo restores source 0 and original 3 modulation routes in 1 step");
+
+    check(r.send(R"({"op":"modulation.removeRoute","index":0})").ok && r.p.getModulationRoutes().size() == 2,
+          "G4 modulation.removeRoute works");
+    check(r.send(R"({"op":"modulation.setRoutes","routes":[]})").ok && r.p.getModulationRoutes().empty(),
+          "G4 modulation.setRoutes([]) clears routes");
+
+    // G7: backend command clamping to target legal range & atomic 1-step undo on target switch
+    {
+        const std::string outOfRangeGain = R"({"enabled":true,"object":0,"driver":"distanceToListener","curve":{"inputRange":[1,15],"outputRange":[20,20000],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"sourceGain","attackMs":15,"releaseMs":80})";
+        check(r.send(R"({"op":"modulation.addRoute","route":)" + outOfRangeGain + "}").ok,
+              "G7 command accepts and clamps out-of-range sourceGain outputRange");
+        {
+            const auto routes = r.p.getModulationRoutes();
+            check(routes.size() == 1 && routes[0].curve.outputMin == 12.0 && routes[0].curve.outputMax == 12.0,
+                  "G7 sourceGain [20, 20000] clamped to [12, 12] in command layer");
+        }
+        const std::string outOfRangeMix = R"({"enabled":true,"object":32,"driver":"x","curve":{"inputRange":[-10,10],"outputRange":[200,-150],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"target":"mix"})";
+        check(r.send(R"({"op":"modulation.setRoute","index":0,"route":)" + outOfRangeMix + "}").ok,
+              "G7 command accepts and clamps out-of-range mix outputRange");
+        {
+            const auto routes = r.p.getModulationRoutes();
+            check(routes.size() == 1 && routes[0].curve.outputMin == 100.0 && routes[0].curve.outputMax == -100.0,
+                  "G7 mix [200, -150] clamped to [100, -100]");
+        }
+        const std::string lpfFull = R"({"enabled":true,"object":0,"driver":"distanceToListener","curve":{"inputRange":[1,15],"outputRange":[20,20000],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":true},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"sourceLowPass","attackMs":15,"releaseMs":80})";
+        const std::string gainSafe = R"({"enabled":true,"object":0,"driver":"distanceToListener","curve":{"inputRange":[1,15],"outputRange":[0,-24],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"sourceGain","attackMs":15,"releaseMs":80})";
+        check(r.send(R"({"op":"modulation.setRoute","index":0,"route":)" + lpfFull + "}").ok,
+              "G7 set LPF 20..20000 route");
+        check(r.send(R"({"op":"modulation.setRoute","index":0,"route":)" + gainSafe + "}").ok,
+              "G7 switch target to safe gain 0..-24 immediately (<750ms)");
+        check(r.session().undo().ok, "G7 undo after target switch succeeds");
+        {
+            const auto routes = r.p.getModulationRoutes();
+            check(routes.size() == 1 && routes[0].target == verbp::ModTarget::SourceLowPass
+                  && routes[0].curve.outputMin == 20.0 && routes[0].curve.outputMax == 20000.0,
+                  "G7 single undo restores LPF target AND [20, 20000] range without coalescing");
+        }
+        check(r.send(R"({"op":"modulation.setRoutes","routes":[]})").ok, "G7 clear routes");
+    }
+
+    // G8: target='none' ("Host output only") + hostOut 0..16 validation, source.remove, undo/redo
+    {
+        const std::string hostRoute = R"({"enabled":true,"object":1,"driver":"x","curve":{"inputRange":[0,10],"outputRange":[0,1],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"none","hostOut":4,"attackMs":15,"releaseMs":80})";
+        check(r.send(R"({"op":"modulation.addRoute","route":)" + hostRoute + "}").ok,
+              "G8 modulation.addRoute accepts target=none and hostOut=4");
+        {
+            const auto routes = r.p.getModulationRoutes();
+            check(routes.size() == 1 && routes[0].target == verbp::ModTarget::None && routes[0].hostOut == 4,
+                  "G8 processor stores target=None and hostOut=4");
+        }
+        r.validateCommands = false;
+        check(!r.send(R"({"op":"modulation.addRoute","route":{"object":0,"driver":"x","curve":{"inputRange":[0,10],"outputRange":[0,1],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"target":"none","targetObject":0,"hostOut":1}})").ok,
+              "G8 rejects target=none with non-negative targetObject");
+        check(!r.send(R"({"op":"modulation.addRoute","route":{"object":0,"driver":"x","curve":{"inputRange":[0,10],"outputRange":[0,1],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"target":"none","hostOut":17}})").ok,
+              "G8 rejects hostOut > 16");
+        check(!r.send(R"({"op":"modulation.addRoute","route":{"object":0,"driver":"x","curve":{"inputRange":[0,10],"outputRange":[0,1],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"target":"none","hostOut":-1}})").ok,
+              "G8 rejects negative hostOut");
+        r.validateCommands = true;
+
+        // Changing hostOut on existing route creates a clean undo step (coalescing includes hostOut)
+        const std::string hostRouteMoved = R"({"enabled":true,"object":1,"driver":"x","curve":{"inputRange":[0,10],"outputRange":[0,1],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"none","hostOut":9,"attackMs":15,"releaseMs":80})";
+        check(r.send(R"({"op":"modulation.setRoute","index":0,"route":)" + hostRouteMoved + "}").ok
+              && r.p.getModulationRoutes()[0].hostOut == 9,
+              "G8 setRoute updates hostOut from 4 to 9");
+        check(r.session().undo().ok && r.p.getModulationRoutes()[0].hostOut == 4,
+              "G8 undo restores previous hostOut=4");
+        check(r.session().redo().ok && r.p.getModulationRoutes()[0].hostOut == 9,
+              "G8 redo restores hostOut=9");
+
+        // source.remove drops route on source 0, reindexes source 1 -> 0 while preserving hostOut=9
+        const std::string src0Host = R"({"enabled":true,"object":0,"driver":"y","curve":{"inputRange":[0,10],"outputRange":[0,1],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"targetObject":-1,"target":"none","hostOut":5,"attackMs":15,"releaseMs":80})";
+        check(r.send(R"({"op":"modulation.setRoutes","routes":[)" + src0Host + "," + hostRouteMoved + "]}").ok,
+              "G8 set two hostOut routes across 2 sources");
+        check(r.send(R"({"op":"source.remove","index":0})").ok, "G8 source.remove 0 succeeds");
+        {
+            const auto after = r.p.getModulationRoutes();
+            check(after.size() == 1 && after[0].object == 0 && after[0].target == verbp::ModTarget::None && after[0].hostOut == 9,
+                  "G8 source.remove drops src0 route and keeps src1->src0 hostOut=9");
+        }
+        check(r.session().undo().ok && r.p.getModulationRoutes().size() == 2 && r.p.getModulationRoutes()[0].hostOut == 5,
+              "G8 undo restores removed source and both hostOut routes");
+        check(r.send(R"({"op":"modulation.setRoutes","routes":[]})").ok, "G8 clear routes");
+    }
+
+    while (r.session().canUndo()) r.session().undo();
+    r.reset("G4 end");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     juce::ScopedJuceInitialiser_GUI init;
@@ -1419,6 +1712,9 @@ int main() {
         timed("F7 clusters", testCornerRepairClusters);
         timed("F7 snap precision", testCornerSnapPrecision);
         timed("F7 repair impulse", testCornerRepairImpulse);
+        timed("G1 azimuth keys", testG1AzimuthKeys);
+        timed("G3 automation range", testG3AutomationRange);
+        timed("G4 modulation core", testG4ModulationCommands);
     } catch (const std::exception& e) { std::printf("  [FAIL] unexpected exception: %s\n", e.what()); ++fails; }
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("\neditor_commands: %d PASS, %d FAIL, %.1f s\n", passes, fails, sec);

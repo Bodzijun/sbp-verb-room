@@ -1,7 +1,10 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <algorithm>
 #include <atomic>
+#include "AutomationRange.h"
+#include "Modulation.h"
 #include "MovementPath.h"
 #include <chrono>
 #include <cstdint>
@@ -53,6 +56,54 @@ struct TailSettings {
     int rays = 48000;
     bool adaptive = true;
 };
+
+class ModOutParameter final : public juce::AudioProcessorParameterWithID {
+public:
+    explicit ModOutParameter(int slotOneBased)
+        : juce::AudioProcessorParameterWithID(
+              juce::ParameterID{"mo" + juce::String(slotOneBased), 1},
+              "Mod Out " + juce::String(slotOneBased),
+              juce::AudioProcessorParameterWithIDAttributes()
+                  .withCategory(juce::AudioProcessorParameter::genericParameter)
+                  .withAutomatable(true)) {}
+
+    float getValue() const override { return value.load(std::memory_order_relaxed); }
+    void setValue(float) override {} // modulation output only; ignore host write-backs / automation
+    float getDefaultValue() const override { return (float)kModHostOutNeutral; }
+    bool isAutomatable() const override { return true; }
+    juce::String getText(float v, int) const override {
+        return juce::String(std::clamp(v, 0.0f, 1.0f), 3);
+    }
+    float getValueForText(const juce::String& text) const override {
+        return std::clamp(text.getFloatValue(), 0.0f, 1.0f);
+    }
+
+    void pushBlockValue(float targetVal) {
+        const float clamped = std::clamp(targetVal, 0.0f, 1.0f);
+        const float prev = lastSent.load(std::memory_order_relaxed);
+        if (std::abs(clamped - prev) > kHostOutEpsilon) {
+            value.store(clamped, std::memory_order_relaxed);
+            lastSent.store(clamped, std::memory_order_relaxed);
+            sendValueChangedMessageToListeners(clamped);
+        }
+    }
+
+    void resetToNeutralIfChanged() {
+        constexpr float kNeutral = (float)kModHostOutNeutral;
+        const float cur = value.load(std::memory_order_relaxed);
+        const float prev = lastSent.load(std::memory_order_relaxed);
+        if (cur != kNeutral || prev != kNeutral) {
+            value.store(kNeutral, std::memory_order_relaxed);
+            lastSent.store(kNeutral, std::memory_order_relaxed);
+            sendValueChangedMessageToListeners(kNeutral);
+        }
+    }
+
+private:
+    std::atomic<float> value{(float)kModHostOutNeutral};
+    std::atomic<float> lastSent{(float)kModHostOutNeutral};
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ModOutParameter)
+};
 }  // namespace verbp
 
 class VerbProcessor : public juce::AudioProcessor, private juce::Thread {
@@ -85,6 +136,8 @@ public:
     void setStateInformation(const void*, int) override;
     verbp::MovementPath getMovementPath(int object) const;
     bool setMovementPath(int object, const verbp::MovementPath&);
+    std::vector<verbp::ModulationRoute> getModulationRoutes() const;
+    bool setModulationRoutes(const std::vector<verbp::ModulationRoute>& routes);
     static juce::String pathParamId(int o) { return o==verbp::kListener ? "lpath" : "s"+juce::String(o+1)+"path"; }
     bool autoMakeupDb(float& value) const;
 
@@ -243,6 +296,18 @@ public:
     // Web meters accumulate between polls; native last-block metering is unchanged.
     void setWebMetersActive(bool on) { webMetersActive.store(on, std::memory_order_relaxed); }
     float liveAzimuth(int object) const noexcept { return object >= 0 && object <= verbp::kMaxSources ? liveAz[(size_t)object].load(std::memory_order_relaxed) : 0.f; }
+    struct ModLiveSample {
+        float raw = 0.f;
+        float value = 0.f;
+        bool active = false;
+    };
+    int webConfiguredModRouteCount() const noexcept { return modConfiguredCount.load(std::memory_order_acquire); }
+    bool webModTelemetry(ModLiveSample* out, int maxCount, int& outCount) const noexcept;
+    static juce::String modOutParamId(int slotZeroBased) { return "mo" + juce::String(slotZeroBased + 1); }
+    juce::AudioProcessorParameter* modOutParameter(int slotZeroBased) const noexcept {
+        return (slotZeroBased >= 0 && slotZeroBased < verbp::kMaxModHostOuts) ? modOutParams[(size_t)slotZeroBased] : nullptr;
+    }
+    bool isCreativeMode() const noexcept { return modeParam && modeParam->load(std::memory_order_relaxed) >= 0.5f; }
     float takeWebInputPeak(int ch) { return ch >= 0 && ch < verbp::kMaxInputChannels ? webInPeaks[(size_t)ch].exchange(0.f, std::memory_order_relaxed) : 0.f; }
     int numPoints() const { return numPts.load(); }
     int numOutputChannels() const { return builtOutCh.load(); }  // channels the engine renders (the layout's)
@@ -256,6 +321,17 @@ public:
         return true;
     }
 
+    verbp::AutomationRange getAutomationRange() const;
+    void setAutomationRange(const verbp::AutomationRange& range, bool clampObjects = true, bool notifyHost = true);
+    verbp::AutomationRange computeFitAutomationRange(double marginM = -1.0) const;
+    verbp::AutomationRange fitAutomationRangeToScene(bool clampObjects = true, bool notifyHost = true, double marginM = -1.0);
+    int countObjectsOutsideRange(const verbp::AutomationRange& range) const;
+
+private:
+    // Declared before `apvts` so dynamic position parameters share valid axis stores during construction.
+    std::array<std::shared_ptr<verbp::AxisRangeStore>, 3> axisStores;
+
+public:
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -279,6 +355,7 @@ private:
         std::vector<std::vector<float>> in, out;  // scratch: one per point / per output channel
         std::vector<float> detector;
         std::vector<float> lfe;                   // summed LFE inputs for the block
+        std::vector<float> wetMix, dryMix;        // modulated per-sample dry/wet curves when !positioned
         double constructionSize=100.;
         int R = 0, lfeOut = -1, maxBlock = 512;
         bool ambisonic = false;
@@ -340,6 +417,7 @@ private:
     juce::String sceneText, sceneName;
     std::vector<verbp::SourceCfg> srcCfg;
     verbp::OutputCfg outCfg;
+    verbp::AutomationRange automationRange;
     std::atomic<int> ambisonicsFormat{0}; // both output choices published as one lock-free value
     void publishAmbisonicsFormat(); // under dispLock
     verbp::TailSettings tailSettings;
@@ -385,6 +463,20 @@ private:
     mutable juce::CriticalSection pathLock;
     std::array<verbp::MovementPath, verbp::kMaxSources+1> movementPaths;
     std::array<verbp::PathMailbox, verbp::kMaxSources+1> pathMailboxes;
+    mutable juce::CriticalSection modLock;
+    std::vector<verbp::ModulationRoute> modRoutes;
+    std::unique_ptr<verbp::ModRoutesMailbox> modMailbox;
+    juce::CriticalSection wallMailLock;
+    std::unique_ptr<verbp::WallSnapshotMailbox> wallMailbox;
+    std::unique_ptr<verbp::ModulationProcessor> modProc;
+    std::array<verbp::ModOutParameter*, verbp::kMaxModHostOuts> modOutParams{};
+    int64_t modFallbackClock = 0;
+    std::atomic<int> modConfiguredCount{0};
+    std::array<std::atomic<float>, verbp::kMaxModRoutes> modLiveRaw{};
+    std::array<std::atomic<float>, verbp::kMaxModRoutes> modLiveValue{};
+    std::array<std::atomic<uint8_t>, verbp::kMaxModRoutes> modLiveActive{};
+    std::atomic<int> modLiveCount{0};
+    std::atomic<uint64_t> modLiveGen{0};
     std::array<std::atomic<float>, verbp::kMaxSources+1> liveAz{};  // E19: azimuth actually applied in the last block (after Along path / Look at)
     std::atomic<float>* pathParams[verbp::kMaxSources+1] = {};
     std::atomic<float>* makeupParam = nullptr;

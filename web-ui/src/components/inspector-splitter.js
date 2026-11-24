@@ -1,10 +1,12 @@
 import { element } from './dom.js';
+const lastPx = new WeakMap();
 // Opaque per-view state, shared with camera/selection/accordion persistence.
 export function inspectorSplitter(rack, store) {
   const bar = element('div', { className: 'inspector-splitter', role: 'separator', tabIndex: 0,
     'aria-label': 'Inspector / tabs split', 'aria-orientation': 'horizontal', 'data-focus-key': 'inspector-split',
     title: 'Drag to resize · Arrow Up/Down · double-click or Home resets' });
   let share = store.view.inspectorSplit ?? null, drag = null;
+  if (lastPx.has(store)) rack.style.setProperty('--inspector-h', `${lastPx.get(store)}px`);
   const limits = () => {
     const macro = rack.querySelector('.macro-row')?.getBoundingClientRect().height || 76;
     return { min: 176, max: Math.max(176, rack.clientHeight - macro - 18 - 154) };
@@ -14,6 +16,7 @@ export function inspectorSplitter(rack, store) {
     // Default proportion: 70 % of the space shared by the inspector and the tabs goes to the inspector (top), 30 % to the tabs.
     const shared = rack.clientHeight - (rack.querySelector('.macro-row')?.getBoundingClientRect().height || 76) - 18;
     const px = Math.max(min, Math.min(max, value == null ? 0.7 * shared : value * rack.clientHeight));
+    lastPx.set(store, px);
     rack.style.setProperty('--inspector-h', `${px}px`);
     bar.setAttribute('aria-valuemin', min); bar.setAttribute('aria-valuemax', max); bar.setAttribute('aria-valuenow', Math.round(px));
   };

@@ -16,7 +16,7 @@ Verb Room is built by one person. If it is useful to you:
 
 </details>
 
-**Latest release: [0.2.3](docs/Release_0.2.3_en.md)** · [українською](docs/Release_0.2.3_uk.md). Version 0.2.3 adds corner snapping and repair, Ambisonics output options and clearer recording and baking controls. See also [0.2.2](docs/Release_0.2.2_en.md) · [українською](docs/Release_0.2.2_uk.md).
+**Latest release: [0.3.0](docs/Release_0.3.0_en.md)** · [українською](docs/Release_0.3.0_uk.md). Version 0.3.0 adds timeline azimuth keys, per-instance position automation range fitting (`Fit to scene`), motion modulation routes and Path LFO in Creative mode, 16 `Mod Out` host output parameters, collapsible inspector sections, and an About dialog. See also [0.2.3](docs/Release_0.2.3_en.md) · [українською](docs/Release_0.2.3_uk.md).
 
 **User manual:** [English](docs/Manual_en.md) · [українською](docs/Manual_uk.md), including a guide to baking paths and recording host automation.
 
@@ -29,7 +29,7 @@ Instead of a fixed impulse response, Verb Room traces the sound through a room y
 materials, floor/ceiling zones, lowered ceilings, doorways) and re-solves the geometry as the sources and the
 listener move. Position and orientation of every source and of the listener are **automatable parameters**.
 
-> Status: working alpha (0.2.3). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
+> Status: working alpha (0.3.0). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
 > Windows x64 has been tested in REAPER. Experimental macOS Universal and Linux x86_64 builds are provided by GitHub Actions and need host testing. The default Windows build requires AVX2/FMA; the portable CI builds do not. macOS test builds are ad-hoc signed, not Apple-notarized.
 
 ## What it does

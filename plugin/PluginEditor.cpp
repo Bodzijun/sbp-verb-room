@@ -1194,19 +1194,28 @@ void VerbEditor::updateSliderRanges() {
     const verb::Scene dsc = proc.getDisplayScene();
     const double height = dsc.ceilMat < 0 ? 30.0 : dsc.height;  // an open sky has no ceiling to stay under
     const bool bounded = proc.getBounds(b);
+    const auto ar = proc.getAutomationRange();
     updatingUI = true;
     // the range always contains the object's current value, so a position dragged far away still shows correctly
-    const double vx = paramValue(selected, 0), vy = paramValue(selected, 1);
-    sliders[0].setRange(std::min(bounded ? b[0] : -50.0, vx - 1.0), std::max(bounded ? b[1] : 50.0, vx + 1.0), 0.001);
-    sliders[1].setRange(std::min(bounded ? b[2] : -50.0, vy - 1.0), std::max(bounded ? b[3] : 50.0, vy + 1.0), 0.001);
-    sliders[2].setRange(0.0, std::max(0.1, height), 0.001);
+    const double vx = paramValue(selected, 0), vy = paramValue(selected, 1), vz = paramValue(selected, 2);
+    if (!ar.isDefault()) {
+        sliders[0].setRange(std::min(ar.xMin, vx), std::max(ar.xMax, vx), 0.001);
+        sliders[1].setRange(std::min(ar.yMin, vy), std::max(ar.yMax, vy), 0.001);
+        sliders[2].setRange(std::min(ar.zMin, vz), std::max(ar.zMax, vz), 0.001);
+    } else {
+        sliders[0].setRange(std::min(bounded ? b[0] : -50.0, vx - 1.0), std::max(bounded ? b[1] : 50.0, vx + 1.0), 0.001);
+        sliders[1].setRange(std::min(bounded ? b[2] : -50.0, vy - 1.0), std::max(bounded ? b[3] : 50.0, vy + 1.0), 0.001);
+        sliders[2].setRange(0.0, std::max(0.1, height), 0.001);
+    }
     sliders[3].setRange(-180.0, 180.0, 0.1);
     updatingUI = false;
 }
 
 void VerbEditor::syncSliders() {
-    const double vx = paramValue(selected, 0), vy = paramValue(selected, 1);  // dragged/automated beyond the range?
-    if (vx < sliders[0].getMinimum() || vx > sliders[0].getMaximum() || vy < sliders[1].getMinimum() || vy > sliders[1].getMaximum()) updateSliderRanges();
+    const double vx = paramValue(selected, 0), vy = paramValue(selected, 1), vz = paramValue(selected, 2);  // dragged/automated beyond the range?
+    if (vx < sliders[0].getMinimum() || vx > sliders[0].getMaximum()
+        || vy < sliders[1].getMinimum() || vy > sliders[1].getMaximum()
+        || vz < sliders[2].getMinimum() || vz > sliders[2].getMaximum()) updateSliderRanges();
     updatingUI = true;
     for (int k = 0; k < 4; ++k)
         if (!sliders[(size_t)k].isMouseButtonDown()) sliders[(size_t)k].setValue(paramValue(selected, k), juce::dontSendNotification);
