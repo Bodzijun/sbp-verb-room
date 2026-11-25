@@ -896,7 +896,7 @@
         "outputChannels": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 16
+          "maximum": 64
         },
         "renderedChannels": {
           "type": "integer",

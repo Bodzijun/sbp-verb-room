@@ -1,4 +1,4 @@
-# Verb Room 0.3.0 user manual
+# Verb Room 0.3.1 user manual
 
 [Українська версія](Manual_uk.md)
 
@@ -22,7 +22,7 @@
 
 ## 1. What Verb Room is
 
-Verb Room is a VST3 reverb that models sound in a room you draw, with sources and a listener you can move. **Physical** plays the modeled room and **Creative** adds controls for shaping its sound. Version 0.3.0 is a working alpha for Windows x64, macOS Universal (Apple silicon and Intel), and Linux x86_64 (classic interface only). Check the [project download page](https://bodzijun.github.io/sbp-verb-room/) for packages and the [cross-platform build guide](Cross_platform_builds_en.md) for experimental CI builds.
+Verb Room is a VST3 reverb that models sound in a room you draw, with sources and a listener you can move. **Physical** plays the modeled room and **Creative** adds controls for shaping its sound. Version 0.3.1 is a working alpha for Windows x64, macOS Universal (Apple silicon and Intel), and Linux x86_64 (classic interface only). Check the [project download page](https://bodzijun.github.io/sbp-verb-room/) for packages and the [cross-platform build guide](Cross_platform_builds_en.md) for experimental CI builds.
 
 <a name="quick-start"></a>
 
@@ -112,7 +112,7 @@ By default, host position automation parameters (`s1x..s32z` and `lx..lz`) span 
 | **Sum for all sources** | Toggles Sum for multichannel sources. The button shows **Sum: all on**, **Sum: all off**, or **Sum: mixed**. Each bulk edit is one Undo. |
 | **Keep I/O** | Keeps the local source configuration and output settings when loading a room. Pose and mix settings can still import by source index. |
 
-The rack shows source, input, and point budgets and warns about overlapping routes. Verb Room supports up to 32 sources, 64 engine points, 64 inputs, and 16 outputs. Check the budgets after changing a format, a point layout, or a send. One stereo pair can be one logical source with two spatial points, or one point with **Sum** enabled.
+The rack shows source, input, and point budgets and warns about overlapping routes. Verb Room supports up to 32 sources, 64 engine points, 64 inputs, and 16 rendered outputs (on host output buses up to 64 channels). Check the budgets after changing a format, a point layout, or a send. One stereo pair can be one logical source with two spatial points, or one point with **Sum** enabled.
 
 ### Directivity and aim
 
@@ -153,6 +153,12 @@ Use more track channels if the inputs need them. The Ambisonic layout fixes its 
 **Size** scales the room and poses at runtime and is available in both modes in this build. The **Scale room** action in Edit room changes geometry once. **Predelay**, **Stereo width**, **Duck** (**Amount** and **Release**), and **Freeze** are Creative controls. Predelay delays wet sound, Stereo width adjusts spatial width where available, Duck attenuates the reflected sound while input is present, and Freeze holds the tail. Switching into Physical leaves the saved overrides available for the next switch to Creative.
 
 In **Mix**, **Positioned dry** makes the direct sound follow source and listener positions. With Positioned dry on, **Mix** sets the amount of reflected sound while keeping the modeled direct signal. With it off, Mix crossfades raw input and the modeled room. Under **Listen · solo**, use **Direct**, **Early**, and **Tail** to audition components, including combinations. **Output** controls the overall output gain, and **Makeup** adds gain. **Auto** sets Makeup from the last completed model, so stop moving first. Output meters read the final output.
+
+**Dry signal and input channels 1/2.** The output of Verb Room is the first output channels (channels 1/2 for stereo, or the layout's channels in surround/Ambisonics). With **Positioned dry** on (the default), the raw input is never sent to the output: the direct sound of every source, from any input channel, is rendered by the room model and **Mix** only changes how much reflected sound is added (unless a **Listen** solo is active, which keeps output at 100 % wet). With **Positioned dry** off, **Mix** equal-power crossfades the room with the raw input channels passed straight through as channel *k* → output *k* for every channel up to the host output bus width (gated per mapped source by **Mute** / **Solo**, and forced to 100 % wet while a **Listen** solo is active). On a stereo output only inputs 1 and 2 can pass through this way, so in this mode keep sources on input channels 3 and above if output 1/2 must stay purely wet, or leave **Mix** at 100 %. On a 2-channel host bus, input channels 3 and above are not modified by the plug-in: the host passes them on unchanged on the same track channels, and a stereo master simply does not play them (for wider host output buses up to 64 channels, see below). If you mix all channels of the bus down (a monitoring mix-down plug-in after Verb Room, or a send that carries more than channels 1/2), those untouched dry channels become audible even though the Verb Room meters show silence. Listen to channels 1/2 only, for example with the default parent/master send, which carries channels 1/2. The modelled direct sound of a source is part of the room model, so the source's **Gain**, **Mute** and **Solo** act on it. The raw dry path of **Positioned dry** off is not changed by the source **Gain**, so with **Positioned dry** off and **Mix** at 0 % inputs 1/2 simply pass through, like a bypass, whatever the source **Gain** is. Use **Listen · solo** to hear **Direct**, **Early** and **Tail** separately. If you still hear a dry source with the Verb Room track muted, switch off the source track's own master/parent send in REAPER.
+
+![Signal flow: inputs, sources, room model and output, with the raw-input dry path that exists only when Positioned dry is off](images/manual/signal-flow.png)
+
+**Multichannel and Ambisonics outputs.** Verb Room outputs the first `nOut` channels negotiated with the host (and renders up to 16 layout channels `R`: 4 for Quad or 1st-order AmbiX, 6 for 5.1, 12 for 7.1.4, or 16 for 3rd-order AmbiX/Ring); any track channels beyond `nOut` are passed on by the host unchanged. On a wider host output bus up to 64 channels (for example, a 64-channel REAPER track carrying a 32-source VSL setup), Verb Room owns all `nOut` channels (`Rendered / host` shows e.g. `2 / 64 ch` or `16 / 64 ch`) and, when **Positioned dry** is on, silences channels `R+1..nOut` instead of letting dry inputs pass through unmodified. In REAPER, set the track to at least `R` channels (4, 6, 12, 16, or 64; on a 10-channel track with 9-channel 2nd-order AmbiX, channel 10 is silenced). With Ambisonics or surround layouts, keep **Positioned dry** **on** (with it off, **Mix** < 100 % mixes raw inputs *k* → *k*, which is meaningless for Ambisonics components or surround speaker beds), and monitor only the rendered output channels 1–`R`.
 
 ### REAPER automation
 
@@ -455,7 +461,7 @@ xattr -dr com.apple.quarantine "$HOME/Library/Audio/Plug-Ins/VST3/Verb Room.vst3
 
 With more than four sources, early reflections update in batches and glide between updates during motion. The geometry is **2.5D**, with vertical walls and horizontal surfaces. Low-frequency wave modes are outside this model. The late tail is a statistical estimate, and the Energy analyzer shows modeled coverage with unit excitation. Treat the readouts as model diagnostics and audition the scene in the session.
 
-Windows was tested in REAPER (including 0.3.0 `Mod Out` parameter linking). A community tester tried 0.2.0 on a real Mac. Versions 0.2.1–0.3.0 await Mac testing. Linux builds and passes CI tests with the classic interface and awaits testing in a real host. Live performance on older four-core machines still needs checks. See the [0.3.0 release notes](Release_0.3.0_en.md).
+Windows was tested in REAPER (including the 0.3.1 64-channel output bus and 0.3.0 `Mod Out` parameter linking). A community tester tried 0.2.0 on a real Mac. Versions 0.2.1–0.3.1 await Mac testing. Linux builds and passes CI tests with the classic interface and awaits testing in a real host. Live performance on older four-core machines still needs checks. See the [0.3.1 release notes](Release_0.3.1_en.md).
 
 <a name="reporting"></a>
 

@@ -7,7 +7,7 @@ import { decayPanel } from '../components/decay.js';
 import { modulationPanel } from '../components/modulation.js';
 import { outputMeters, sourceMeters, METER_MODES, getMeterMode, setMeterMode } from '../components/meters.js';
 import { slider, numericField } from '../components/slider.js';
-import { FORMATS, LAYOUTS, MICS, channels, budget } from '../state/selectors.js';
+import { FORMATS, LAYOUTS, MICS, channels, budget, positionedDryWarning, SOURCES_OUTPUT_HINT } from '../state/selectors.js';
 import { targetKnob } from '../components/command-knob.js';
 import { viewportState } from '../viewport/effective-scene.js';
 import { computeRoomMetrics } from '../viewport/room-metrics.js';
@@ -182,7 +182,7 @@ export function sourcesPanel(ctx) {
     element('span', { className: `${usage.overlap || usage.inputs > state.host.inputChannels ? 'warning' : 'note'} source-budget`, text: `${sources.length}/${state.limits.maxSources} src · ${usage.inputs}/${state.host.inputChannels} inputs · ${usage.points}/${state.limits.maxPoints} pts${usage.overlap ? ' · overlapping routes' : ''}` }), warning]));
   const head = element('div', { className: 'mix-row mix-head', role: 'row' }, ['', 'Source', 'Format', 'In', 'Ch', 'Gain dB', 'Level', 'M', 'S', 'Σ'].map((t, i) => i === 6
     ? element('button', { type: 'button', className: 'c6 meter-mode', text: METER_MODES[getMeterMode()].label, title: 'Source meter ballistics: Peak (instant attack, fast fall) / Smooth (slow). Click to switch.', 'aria-label': 'Source meter mode', onclick: e => { const next = getMeterMode() === 'peak' ? 'smooth' : 'peak'; setMeterMode(next); e.currentTarget.textContent = METER_MODES[next].label; } })
-    : element('span', { text: t, className: `c${i}`, ...(i === 9 ? { title: sumTitle, 'aria-label': 'Sum' } : {}) })));
+    : element('span', { text: t, className: `c${i}`, ...(i === 9 ? { title: sumTitle, 'aria-label': 'Sum' } : [5, 7, 8].includes(i) ? { title: SOURCES_OUTPUT_HINT } : {}) })));
   const list = element('div', { className: 'mix-list', role: 'rowgroup' });
   const meterSet = sourceMeters(store, state.document.sources.map(s => [s.firstIn, channels(s)]));
   state.document.sources.forEach((source, index) => {
@@ -228,15 +228,30 @@ export function sourcesPanel(ctx) {
     meterSet?.dispose();
     if (status.update === updateWarning) status.update = null;
   };
+  const outputHint = element('p', { className: 'note sources-output-hint', text: SOURCES_OUTPUT_HINT });
   const area = scrollArea(list, { className: 'mix-scroll' });
-  root.append(element('div', { className: 'mixer' }, [head, area]));
+  root.append(outputHint, element('div', { className: 'mixer' }, [head, area]));
   return root;
 }
+function positionedDryWarningNode(store, className = 'warning mix-dry-warning') {
+  const el = element('p', { className, role: 'status', 'aria-live': 'polite' });
+  const sync = () => {
+    const msg = positionedDryWarning(store.state);
+    el.textContent = msg;
+    el.hidden = !msg;
+  };
+  el.dispose = store.subscribe(({ reason }) => {
+    if (['parameters', 'patch', 'snapshot', 'resync'].includes(reason)) sync();
+  });
+  sync();
+  return el;
+}
 export function mixPanel(ctx) {
-  const { param } = ctx;
+  const { param, store } = ctx;
   const block = (title, cls, children) => element('div', { className: `mix-block ${cls}` }, [heading(title), element('div', { className: 'mix-block-body' }, children)]);
   // Scrolls vertically when the window is too low to show every control (small screens).
   return scrollArea(element('div', { className: 'mix-panel' }, [
+    positionedDryWarningNode(store),
     element('div', { className: 'mix-columns' }, [
       block('Early', 'mix-early', [param('early', { knob: true, label: 'Early level' }), param('diffusion', { knob: true, label: 'Early diffusion' })]),
       block('Tail & motion', 'mix-tail', [param('tail', { knob: true, label: 'Tail level' }), param('doppler', { knob: true, label: 'Doppler' })]),
@@ -263,7 +278,7 @@ export function outputPanel(ctx) {
     heading('Physics'), check('Edge diffraction', state.document.scene.diffraction, enabled => store.command({ op: 'room.setDiffraction', enabled })),
     ...[['lfRoomModes', 'LF room modes'], ['velvetTransition', 'Velvet transition']].map(([key, label]) => unavailable(state, key, label))]);
   const colArray = element('div', { className: 'stack' }, [heading('Array / host'), ...o.extra, state.capabilities.features['output.meters']?.available ? outputMeters(store) : unavailable(state, 'output.meters', 'Output meters')]);
-  return scrollArea([colOutput, colTail, colArray], { className: 'output-panel' });
+  return scrollArea([positionedDryWarningNode(store, 'warning output-dry-warning'), colOutput, colTail, colArray], { className: 'output-panel' });
 }
 export function mainBottom(ctx) {
   const { store } = ctx, root = element('section', { className: `bottom panel bottom-${store.view.tab}` });

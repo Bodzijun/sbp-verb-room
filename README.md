@@ -16,7 +16,7 @@ Verb Room is built by one person. If it is useful to you:
 
 </details>
 
-**Latest release: [0.3.0](docs/Release_0.3.0_en.md)** · [українською](docs/Release_0.3.0_uk.md). Version 0.3.0 adds timeline azimuth keys, per-instance position automation range fitting (`Fit to scene`), motion modulation routes and Path LFO in Creative mode, 16 `Mod Out` host output parameters, collapsible inspector sections, and an About dialog. See also [0.2.3](docs/Release_0.2.3_en.md) · [українською](docs/Release_0.2.3_uk.md).
+**Latest release: [0.3.1](docs/Release_0.3.1_en.md)** · [українською](docs/Release_0.3.1_uk.md). Version 0.3.1 keeps baked late tails across project save/reload when an analytic source pattern is fixed, widens accepted host output buses up to 64 channels (silencing channels beyond the rendered layout), fixes a tail-status thread race, and adds UI hints plus a signal-flow diagram in the manual. See also [0.3.0](docs/Release_0.3.0_en.md) · [українською](docs/Release_0.3.0_uk.md) and [0.2.3](docs/Release_0.2.3_en.md) · [українською](docs/Release_0.2.3_uk.md).
 
 **User manual:** [English](docs/Manual_en.md) · [українською](docs/Manual_uk.md), including a guide to baking paths and recording host automation.
 
@@ -29,7 +29,7 @@ Instead of a fixed impulse response, Verb Room traces the sound through a room y
 materials, floor/ceiling zones, lowered ceilings, doorways) and re-solves the geometry as the sources and the
 listener move. Position and orientation of every source and of the listener are **automatable parameters**.
 
-> Status: working alpha (0.3.0). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
+> Status: working alpha (0.3.1). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
 > Windows x64 has been tested in REAPER. Experimental macOS Universal and Linux x86_64 builds are provided by GitHub Actions and need host testing. The default Windows build requires AVX2/FMA; the portable CI builds do not. macOS test builds are ad-hoc signed, not Apple-notarized.
 
 ## What it does
@@ -125,7 +125,7 @@ Before creating or changing scenes, read the [scene-authoring guide](docs/Scene_
 |---|---|
 | Walls | 128 (reflection order 1, as the plug-in uses); 64 / 24 / 12 for orders 2 / 3 / 4 |
 | Zones | up to 32 floor and 32 ceiling zones, 3–64 corners each; 8 plates in total |
-| Sources / points / inputs / outputs | 32 / 64 / 64 / 16 |
+| Sources / points / inputs / outputs | 32 / 64 / 64 / 16 rendered (host output buses up to 64 ch) |
 | Diffraction | around vertical wall ends, up to three ends in a row |
 | Human ears | head shadow and ear spacing only, no pinna filtering |
 | IR export | static positions, no LFE |

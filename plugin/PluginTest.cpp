@@ -183,11 +183,16 @@ static int testVslHallSuite();
 #include "AutomationRangeTest.h"
 #include "ModulationTest.h"
 
+#include "H1Test.h"
+#include "H2Test.h"
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
     struct EnvSuite { const char* name; int (*fn)(); };
     static const EnvSuite suites[] = {
+        {"VERB_ONLY_H2", testH2Suite},
+        {"VERB_ONLY_H1", testH1Suite},
         {"VERB_ONLY_G4", testG4Modulation},
         {"VERB_ONLY_G8", testG8ModulationHostOutputs},
         {"VERB_ONLY_G3", testG3AutomationRangeFast},
@@ -2547,6 +2552,8 @@ receiver R 0 0 1.5 0 0
     testG3AutomationRangeFast();
     testG4ModulationFast();
     testG8ModulationHostOutputs();
+    testH1Fast();
+    testH2Fast();
     std::printf(fails ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", fails);
     return fails ? 1 : 0;
 }

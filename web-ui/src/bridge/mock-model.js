@@ -166,8 +166,8 @@ export function updateHost(state) {
   state.host.numPoints = budget(state.document).points;
   const byChannels = { 1: 0, 2: 1, 3: 3, 4: 4, 6: 5, 8: 6, 12: 7 };
   state.host.effectiveLayout = output.layout === -1 ? byChannels[state.host.outputChannels] ?? 8 : output.layout;
-  const configured = [1, 2, 2, 3, 4, 6, 8, 12, state.host.outputChannels, 4, 9, 16][state.host.effectiveLayout];
-  state.host.renderedChannels = Math.min(configured, state.host.outputChannels);
+  const configured = [1, 2, 2, 3, 4, 6, 8, 12, Math.min(state.host.outputChannels, 16), 4, 9, 16][state.host.effectiveLayout];
+  state.host.renderedChannels = Math.min(configured, state.host.outputChannels, 16);
 }
 export function expandedRefs(scene, refs, includeGroups = true) {
   const groups = includeGroups ? refs.map(r => surface(scene, r)?.editor.group).filter(Boolean) : [];

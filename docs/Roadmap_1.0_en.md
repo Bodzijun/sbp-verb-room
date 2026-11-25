@@ -50,10 +50,10 @@ need testers.
 
 ## Where we are
 
-**Latest release: [0.3.0](Release_0.3.0_en.md)** for Windows x64, macOS Universal and Linux x86_64. Downloads are posted on the project's [Ko-fi page](https://ko-fi.com/s/405ebacfcc).
+**Latest release: [0.3.1](Release_0.3.1_en.md)** for Windows x64, macOS Universal and Linux x86_64. Downloads are posted on the project's [Ko-fi page](https://ko-fi.com/s/405ebacfcc).
 
 - **A new interface:** resizable, with a 3D room editor, material inspector, dimensions and scale, outliner, decay
-  curves, energy map, timeline azimuth keys, interactive modulation editor, collapsible inspector sections, About dialog, and a CPU load meter. The classic interface stays available. On macOS the web UI was first released in 0.2.0 and needs testers on 0.2.1–0.3.0.
+  curves, energy map, timeline azimuth keys, interactive modulation editor, collapsible inspector sections, About dialog, and a CPU load meter. The classic interface stays available. On macOS the web UI was first released in 0.2.0 and needs testers on 0.2.1–0.3.1.
 - **Movement paths:** draw a path for a source or the listener and automate one position parameter. Path timing
   (start / end, per-point time, easing), laps and closed paths, groups that move together, orientation (along the path
   or looking at another object, also between moving objects), a timeline panel, and **baked tails** along a path that

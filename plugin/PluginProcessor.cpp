@@ -299,7 +299,7 @@ VerbProcessor::~VerbProcessor() {
 
 bool VerbProcessor::isBusesLayoutSupported(const BusesLayout& l) const {
     const int nOut = l.getMainOutputChannels(), nIn = l.getMainInputChannels();
-    return nOut >= 1 && nOut <= verbp::kMaxReceivers && nIn <= verbp::kMaxInputChannels;
+    return nOut >= 1 && nOut <= verbp::kMaxInputChannels && nIn <= verbp::kMaxInputChannels;
 }
 
 void VerbProcessor::prepareToPlay(double sr, int block) {
@@ -2656,6 +2656,17 @@ void VerbProcessor::run() {
     uint64_t observedEpoch = 0;
     auto stableSince = std::chrono::steady_clock::now();
     uint64_t directivitySeen = ~0ull;
+    auto canonicalPattern = [](const verbp::SourceCfg& source) {
+        const double p = verbp::effectiveAnalyticPattern(source);
+        return std::isfinite(p) ? std::min(std::max((double)(float)p, 0.0), 1.0) : 0.0;
+    };
+    auto snapshotSourceStates = [&](const std::vector<verbp::SourceCfg>& sources) {
+        std::vector<verb::DirectivityState> states;
+        states.reserve(sources.size());
+        for (const auto& source : sources)
+            states.push_back({source.directivity, source.instrumentAmount, canonicalPattern(source), true, source.aimAzDeg, source.aimElDeg, source.aimRollDeg});
+        return states;
+    };
     std::vector<verb::DirectivityState> publishedSourceStates; // loader-owned snapshots
     while (!threadShouldExit()) {
         wake.wait(250);
@@ -2667,7 +2678,7 @@ void VerbProcessor::run() {
                 const auto logical=(size_t)bundle->points[p].source;
                 if (logical < sources.size()) {
                     const auto& source=sources[logical];
-                    const double pattern=(double)(float)verbp::effectiveAnalyticPattern(source);
+                    const double pattern = canonicalPattern(source);
                     if(logical>=publishedSourceStates.size())publishedSourceStates.resize(logical+1);
                     const auto& previous=publishedSourceStates[logical];
                     if(previous.profile!=source.directivity || previous.amount!=source.instrumentAmount || previous.pattern!=pattern
@@ -2676,8 +2687,7 @@ void VerbProcessor::run() {
                             source.aimAzDeg,source.aimElDeg,source.aimRollDeg);
                 }
             }
-            publishedSourceStates.clear();
-            for(const auto& source:sources)publishedSourceStates.push_back({source.directivity,source.instrumentAmount,(double)(float)verbp::effectiveAnalyticPattern(source),true,source.aimAzDeg,source.aimElDeg,source.aimRollDeg});
+            publishedSourceStates = snapshotSourceStates(sources);
             directivitySeen = directivityEpoch;
         }
         publishWebDiagnostics();
@@ -2801,12 +2811,12 @@ void VerbProcessor::run() {
                 const double az = srcState(pm.source, 3), a = (az + pm.angleDeg) * verb::kPi / 180.0;
                 t.pos = {srcState(pm.source, 0) + pm.radius * std::cos(a), srcState(pm.source, 1) + pm.radius * std::sin(a), srcState(pm.source, 2)};
                 t.azimuthDeg = az;
-                t.pattern = verbp::effectiveAnalyticPattern(scfg);
+                t.pattern = canonicalPattern(scfg);
                 t.instrument = scfg.instrument;
-                t.instrumentAmount = scfg.instrumentAmount;
-                t.aimAzDeg = scfg.aimAzDeg;
-                t.aimElDeg = scfg.aimElDeg;
-                t.aimRollDeg = scfg.aimRollDeg;
+                t.instrumentAmount = std::isfinite(scfg.instrumentAmount) ? std::min(std::max(scfg.instrumentAmount, 0.0), 1.0) : 1.0;
+                t.aimAzDeg = (scfg.directivity && std::isfinite(scfg.aimAzDeg)) ? std::min(std::max(scfg.aimAzDeg, -180.0), 180.0) : 0.0;
+                t.aimElDeg = (scfg.directivity && std::isfinite(scfg.aimElDeg)) ? std::min(std::max(scfg.aimElDeg, -90.0), 90.0) : 0.0;
+                t.aimRollDeg = (scfg.directivity && std::isfinite(scfg.aimRollDeg)) ? std::min(std::max(scfg.aimRollDeg, -180.0), 180.0) : 0.0;
                 t.directivity = scfg.directivity;
                 t.pos=t.pos*sizeFactor;
                 es.sources.push_back(t);
@@ -2838,12 +2848,14 @@ void VerbProcessor::run() {
             auto nb = std::make_unique<Bundle>();
             nb->engine = std::make_shared<verb::Engine>(es, ec);
             if(ec.cancelled())continue;
-            // Same legacy float pattern that processBlock used before E13f; do this
-            // before publishing the engine, without changing its initial tail revision.
-            for(size_t p=0;p<points.size();++p)
-                nb->engine->setSourcePattern((int)p,(double)(float)verbp::effectiveAnalyticPattern(cfg[(size_t)points[p].source]));
-            std::vector<verb::DirectivityState> nextSourceStates;
-            for(const auto& source:cfg)nextSourceStates.push_back({source.directivity,source.instrumentAmount,(double)(float)verbp::effectiveAnalyticPattern(source),true,source.aimAzDeg,source.aimElDeg,source.aimRollDeg});
+            // Canonical fixedPattern=true directivity state before publishing the engine,
+            // matching live setSourcePattern/setSourceDirectivity without changing initial tail revision.
+            for (size_t p = 0; p < points.size(); ++p) {
+                const auto& scfg = cfg[(size_t)points[p].source];
+                nb->engine->setSourceDirectivity((int)p, scfg.directivity, scfg.instrumentAmount,
+                    canonicalPattern(scfg), scfg.aimAzDeg, scfg.aimElDeg, scfg.aimRollDeg);
+            }
+            std::vector<verb::DirectivityState> nextSourceStates = snapshotSourceStates(cfg);
             appliedAbsorption=ec.absorptionScale;
             nb->constructionSize=requestedSize;
             nb->cfg = cfg;
@@ -2863,7 +2875,7 @@ void VerbProcessor::run() {
             nb->lfe.assign((size_t)nb->maxBlock, 0.f);
             nb->wetMix.assign((size_t)nb->maxBlock, 1.f);
             nb->dryMix.assign((size_t)nb->maxBlock, 0.f);
-            const auto spk = verb::speakersFor(lay, hostCh);
+            const auto spk = verb::speakersFor(lay, std::min(hostCh, verbp::kMaxReceivers));
             for (size_t i = 0; i < spk.size() && i < (size_t)nb->R; ++i)
                 if (spk[i].lfe) nb->lfeOut = (int)i;
 

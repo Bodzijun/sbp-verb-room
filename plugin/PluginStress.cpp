@@ -134,7 +134,9 @@ static void testBusLayouts() {
     };
     check(p.isBusesLayoutSupported(mk(0, 1)) && p.isBusesLayoutSupported(mk(1, 1)) && p.isBusesLayoutSupported(mk(2, 2)) && p.isBusesLayoutSupported(mk(32, 16)),
           "mono, stereo, no inputs and 32 in / 16 out are accepted");
-    check(p.isBusesLayoutSupported(mk(64, 2)) && !p.isBusesLayoutSupported(mk(65, 2)) && !p.isBusesLayoutSupported(mk(2, 17)) && !p.isBusesLayoutSupported(mk(2, 0)), "64 inputs are accepted; 65 inputs, 17 outputs and no output are refused");
+    check(p.isBusesLayoutSupported(mk(64, 2)) && p.isBusesLayoutSupported(mk(17, 17)) && p.isBusesLayoutSupported(mk(64, 64))
+          && !p.isBusesLayoutSupported(mk(65, 2)) && !p.isBusesLayoutSupported(mk(2, 65)) && !p.isBusesLayoutSupported(mk(2, 0)),
+          "64 inputs and wide outputs up to 64 are accepted; 65 inputs, 65 outputs and no output are refused");
     const int cfgs[][2] = {{0, 1}, {1, 1}, {2, 2}, {8, 12}, {32, 16}};
     for (auto& c : cfgs) {
         Rig r(c[0], c[1], 48000, 256);

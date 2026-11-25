@@ -20,7 +20,7 @@ test('G10 unit: about-data sponsors/links and mock app.openExternal allow-list',
   assert.equal(PLUGIN_INFO.name, 'Verb Room');
   assert.equal(PLUGIN_INFO.tagline, 'Physically based room reverb for moving sources and listener');
   assert.match(PLUGIN_INFO.license, /AGPLv3.*Built with JUCE/);
-  assert.equal(WHATS_NEW_VERSION, '0.3.0');
+  assert.equal(WHATS_NEW_VERSION, '0.3.1');
   assert.ok(WHATS_NEW.length >= 6);
   assert.ok(TIPS.length >= 5);
   assert.equal(SUPPORT.kofi.url, 'https://ko-fi.com/s/405ebacfcc');
@@ -209,10 +209,10 @@ test('G10 browser E2E: About modal, Main/Edit headers, focus trap, dynamic versi
     assert.match(aboutAudit.fullText, /Verb Room/);
     assert.match(aboutAudit.fullText, /Physically based room reverb for moving sources and listener/);
     assert.match(aboutAudit.fullText, /AGPLv3 · Built with JUCE/);
-    assert.match(aboutAudit.fullText, /What's new in 0\.3\.0/);
-    assert.match(aboutAudit.fullText, /Azimuth keys/);
-    assert.match(aboutAudit.fullText, /Fit to scene/);
-    assert.match(aboutAudit.fullText, /Mod Out 1/);
+    assert.match(aboutAudit.fullText, /What's new in 0\.3\.1/);
+    assert.match(aboutAudit.fullText, /Baked late-tail/);
+    assert.match(aboutAudit.fullText, /64 channels/);
+    assert.match(aboutAudit.fullText, /Positioned dry/);
     assert.match(aboutAudit.fullText, /Creative mode/);
     assert.match(aboutAudit.fullText, /Bake path/);
     assert.match(aboutAudit.fullText, /Record automation/);

@@ -12,15 +12,15 @@ export const PLUGIN_INFO = {
   license: 'AGPLv3 \u00b7 Built with JUCE',
 };
 
-export const WHATS_NEW_VERSION = '0.3.0';
+export const WHATS_NEW_VERSION = '0.3.1';
 
 export const WHATS_NEW = [
-  'Azimuth keys on the Path timeline for animating listener orientation along a trajectory.',
-  'Position automation range (Fit to scene) so host automation tracks match the room.',
-  'Motion modulation: route source distance, speed, and angle to gain, filters, and room levels, plus the Path LFO.',
-  'Mod Out 1\u201316 plug-in parameters exposed to drive other instruments and effects in your DAW.',
-  'Collapsible inspector sections across Main and Edit room.',
-  'Stability and UI responsiveness fixes.',
+  'Baked late-tail tables now survive project save and reload when an analytic source pattern is fixed.',
+  'Fixed a worker thread race in tail status tracking (workerJumpSeen).',
+  'Wide host output buses up to 64 channels are now accepted, silencing unused channels beyond the rendered layout.',
+  'Added a permanent Sources rack reminder for M / S / Gain behaviour on host-passed channels.',
+  'Added a non-blocking Mix and Settings warning when Positioned dry is off with Ambisonics or surround outputs.',
+  'Updated the user manual with a signal-flow diagram and multichannel/Ambisonics routing details.',
 ];
 
 export const TIPS = [

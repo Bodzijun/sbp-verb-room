@@ -4,6 +4,20 @@ export const COUNTS = [1, 2, 3, 4, 5, 6, 8];
 export const LAYOUTS = ['Match track', 'Mono', 'Stereo (ORTF)', 'Stereo (XY)', 'LCR', 'Quad', '5.1', '7.1', '7.1.4', 'Ring', 'AmbiX (1st order)', 'AmbiX (2nd order)', 'AmbiX (3rd order)'];
 export const MICS = ['Layout default', 'Omni', 'Subcardioid', 'Cardioid', 'Supercardioid', 'Hypercardioid', 'Figure-8', 'Human ears'];
 export const BANDS = ['125', '250', '500', '1k', '2k', '4k', '8k'];
+export const SOURCES_OUTPUT_HINT =
+  'M / S / Gain act on what the plug-in outputs. Channels the plug-in does not output are passed on by the host unchanged.';
+export const POSITIONED_DRY_MULTICHANNEL_WARNING =
+  'Positioned dry is off: raw inputs are mixed into output channels k → k, which is not meaningful for Ambisonics/surround. Keep Positioned dry on.';
+export function positionedDryWarning(state) {
+  if (!state?.parameters?.values || !state?.document?.output || !state?.host) return '';
+  if (Number(state.parameters.values.spatialDry ?? 1) >= 0.5) return '';
+  const output = state.document.output;
+  const effLayout = output.layout >= 0 ? output.layout : state.host.effectiveLayout;
+  const rendered = state.host.renderedChannels ?? 0;
+  const isAmbi = effLayout >= 9 && effLayout <= 11;
+  const isMultiSurround = (effLayout >= 3 && effLayout <= 7) || (effLayout === 8 && (state.host.outputChannels ?? 0) > 2);
+  return (isAmbi || isMultiSurround || rendered > 2) ? POSITIONED_DRY_MULTICHANNEL_WARNING : '';
+}
 export const channels = source => source.format === 7 ? source.channels : COUNTS[source.format];
 export const pointCount = source => source.sum ? 1 : channels(source) - ([5, 6].includes(source.format) ? 1 : 0);
 export function budget(document) {

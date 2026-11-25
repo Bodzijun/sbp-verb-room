@@ -519,7 +519,9 @@ struct Engine::Impl {
     std::atomic<uint64_t> streamPos{0};            // samples processed (audio writes, worker reads)
     std::atomic<uint64_t> audioEpoch{0};           // normalization epoch of the gains the audio thread applies
     std::atomic<uint64_t> jumpSerial{0};
-    uint64_t audioJumpSeen = 0, workerJumpSeen = 0;
+    uint64_t audioJumpSeen = 0;
+    std::atomic<uint64_t> workerJumpSeen{0};
+    static_assert(std::atomic<uint64_t>::is_always_lock_free, "workerJumpSeen must be lock-free on all targets");
     // motion targets: triple buffer, worker -> audio
     std::array<std::vector<float>, 3> mBuf;
     std::array<uint64_t, 3> mEpoch{{0, 0, 0}}, mJumpSerial{{0, 0, 0}};
@@ -1635,7 +1637,7 @@ struct Engine::Impl {
                     }
         }
         mEpoch[(size_t)mBack] = te;
-        mJumpSerial[(size_t)mBack] = workerJumpSeen;
+        mJumpSerial[(size_t)mBack] = workerJumpSeen.load(std::memory_order_relaxed);
         mExact[(size_t)mBack] = exact;
         mBack = mMid.exchange(mBack | 4, std::memory_order_acq_rel) & 3;
         ++stPublished;
@@ -1710,7 +1712,7 @@ struct Engine::Impl {
         const auto t0 = std::chrono::steady_clock::now();
         const Scene& scn = w.sc;
         long long work = 0, wk = 0;
-        const auto cancel = [&]{ return !running || geomSerial.load() != w.serial || qualitySerial.load() != workerQuality || jumpSerial.load(std::memory_order_acquire) != workerJumpSeen; };
+        const auto cancel = [&]{ return !running || geomSerial.load() != w.serial || qualitySerial.load() != workerQuality || jumpSerial.load(std::memory_order_acquire) != workerJumpSeen.load(std::memory_order_relaxed); };
         const double stopDb = -20;
         const int KF = std::max(8, cfg.motionForwardRays), KR = std::max(64, cfg.motionReciprocalRays);
         auto srcAt = [&](int s, const double* p) {
@@ -1793,7 +1795,7 @@ struct Engine::Impl {
         }
         for (auto& c : sconv) if (c->pending.load() >= 0) { sharedTailHandoverWaiting = true; return; }
         const uint64_t jser = jumpSerial.load(std::memory_order_acquire);
-        const bool jumpPending = (jser != workerJumpSeen);
+        const bool jumpPending = (jser != workerJumpSeen.load(std::memory_order_relaxed));
         const auto now = std::chrono::steady_clock::now();
         if (cfg.motionMode <= 0) {  // as before E4a
             if (!jumpPending && std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLegacy).count() < cfg.tailRefreshMs) return;
@@ -1806,7 +1808,7 @@ struct Engine::Impl {
             }
             try {
                 sharedRebuild(false, nullptr, jumpPending ? std::function<bool()>([this, jser]{ return jumpSerial.load(std::memory_order_acquire) != jser; }) : std::function<bool()>{}, jumpPending, jser);
-                if (jumpPending && jumpSerial.load(std::memory_order_acquire) == jser) workerJumpSeen = jser;
+                if (jumpPending && jumpSerial.load(std::memory_order_acquire) == jser) workerJumpSeen.store(jser, std::memory_order_release);
                 lastLegacy = std::chrono::steady_clock::now();
             }
             catch(const std::runtime_error&) {sharedBusy=false;if(!jumpPending){sLastGeom=0;for(auto& sp:srcs)sp->lastGeom=0;}}
@@ -1839,7 +1841,7 @@ struct Engine::Impl {
                 }
                 if (p7Enabled) p7.workerRebuildNs.fetch_add((uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
                 if (jumpSerial.load(std::memory_order_acquire) == jser) {
-                    workerJumpSeen = jser;
+                    workerJumpSeen.store(jser, std::memory_order_release);
                     anchor = workerResolvedPose(*wsnap); rawAnchor = livePose(); anchorStream = streamPos.load(std::memory_order_acquire);
                     anchorWall = std::chrono::steady_clock::now(); anchorValid = true;
                     lastLegacy = anchorWall;
@@ -1927,7 +1929,7 @@ struct Engine::Impl {
 
     void workerLoopShared() {
         while (running) {
-            if (jumpSerial.load(std::memory_order_acquire) == workerJumpSeen)
+            if (jumpSerial.load(std::memory_order_acquire) == workerJumpSeen.load(std::memory_order_relaxed))
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             sharedWorkerStep();
             if (p7Enabled) {
@@ -1942,7 +1944,7 @@ struct Engine::Impl {
 
     void workerLoop() {
         while (running) {
-            if (jumpSerial.load(std::memory_order_acquire) == workerJumpSeen)
+            if (jumpSerial.load(std::memory_order_acquire) == workerJumpSeen.load(std::memory_order_relaxed))
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             perSourceWorkerStep(); bakeWorkerStep();
         }
@@ -1970,7 +1972,7 @@ struct Engine::Impl {
             worlds.erase(std::remove_if(worlds.begin(), worlds.end(), [&](const std::shared_ptr<World>& w) { return w->serial <= ack && w != latest && w.get()!=audioWorld.load(std::memory_order_acquire); }), worlds.end());
         }
         const uint64_t jser = jumpSerial.load(std::memory_order_acquire);
-        const bool jumpPending = (jser != workerJumpSeen);
+        const bool jumpPending = (jser != workerJumpSeen.load(std::memory_order_relaxed));
         if (jumpPending) anchorValid = false;
         std::shared_ptr<World> wsnap0;
         if (cfg.motionMode > 0 || jumpPending) {
@@ -2073,7 +2075,7 @@ struct Engine::Impl {
             try {
                 if(longFade) {
                     bakePreempt.fetch_add(1);if(bakeRequested.load())bakeWaitReason=7;
-                    settledScene.length=settledTailLength(*wsnap,lst,rc,[&]{return !running||geomSerial.load()!=wsnap->serial||qualitySerial.load()!=workerQuality||livePoseFar(rawAnchorNow,dm,dd)||jumpSerial.load(std::memory_order_acquire)!=workerJumpSeen||(cfg.cancelled&&cfg.cancelled());}, &effSrcs);
+                    settledScene.length=settledTailLength(*wsnap,lst,rc,[&]{return !running||geomSerial.load()!=wsnap->serial||qualitySerial.load()!=workerQuality||livePoseFar(rawAnchorNow,dm,dd)||jumpSerial.load(std::memory_order_acquire)!=workerJumpSeen.load(std::memory_order_relaxed)||(cfg.cancelled&&cfg.cancelled());}, &effSrcs);
                     if (!poseMoved && !durationChanged && settledScene.length == wsnap->sc.length) {
                         psLengthCheck[(size_t)s] = false;
                         sp.tail.workerBusy.store(false, std::memory_order_release);
@@ -2149,7 +2151,7 @@ struct Engine::Impl {
         if (jumpPending && !jumpDeferred && jumpSerial.load(std::memory_order_acquire) == jser) {
             std::shared_ptr<World> wsnapEnd;
             { std::lock_guard<std::mutex> lk(worldMx); wsnapEnd = latest; }
-            workerJumpSeen = jser;
+            workerJumpSeen.store(jser, std::memory_order_release);
             anchor = workerResolvedPose(*wsnapEnd); rawAnchor = livePose(); anchorStream = streamPos.load(std::memory_order_acquire);
             anchorWall = std::chrono::steady_clock::now(); anchorValid = true;
         }
@@ -4617,6 +4619,8 @@ Engine::DiffractionStats Engine::diffractionStats() const { return p_->dstats; }
 bool Engine::tailIsCurrent() const {
     const auto revision = p_->qualitySerial.load(std::memory_order_acquire);
     const auto scene = p_->geomSerial.load(std::memory_order_acquire);
+    if (p_->cfg.tailThread && p_->jumpSerial.load(std::memory_order_acquire) != p_->workerJumpSeen.load(std::memory_order_acquire))
+        return false;
     if (p_->shared) {
         if (p_->sharedBusy.load(std::memory_order_acquire)) return false;
         for (const auto& c : p_->sconv) if (c->pending.load()>=0 || c->appliedRevision.load(std::memory_order_acquire)!=revision || c->appliedScene.load(std::memory_order_acquire)!=scene) return false;
@@ -4959,7 +4963,7 @@ bool Engine::installBakedTables(const std::vector<BakedTable>& tables) {
         // The live world may still be settling right after a rebuild (the auto tail/pose is applied a moment later), so a
         // mismatch now is not final: the verified-shape tables are parked in the cache and the worker re-checks the content
         // signature until it matches (restored) or never does (edited elsewhere / old estimator / other layout: stays notBaked).
-        if(t.contentSig!=q.groupContentSig(gr.spec)){deferred=true;continue;}
+        if(!q.groupSigMatch(gr.spec,true).matches(t.contentSig,true)){deferred=true;continue;}
         q.restampBakedTableLocked(t);
         if(!q.bakeContextTable(t,true))return reject("context after restamp");
         list.push_back(std::move(t));

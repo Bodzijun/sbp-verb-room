@@ -9,7 +9,7 @@ export function inspectorSplitter(rack, store) {
   if (lastPx.has(store)) rack.style.setProperty('--inspector-h', `${lastPx.get(store)}px`);
   const limits = () => {
     const macro = rack.querySelector('.macro-row')?.getBoundingClientRect().height || 76;
-    return { min: 176, max: Math.max(176, rack.clientHeight - macro - 18 - 154) };
+    return { min: 176, max: Math.max(176, rack.clientHeight - macro - 18 - 170) };
   };
   const apply = value => {
     const { min, max } = limits();

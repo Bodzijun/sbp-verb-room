@@ -145,8 +145,9 @@ h3 { margin:0 0 4px; font-size:11px; font-weight:600; letter-spacing:.1em; text-
 .octave-legend .check.is-off { opacity:.4; }
 /* sources mixer */
 .sources-panel { display:flex; flex-direction:column; min-height:0; height:100%; }
-.source-actions { display:flex; flex-wrap:wrap; align-items:center; gap:4px; flex:none; margin-bottom:6px; }
+.source-actions { display:flex; flex-wrap:wrap; align-items:center; gap:4px; flex:none; margin-bottom:4px; }
 .sources-panel .source-actions { gap:4px; }
+.sources-output-hint { flex:none; margin:0 0 4px; font-size:11px; line-height:13px; color:var(--muted); overflow-wrap:break-word; }
 .source-actions > button:not(.check) { padding-inline:6px; }
 .source-actions .source-budget { margin-left:auto; font-size:11px; }
 .source-action-warning { flex-basis:100%; font-size:11px; }

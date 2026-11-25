@@ -253,7 +253,12 @@
     }
     // P4: cross-session content signature of one bake group (control/worker thread; never the audio thread).
     // Covers everything the traced stations depend on; see baked_persist.hpp for the include/exclude list.
-    uint64_t groupContentSig(const BakedGroupSpec& sp) const {
+    bool hasFixedPatternInGroup(const BakedGroupSpec& sp) const {
+        for (int s : sp.groupSources)
+            if (s >= 0 && s < S && srcs[(size_t)s]->directivityState.controlRead().fixedPattern) return true;
+        return false;
+    }
+    uint64_t groupContentSig(const BakedGroupSpec& sp, bool forceUnfixed = false) const {
         std::shared_ptr<World> w;{std::lock_guard<std::mutex>lock(worldMx);w=latest;}
         if(!w)return 0;
         uint64_t h=bakeMixI32((int32_t)kBakePersistVersion,1469598103934665603ull);
@@ -277,11 +282,25 @@
         for(int s:sp.groupSources){
             if(s<0||s>=S)continue;
             h=bakeMixF64(params[S*4+8+s].load(std::memory_order_relaxed),h);
-            h=bakeMixU64(bakeDirectivityStateHash(srcs[(size_t)s]->directivityState.controlRead()),h);
+            auto st=srcs[(size_t)s]->directivityState.controlRead();
+            if(forceUnfixed)st.fixedPattern=false;
+            h=bakeMixU64(bakeDirectivityStateHash(st),h);
         }
         h=bakeMixU64(sp.paths.size(),h);
         for(const auto&p:sp.paths)h=bakeMixU64(bakePathContentHash(p),h);
         return h;
+    }
+    struct GroupSigMatch {
+        uint64_t canonical = 0;
+        uint64_t legacyUnfixed = 0;
+        bool matches(uint64_t candidate, bool allowLegacy) const noexcept {
+            return candidate == canonical || (allowLegacy && legacyUnfixed != canonical && candidate == legacyUnfixed);
+        }
+    };
+    GroupSigMatch groupSigMatch(const BakedGroupSpec& sp, bool includeLegacy) const {
+        const uint64_t can = groupContentSig(sp);
+        const uint64_t leg = (includeLegacy && hasFixedPatternInGroup(sp)) ? groupContentSig(sp, true) : can;
+        return {can, leg};
     }
     // P4: re-stamp the session-local identity fields of a content-verified table so the cheap audio-thread
     // check (bakeContextTable) accepts it. Only called AFTER the content signature matched the live scene.
@@ -361,10 +380,10 @@
                 if(gr.state!=BakeState::Baked&&gr.state!=BakeState::Approximate)anyRestored=true;
                 continue;
             }
-            const uint64_t sig=groupContentSig(gr.spec);
+            const auto sigs=groupSigMatch(gr.spec,true);
             const BakedTable* hit=nullptr;bool hitSaved=false;
             for(auto it=bakeCache.rbegin();it!=bakeCache.rend();++it)
-                if(it->sig==sig&&it->table.movingPaths==gr.spec.paths&&it->table.movesListener==gr.spec.movesListener){hit=&it->table;hitSaved=it->saved;break;}
+                if(sigs.matches(it->sig,it->saved)&&it->table.movingPaths==gr.spec.paths&&it->table.movesListener==gr.spec.movesListener){hit=&it->table;hitSaved=it->saved;break;}
             if(!hit){bakeRestoreTriedKey=key;return false;}
             BakedTable t=*hit;if(hitSaved)anySaved=true;
             restampBakedTableLocked(t);
@@ -425,7 +444,7 @@
         if (!shared) {
             for (const auto& sp : srcs) waitingForAudio |= tailHandoverWaiting(sp->tail);
         }
-        if (jumpSerial.load() != workerJumpSeen && !(audioIdle && waitingForAudio)) return 1;
+        if (jumpSerial.load(std::memory_order_acquire) != workerJumpSeen.load(std::memory_order_relaxed) && !(audioIdle && waitingForAudio)) return 1;
         if (shared) {
             if ((sLastGeom != geometry || sLastQuality != workerQuality) && !(audioIdle && waitingForAudio)) return 2;
         } else {

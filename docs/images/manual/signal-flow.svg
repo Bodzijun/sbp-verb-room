@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" width="1200" height="680" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2fd49a"/></marker>
+    <marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#e0b050"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8a948f"/></marker>
+  </defs>
+  <rect width="1200" height="680" fill="#101513"/>
+  <text x="40" y="44" font-size="24" font-weight="600" fill="#e8efec">Verb Room signal flow: where the dry sound goes</text>
+
+  <!-- inputs -->
+  <rect x="44" y="90" width="186" height="50" rx="8" fill="#1a2420" stroke="#2fd49a"/>
+  <text x="137" y="121" text-anchor="middle" font-size="18" fill="#e8efec">Input 1</text>
+  <rect x="44" y="160" width="186" height="50" rx="8" fill="#1a2420" stroke="#2fd49a"/>
+  <text x="137" y="191" text-anchor="middle" font-size="18" fill="#e8efec">Input 2</text>
+  <rect x="44" y="330" width="186" height="50" rx="8" fill="#1a2420" stroke="#2fd49a"/>
+  <text x="137" y="361" text-anchor="middle" font-size="18" fill="#e8efec">Input 3 … N</text>
+
+  <!-- sources -->
+  <rect x="310" y="90" width="200" height="300" rx="8" fill="#1a2420" stroke="#2fd49a"/>
+  <text x="410" y="126" text-anchor="middle" font-size="20" font-weight="600" fill="#2fd49a">Sources</text>
+  <text x="410" y="170" text-anchor="middle" font-size="16" fill="#e8efec">In / Format</text>
+  <text x="410" y="198" text-anchor="middle" font-size="16" fill="#e8efec">Gain · Mute · Solo</text>
+  <text x="410" y="240" text-anchor="middle" font-size="14" fill="#9fb0a9">each source = a position</text>
+  <text x="410" y="260" text-anchor="middle" font-size="14" fill="#9fb0a9">in the room (and a path)</text>
+
+  <!-- room model -->
+  <rect x="590" y="90" width="250" height="300" rx="8" fill="#1a2420" stroke="#2fd49a"/>
+  <text x="715" y="126" text-anchor="middle" font-size="20" font-weight="600" fill="#2fd49a">Room model</text>
+  <text x="715" y="170" text-anchor="middle" font-size="16" fill="#e8efec">Direct sound</text>
+  <text x="715" y="198" text-anchor="middle" font-size="16" fill="#e8efec">Early reflections</text>
+  <text x="715" y="226" text-anchor="middle" font-size="16" fill="#e8efec">Tail</text>
+  <text x="715" y="274" text-anchor="middle" font-size="14" fill="#9fb0a9">Positioned dry ON: Mix sets how much</text>
+  <text x="715" y="294" text-anchor="middle" font-size="14" fill="#9fb0a9">reflected sound is added to the direct</text>
+  <text x="715" y="330" text-anchor="middle" font-size="14" fill="#9fb0a9">Listen · solo: Direct / Early / Tail</text>
+
+  <!-- output cells -->
+  <rect x="940" y="190" width="160" height="60" rx="8" fill="#1a2420" stroke="#2fd49a"/>
+  <text x="1020" y="227" text-anchor="middle" font-size="19" font-weight="600" fill="#2fd49a">Output 1</text>
+  <rect x="940" y="260" width="160" height="60" rx="8" fill="#1a2420" stroke="#2fd49a"/>
+  <text x="1020" y="297" text-anchor="middle" font-size="19" font-weight="600" fill="#2fd49a">Output 2</text>
+  <text x="940" y="346" font-size="14" fill="#9fb0a9">stereo, or the chosen layout</text>
+  <text x="940" y="366" font-size="14" fill="#9fb0a9">Output gain · Makeup</text>
+
+  <!-- main arrows -->
+  <path d="M230 115 H310" stroke="#2fd49a" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M230 185 H310" stroke="#2fd49a" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M230 355 H310" stroke="#2fd49a" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M510 240 H590" stroke="#2fd49a" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M840 240 H890" stroke="#2fd49a" stroke-width="2.5" fill="none"/>
+  <path d="M890 220 V290" stroke="#2fd49a" stroke-width="2.5" fill="none"/>
+  <path d="M890 220 H940" stroke="#2fd49a" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M890 290 H940" stroke="#2fd49a" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <!-- dry lanes (Positioned dry OFF) -->
+  <path d="M44 115 H12 V530 H590" stroke="#e0b050" stroke-width="2.5" stroke-dasharray="8 6" fill="none" marker-end="url(#d)"/>
+  <path d="M44 185 H28 V470 H590" stroke="#e0b050" stroke-width="2.5" stroke-dasharray="8 6" fill="none" marker-end="url(#d)"/>
+  <rect x="590" y="442" width="250" height="56" rx="8" fill="#241f12" stroke="#e0b050"/>
+  <text x="715" y="466" text-anchor="middle" font-size="17" font-weight="600" fill="#e0b050">Raw input 2 × dry gain</text>
+  <text x="715" y="486" text-anchor="middle" font-size="13" fill="#c9b27a">Positioned dry OFF · gain = cos(Mix)</text>
+  <rect x="590" y="502" width="250" height="56" rx="8" fill="#241f12" stroke="#e0b050"/>
+  <text x="715" y="526" text-anchor="middle" font-size="17" font-weight="600" fill="#e0b050">Raw input 1 × dry gain</text>
+  <text x="715" y="546" text-anchor="middle" font-size="13" fill="#c9b27a">Positioned dry OFF · gain = cos(Mix)</text>
+  <path d="M840 470 H1130 V290 H1100" stroke="#e0b050" stroke-width="2.5" stroke-dasharray="8 6" fill="none" marker-end="url(#d)"/>
+  <path d="M840 530 H1160 V220 H1100" stroke="#e0b050" stroke-width="2.5" stroke-dasharray="8 6" fill="none" marker-end="url(#d)"/>
+  <text x="860" y="456" font-size="13" fill="#c9b27a">dry gain is 0 at Mix 100 %</text>
+
+  <!-- inputs 3+ : no output channel -->
+  <path d="M137 380 V404" stroke="#8a948f" stroke-width="2.5" stroke-dasharray="6 5" fill="none" marker-end="url(#g)"/>
+  <rect x="44" y="406" width="400" height="50" rx="8" fill="none" stroke="#8a948f" stroke-dasharray="5 5"/>
+  <text x="244" y="427" text-anchor="middle" font-size="14" fill="#c3cdc8">Track channels 3 … N pass on unchanged (the plugin</text>
+  <text x="244" y="445" text-anchor="middle" font-size="14" fill="#c3cdc8">does not touch them); a stereo master does not play them</text>
+
+  <!-- host note -->
+  <rect x="300" y="604" width="860" height="44" rx="8" fill="none" stroke="#8a948f" stroke-dasharray="5 5"/>
+  <text x="730" y="632" text-anchor="middle" font-size="15" fill="#c3cdc8">Outside the plugin: the source track's own Master / Parent send in the host still plays that track dry.</text>
+</svg>

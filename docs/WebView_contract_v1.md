@@ -92,7 +92,7 @@
 | `document.editorFlags` | `navLocked`, `outlinerVisible`, `mixerCompact`, `inputMeters`, `keepRouting` (+ новий опційний `layerModes`, розділ 4.2) | `PluginProcessor.cpp:387-391,468-472` |
 | `host` | `inputChannels`, `outputChannels`, `renderedChannels`, `effectiveLayout`, `numPoints`, `sampleRate` — лише читання | `PluginProcessor.h:127-144` |
 | `load` | `state` 0 idle/1 loading/2 ready/3 error, `status` (текст як у `:1118-1120`), `tailCurrent` | `PluginProcessor.h:72,115` |
-| `limits` | `maxWalls` 128, зони 32+32, вершини 3…64, плит 8, джерел 32, точок 64, входів 64, виходів 16, каналів джерела 16, довжина імені 128 + нові ліміти payload | див. 3.4 |
+| `limits` | `maxWalls` 128, зони 32+32, вершини 3…64, плит 8, джерел 32, точок 64, входів 64, рендерених виходів 16 (`host.outputChannels` до 64), каналів джерела 16, довжина імені 128 + нові ліміти payload | див. 3.4 |
 | `capabilities` | розділ 7 | — |
 
 Приймач `output.receivers` (геометрія віртуальних мікрофонів для «show microphone array to scale») окремого getter не має; його можна відтворити чистими функціями `makeReceiverArray` + `applyMicPattern` (`layouts.hpp:75-136`) з `output`, `listener` і кількості відтворюваних каналів (`min(hostCh,16)`, `PluginProcessor.cpp:1028-1032`). Кількість Ring-каналів — **лише фактична від хоста** (рішення №4).
@@ -503,4 +503,11 @@ Persistence: `VerbState` і format2 `.verbroom` зберігають Size/Predel
 - Додано адитивну команду `app.openExternal { url: string }` (не прив’язану до `baseRevision`, щоб відкриття документації чи сторінок підтримки не зривалося фоновими змінами ревізії).
 - `EditorBridge` перевіряє `url` за суворим білим списком HTTPS-хостів: `ko-fi.com`, `send.monobank.ua`, `github.com`, `bodzijun.github.io` (відкидає інші схеми, піддомени/схожі домени, `userinfo@`, порти, пробільні/керівні символи, `\\`, лапки та нерядкові аргументи кодом `invalid`).
 - У робочому плагіні дозволений URL відкривається через `juce::URL::launchInDefaultBrowser()` (для тестів передбачено хук `EditorBridge::setExternalUrlLauncher(...)`); у разі збою запуску повертається `ioError`. Успішне виконання повертає `ack`. `ShellBrowser` і далі блокує пряму навігацію всередині WebView.
+
+## H1 / H2 · Персистентність Bake при фіксованому патерні та широка вихідна шина (0.3.1)
+
+- `contractVersion: 1` і `contractMinor: 2` збережено без змін.
+- **Широка вихідна шина хоста (`1..64`):** `VerbProcessor::isBusesLayoutSupported()` тепер приймає `nOut ∈ [1, 64]` (`kMaxInputChannels`), тому в схемах `state.schema.json` (`Host`) та `event.schema.json` (`HostChanged`) верхню межу `outputChannels` піднято з `16` до **`64`**. Поля `host.renderedChannels`, `limits.maxOutputs` (`16`, `kMaxReceivers`) та `meters.output` (обмежено `min(16, hostOutputChannels())`) зберігають межу `16`, а для `Layout::Ring` масив приймачів і `mock-model.js` формують `min(host.outputChannels, 16)` каналів. У `processBlock()` канали понад `R` (`R..nOut-1`) очищуються за `Positioned dry` ON або отримують `k → k` сухий мікс за `Positioned dry` OFF.
+- **Канонічний `DirectivityState` у `BakeCache`:** `VerbProcessor::run()` ініціалізує джерела через `setSourceDirectivity(..., fixedPattern=true)` і канонізоване `(double)(float)` значення `pattern`, узгоджене з живим `setSourcePattern()`. `BakeCache` / `installBakedTables()` приймають як канонічний `fixedPattern=true`, так і збережені (`saved == true`) legacy-кеші `0.3.0`/`0.2.x` із `fixedPattern=false`; формат `kBakePersistVersion = 2` не змінено.
+
 
