@@ -7,6 +7,9 @@ import {
   createDefaultRoute, normalizeRoute,
   evaluateModCurve, evaluateModCurveNormalized, computeModulationTelemetry, formatModValue, routeMatchesObject
 } from './modulation-model.js';
+import { zoneList, zoneLabel, zoneColour, liveOccupancy, computeZoneOccupancy } from '../state/trigger-zones.js';
+import { MIDI_MODES, midiNoteName, normalizeMidiOut, describeMidiMessage } from './modulation-model.js';
+import { withPathPoses } from '../viewport/movement-path.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const svgEl = (tag, attrs = {}, children = []) => {
@@ -461,6 +464,7 @@ function buildRouteEditor({ store, m, actions, register, scope = 'win' }) {
       ...r,
       driver: val,
       ...(val === 'distanceToPoint' ? { point: r.point || [0, 0, 0] } : {}),
+      ...(nextDm.hasZone ? { zoneId: r.zoneId || zoneList(store.state)[0]?.id || 1 } : {}),
       curve: {
         ...r.curve,
         inputRange: [...nextDm.defaultIn]
@@ -546,6 +550,8 @@ function buildRouteEditor({ store, m, actions, register, scope = 'win' }) {
     getCommitCmd: releaseMs => ({ op: 'modulation.setRoute', index: activeIdx, route: normalizeRoute({ ...r, releaseMs }, ns) })
   }));
 
+  // V04e: in the compact dock a route without MIDI shows only a small "MIDI" mode select next to Host out.
+  const midiTailSlot = element('div', { className: 'mod-field mod-field-midi', hidden: true });
   const metaGrid = element('div', { className: 'mod-meta-grid' }, [
     element('div', { className: 'mod-field' }, [element('span', { className: 'mod-lbl', text: 'Source' }), objSelect]),
     element('div', { className: 'mod-field mod-field-grow' }, [element('span', { className: 'mod-lbl', text: 'Driver' }), drvSelect]),
@@ -553,6 +559,7 @@ function buildRouteEditor({ store, m, actions, register, scope = 'win' }) {
     ...(tgtObjSelect ? [element('div', { className: 'mod-field' }, [element('span', { className: 'mod-lbl', text: 'Apply to' }), tgtObjSelect])] : []),
     element('div', { className: 'mod-meta-tail' }, [
       element('div', { className: 'mod-field mod-field-hostout', title: hostOutTitle }, [element('span', { className: 'mod-lbl', text: 'Host out' }), hostOutSelect, hostOutLiveEl]),
+      midiTailSlot,
       element('div', { className: 'mod-field mod-field-ms' }, [element('span', { className: 'mod-lbl', text: scope === 'dock' ? 'Atk' : 'Atk ms', title: 'Attack smoothing (0..2000 ms)' }), attackField]),
       element('div', { className: 'mod-field mod-field-ms' }, [element('span', { className: 'mod-lbl', text: scope === 'dock' ? 'Rel' : 'Rel ms', title: 'Release smoothing (0..5000 ms)' }), releaseField]),
       enableToggle
@@ -583,6 +590,82 @@ function buildRouteEditor({ store, m, actions, register, scope = 'win' }) {
       element('label', { className: 'mod-xyz-item' }, [element('span', { text: 'Y' }), ptField('Y', 1, -200, 200)]),
       element('label', { className: 'mod-xyz-item' }, [element('span', { text: 'Z' }), ptField('Z', 2, 0, 30)])
     ]);
+  }
+
+  // V04c: zone picker for In zone / Distance to zone (Zone index needs none) + live inside/outside readout.
+  let zonePickRow = null, zoneLiveEl = null;
+  if (dm.hasZone || r.driver === 'zoneIndex') {
+    const zl = zoneList(store.state);
+    zoneLiveEl = element('span', { className: 'mod-zone-live', 'aria-label': 'Zone occupancy', text: '' });
+    const kids = [element('span', { className: 'mod-lbl', text: dm.hasZone ? 'Zone' : 'Zones' })];
+    if (dm.hasZone) {
+      const opts = zl.map((z, i) => [String(z.id), `${i + 1}. ${zoneLabel(z)}`]);
+      if (!zl.some(z => z.id === r.zoneId)) opts.push([String(r.zoneId || 0), `Missing zone #${r.zoneId || 0} (reads outside)`]);
+      kids.push(register(select('Zone for driver', opts, String(r.zoneId || 0), val => applyRoutePatch(activeIdx, { ...r, zoneId: Number(val) }), {
+        disabled: disabledEdit || !zl.length, 'data-focus-key': `${scope}-mod-zone`, title: 'Trigger zone this route reads (Edit → Scene → Zones)'
+      })));
+    } else kids.push(element('span', { className: 'mod-zone-order', text: zl.length ? zl.map((z, i) => `${i + 1} ${zoneLabel(z)}`).join(' · ') : '—' }));
+    if (!zl.length) kids.push(element('span', { className: 'mod-zone-none', text: 'No zones yet: draw one in Edit → Scene → Zones.' }));
+    kids.push(zoneLiveEl);
+    zonePickRow = element('div', { className: 'mod-zone-row' }, kids);
+  }
+
+  // V04e: MIDI out section (optional; mode Off removes the block). Selects/checkboxes = one command each; numeric
+  // fields are transactional gestures (one undo step per drag / edit).
+  const midi = normalizeMidiOut(r.midi);
+  const midiMode = midi?.mode || 'off';
+  const midiCommit = patch => ({ op: 'modulation.setRoute', index: activeIdx, route: normalizeRoute({ ...r, midi: { ...(midi || {}), ...patch } }, ns) });
+  const midiPatch = patch => applyRoutePatch(activeIdx, { ...r, midi: { ...(midi || {}), ...patch } });
+  const midiModeSelect = register(select('MIDI out mode', MIDI_MODES.map(m => [m.id, m.label]), midiMode, val => {
+    if (val === 'off') { const { midi: _drop, ...rest } = r; applyRoutePatch(activeIdx, rest); return; }
+    const base = midi || { channel: 1, velocity: 100, threshold: 0.5, hysteresis: 0.05, lengthMs: 100, ccLo: 0, ccHi: 127 };
+    const number = midi && midi.mode !== 'cc' && val !== 'cc' ? midi.number : (val === 'cc' ? 1 : val === 'index' ? 36 : 60);
+    applyRoutePatch(activeIdx, { ...r, midi: { ...base, mode: val, number } });
+  }, { disabled: disabledEdit, 'data-focus-key': `${scope}-mod-midi-mode`, title: (MIDI_MODES.find(m => m.id === midiMode)?.desc) || 'Send MIDI notes or CC to the host (Creative only, while the transport plays)' }));
+  const midiLiveEl = element('span', { className: 'mod-midi-live', 'aria-label': 'Last MIDI message sent', 'aria-live': 'off', text: midi ? 'no message yet' : '' });
+  const midiNum = (label, key, lo, hi, step, display, extra = {}) => register(txNumericField({
+    store, label, txLabel: 'Edit route MIDI out', value: midi?.[key] ?? lo, min: lo, max: hi, step, disabled: disabledEdit,
+    display: display || (v => `${Math.round(v)}`), getCommitCmd: v => midiCommit({ [key]: step < 1 ? v : Math.round(v) }), ...extra
+  }));
+  let midiRow = null;
+  {
+    const kids = [element('span', { className: 'mod-lbl', text: 'MIDI out' }), midiModeSelect];
+    if (midi) {
+      kids.push(element('span', { className: 'mod-midi-item' }, [element('span', { className: 'mod-lbl', text: 'Ch' }),
+        register(select('MIDI channel', Array.from({ length: 16 }, (_, i) => [String(i + 1), String(i + 1)]), String(midi.channel), val => midiPatch({ channel: Number(val) }), { disabled: disabledEdit, 'data-focus-key': `${scope}-mod-midi-ch` }))]));
+      const isCc = midi.mode === 'cc';
+      kids.push(element('span', { className: 'mod-midi-item' }, [
+        element('span', { className: 'mod-lbl', text: isCc ? 'CC' : midi.mode === 'index' ? 'Base' : 'Note' }),
+        midiNum(isCc ? 'MIDI CC number' : midi.mode === 'index' ? 'Keyswitch base note' : 'MIDI note', 'number', 0, 127, 1),
+        ...(isCc ? [] : [element('span', { className: 'mod-midi-note', text: midiNoteName(midi.number), title: 'Note name (middle C = C3 = 60)' })])
+      ]));
+      if (midi.mode === 'gate' || midi.mode === 'trigger') {
+        kids.push(element('span', { className: 'mod-midi-item' }, [element('span', { className: 'mod-lbl', text: 'Thr', title: 'Threshold of the route output (0–1)' }), midiNum('MIDI threshold', 'threshold', 0, 1, 0.01, v => v.toFixed(2))]));
+        if (midi.mode === 'gate') kids.push(element('span', { className: 'mod-midi-item' }, [element('span', { className: 'mod-lbl', text: 'Hyst', title: 'Note-off only below threshold − hysteresis (no chatter)' }), midiNum('MIDI hysteresis', 'hysteresis', 0, 0.5, 0.01, v => v.toFixed(2))]));
+        else kids.push(element('span', { className: 'mod-midi-item' }, [element('span', { className: 'mod-lbl', text: 'Len ms' }), midiNum('MIDI note length, ms', 'lengthMs', 1, 5000, 1)]));
+      }
+      if (midi.mode !== 'cc') {
+        kids.push(element('span', { className: 'mod-midi-item' }, [element('span', { className: 'mod-lbl', text: 'Vel' }),
+          midiNum('MIDI velocity', 'velocity', 1, 127, 1, null, { disabled: disabledEdit || midi.velocityFromValue }),
+          check('= value', !!midi.velocityFromValue, on => midiPatch({ velocityFromValue: on }), { disabled: disabledEdit, 'aria-label': 'Velocity from route value', title: 'Velocity from the route output (0–1 → 1–127)' })]));
+      } else {
+        kids.push(element('span', { className: 'mod-midi-item' }, [element('span', { className: 'mod-lbl', text: 'Range' }), midiNum('CC value at output 0', 'ccLo', 0, 127, 1), element('span', { text: '…' }), midiNum('CC value at output 1', 'ccHi', 0, 127, 1)]));
+      }
+      if (midi.mode === 'index') kids.push(check('Program change', !!midi.program, on => midiPatch({ program: on }), { disabled: disabledEdit, 'aria-label': 'Also send program change', title: 'Also send a program change (program = index) on every index change' }));
+      kids.push(midiLiveEl);
+    } else kids.push(element('span', { className: 'mod-midi-hint', text: 'Notes / CC to the next FX or instrument (Creative, while playing)' }));
+    if (scope === 'dock' && !midi) {
+      // Compact dock: a small MIDI mode select next to Host out. Picking a mode adds the MIDI block and the full
+      // MIDI out row then appears in the dock itself; the editor never leaves the dock (Detach has its own button).
+      midiTailSlot.hidden = false;
+      midiTailSlot.dataset.midiMode = 'off';
+      // The closed select reads "MIDI" (no extra label), so the tail row keeps its height at 1100x560.
+      midiTailSlot.append(register(select('MIDI out mode', MIDI_MODES.map(m => [m.id, m.id === 'off' ? 'MIDI' : m.label]), 'off', val => {
+        if (val === 'off') return;
+        const number = val === 'cc' ? 1 : val === 'index' ? 36 : 60;
+        applyRoutePatch(activeIdx, { ...r, midi: { channel: 1, velocity: 100, threshold: 0.5, hysteresis: 0.05, lengthMs: 100, ccLo: 0, ccHi: 127, mode: val, number } });
+      }, { disabled: disabledEdit, 'data-focus-key': `${scope}-mod-midi-mode`, title: 'MIDI out (notes / CC) for this route: pick a mode; the settings appear below (Creative only, while the transport plays)' })));
+    } else midiRow = element('div', { className: `mod-midi-row${midi ? ' on' : ''}`, 'data-midi-mode': midiMode }, kids);
   }
 
   // ── Large Responsive Curve SVG Editor (1 SVG unit = 1 CSS pixel via ResizeObserver) ──
@@ -894,6 +977,16 @@ function buildRouteEditor({ store, m, actions, register, scope = 'win' }) {
       : evaluateModCurve(draftCurve, raw);
     const val = isWireLive ? wire.value : simVal;
 
+    if (zoneLiveEl) {
+      const zl = zoneList(store.state);
+      const occ = liveOccupancy(store.state, store.telemetry) || new Map(computeZoneOccupancy(zl, withPathPoses(store.state).parameters.values, ns).map(o => [o.id, o.objects]));
+      const insideIds = zl.filter(z => (occ.get(z.id) || []).includes(r.object)).map(z => z.id);
+      const zr = dm.hasZone ? zl.find(z => z.id === r.zoneId) : null;
+      const lit = dm.hasZone ? insideIds.includes(r.zoneId) : insideIds.length > 0;
+      zoneLiveEl.textContent = dm.hasZone ? (zr ? (lit ? '● inside' : '○ outside') : '○ missing') : (lit ? `● in zone ${zl.findIndex(z => z.id === insideIds[0]) + 1}` : '○ outside all');
+      zoneLiveEl.className = `mod-zone-live${lit ? ' lit' : ''}`;
+      zoneLiveEl.style.setProperty('--zone-colour', zr ? zoneColour(zr, zl.indexOf(zr)) : 'var(--accent, #22c55e)');
+    }
     liveStatusBadge.className = `mod-live-badge ${!curMode ? 'phys' : !r.enabled ? 'off' : isWireLive ? 'live' : 'idle'}`;
     liveStatusBadge.textContent = !curMode ? 'Bypassed (Physical)' : !r.enabled ? 'Disabled' : isWireLive ? 'Live' : 'Idle preview';
     liveRawText.textContent = formatModValue(raw, dm.unit);
@@ -909,6 +1002,15 @@ function buildRouteEditor({ store, m, actions, register, scope = 'win' }) {
     liveRawFill.style.width = `${(inFrac * 100).toFixed(1)}%`;
     liveTgtFill.style.width = `${(outFrac * 100).toFixed(1)}%`;
 
+    if (midi) {  // V04e: last message sent + flash when the send counter moves
+      const wm = wire?.midi;
+      const count = Number(wm?.count) || 0;
+      midiLiveEl.textContent = !curMode ? 'Physical: no MIDI' : !r.enabled ? 'Route disabled' : (wm?.last ? describeMidiMessage(wm.last) : 'no message yet');
+      if (count && count !== Number(midiLiveEl.dataset.count || 0)) {
+        midiLiveEl.dataset.count = String(count);
+        midiLiveEl.classList.remove('flash'); void midiLiveEl.offsetWidth; midiLiveEl.classList.add('flash');
+      }
+    }
     if (hostOutVal > 0) {
       const liveHost = !curMode ? 0.5
         : !r.enabled ? 0.5
@@ -1111,7 +1213,7 @@ function buildRouteEditor({ store, m, actions, register, scope = 'win' }) {
   ]);
 
   const bottomGrid = element('div', { className: 'mod-win-bottom-grid' }, [rangesCard, liveCard]);
-  editorWrap.append(metaGrid, ...(pointRow ? [pointRow] : []), curveBox, nodeBar, bottomGrid);
+  editorWrap.append(metaGrid, ...(pointRow ? [pointRow] : []), ...(zonePickRow ? [zonePickRow] : []), ...(midiRow ? [midiRow] : []), curveBox, nodeBar, bottomGrid);
 
   return {
     editorWrap,

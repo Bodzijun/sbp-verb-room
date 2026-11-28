@@ -185,12 +185,278 @@ static int testVslHallSuite();
 
 #include "H1Test.h"
 #include "H2Test.h"
+#include "V04aTest.h"
+#include "V04bTest.h"
+#include "V04cTest.h"
+#include "V04eTest.h"
+#include "V04dTest.h"
+#include "R040Test.h"
+
+static int testMotionTailPlugin() {
+    using State = verb::Engine::MotionTailState;
+    const int before = fails;
+    auto prepare = [](VerbProcessor& p, int inputs) {
+        p.setPlayConfigDetails(inputs, 2, 48000, 128);
+        p.prepareToPlay(48000, 128);
+    };
+    auto waitTail = [](VerbProcessor& p) {
+        for (int i = 0; i < 3000; ++i) {
+            h2test::pumpBlocks(p, 4, 128);
+            if (p.isWebTailCurrent()) return true;
+            juce::Thread::sleep(5);
+        }
+        return false;
+    };
+    auto impulseEnergy = [](VerbProcessor& p, int blocks) {
+        const auto ir = h2test::captureImpulse(p, 2, 0, blocks, 128);
+        return h2test::channelEnergy(ir[0]) + h2test::channelEnergy(ir[1]);
+    };
+    auto save = [](VerbProcessor& p) {
+        juce::MemoryBlock data;
+        p.getStateInformation(data);
+        return data;
+    };
+    auto load = [](VerbProcessor& p, const juce::MemoryBlock& data) {
+        p.setStateInformation(data.getData(), (int)data.getSize());
+        return waitReady(p, 90);
+    };
+
+    VerbProcessor p;
+    prepare(p, 2);
+    if (!waitReady(p, 90)) { check(false, "MO3b Default Room loads"); return 1; }
+    const auto off = save(p);
+    const auto presetOff = p.getRoomPresetText();
+    const auto offXml = juce::parseXML(presetOff);
+    check(!p.motionTailEnabled() && offXml && offXml->getChildByName("VerbState")->getStringAttribute("motionTail") == "0",
+          "MO3b new instance defaults Off and a new preset exports explicit Off");
+    bool hostOrder = p.getParameters().size() == 299;
+    for (int index = 283; index < p.getParameters().size(); ++index) {
+        const auto* param = dynamic_cast<const juce::AudioProcessorParameterWithID*>(p.getParameters()[index]);
+        hostOrder &= param && param->paramID == "mo" + juce::String(index - 282);
+    }
+    check(hostOrder, "MO3b Mod Out keeps host indices 283 through 298");
+
+    p.setMotionTailEnabled(true);
+    const auto on = save(p);
+    const auto presetOn = p.getRoomPresetText();
+    VerbProcessor restored;
+    prepare(restored, 2);
+    check(load(restored, on) && restored.motionTailEnabled(), "MO3b On project state round trip");
+    juce::String error;
+    auto legacyPreset = juce::parseXML(presetOff);
+    legacyPreset->getChildByName("VerbState")->removeAttribute("motionTail");
+    restored.setKeepRoutingEnabled(true);
+    check(restored.loadRoomPresetText(legacyPreset->toString(), error) && waitReady(restored, 90)
+              && restored.motionTailEnabled(), "MO3b Keep I/O with absent key preserves On");
+    check(restored.loadRoomPresetText(presetOff, error) && waitReady(restored, 90)
+              && !restored.motionTailEnabled(), "MO3b Keep I/O applies explicit Off");
+    check(restored.loadRoomPresetText(presetOn, error) && waitReady(restored, 90)
+              && restored.motionTailEnabled(), "MO3b Keep I/O applies explicit On");
+    restored.setKeepRoutingEnabled(false);
+    check(restored.loadRoomPresetText(legacyPreset->toString(), error) && waitReady(restored, 90)
+              && !restored.motionTailEnabled(), "MO3b full import with absent key restores Off");
+    check(restored.loadRoomPresetText(presetOn, error) && waitReady(restored, 90)
+              && restored.motionTailEnabled(), "MO3b full import restores On");
+    check(load(restored, off) && !restored.motionTailEnabled(), "MO3b Off project state round trip");
+    juce::MemoryBlock legacy;
+    const auto stateFound = repoFile("plugin/fixtures/stage2/legacy.state").loadFileAsData(legacy);
+    restored.setMotionTailEnabled(true);
+    check(stateFound && load(restored, legacy) && !restored.motionTailEnabled(), "MO3b legacy.state defaults to Off");
+    restored.setMotionTailEnabled(true);
+    check(restored.loadRoomPresetText(repoFile("plugin/fixtures/stage2/legacy.verbroom").loadFileAsString(), error)
+              && waitReady(restored, 90) && !restored.motionTailEnabled(), "MO3b legacy.verbroom defaults to Off");
+
+    for (bool hall : {false, true}) {
+        VerbProcessor q;
+        prepare(q, hall ? 64 : 2);
+        if (hall) {
+            const auto hallPreset = repoFile("presets/VSL_Grand_Hall_Audience.verbroom").loadFileAsString();
+            auto xml = juce::parseXML(hallPreset.isNotEmpty() ? hallPreset
+                : repoFile("publish/sbp-verb-room/presets/VSL_Grand_Hall_Audience.verbroom").loadFileAsString());
+            if (!xml) {
+                const auto room = verbp::vslGrandHall(false);
+                q.loadRoomWithSetup(juce::String(room.text), juce::String(room.name), room.setup, room.micPattern);
+                if (waitReady(q, 90)) xml = juce::parseXML(q.getRoomPresetText());
+            }
+            if (!xml || !xml->getChildByName("VerbState")) { check(false, "MO3b VSL fixture exists"); continue; }
+            xml->getChildByName("VerbState")->setAttribute("motionTail", true);
+            if (!q.loadRoomPresetText(xml->toString(), error) || !waitReady(q, 90)) {
+                check(false, "MO3b VSL preset reloads with Motion"); continue;
+            }
+        } else if (!load(q, on)) {
+            check(false, "MO3b Default project reloads with Motion"); continue;
+        }
+        const bool preparing = q.webMotionTailState() == State::Preparing;
+        const double first = impulseEnergy(q, 48);
+        check(preparing && std::isfinite(first) && first > 0., "MO3b first impulse audible during Motion preparation");
+        const bool ready = waitTail(q);
+        setP(q, "soloTail", 1.);
+        h2test::pumpBlocks(q, 280, 128);
+        const double late = impulseEnergy(q, 300);
+        check(ready && q.webMotionTailState() == State::Ready && std::isfinite(late) && late > 0.,
+              "MO3b reloaded Motion tail has energy when ready");
+        std::printf("MO3b %s first %.9g FS^2, ready tail %.9g FS^2\n", hall ? "VSL" : "Default", first, late);
+    }
+
+    check(waitTail(p), "MO3b switched-on engine is current before playback test");
+    E12PlayHead head;
+    head.playing = true;
+    p.setPlayHead(&head);
+    setP(p, "soloTail", 1.);
+    juce::AudioBuffer<float> audio(2, 128);
+    juce::MidiBuffer midi;
+    const auto engine = E9bAccess::engine(p);
+    const auto allocationsBefore = stage2AudioAllocations;
+    std::array<float, 2> previous{}, priorDifference{};
+    const auto feed = [&] {
+        audio.clear();
+        for (int i = 0; i < 128; ++i) {
+            const auto n = head.samples + i;
+            audio.setSample(0, i, .2f * float(std::sin(n * (2. * verb::kPi * 191. / 48000.))
+                + .35 * std::sin(n * (2. * verb::kPi * 659. / 48000.))));
+        }
+    };
+    for (int b = 0; b < 400; ++b) {
+        feed();
+        stage2Process(p, audio, midi);
+        head.samples += 128;
+    }
+    for (int c = 0; c < 2; ++c) {
+        previous[c] = audio.getSample(c, 127);
+        priorDifference[c] = previous[c] - audio.getSample(c, 126);
+    }
+    for (bool moving : {false, true}) {
+        const auto move = [&] {
+            if (moving) setP(p, "s1y", 4.8 + 1.8 * std::cos(head.samples * (verb::kPi / 48000)));
+        };
+        if (moving) {
+            setP(p, "mode", 1.);
+            setP(p, "predelay", 25.);
+            setP(p, "stereoWidth", 65.);
+            setP(p, "duck", 6.);
+            for (int b = 0; b < 400; ++b) {
+                move();
+                feed();
+                stage2Process(p, audio, midi);
+                head.samples += 128;
+            }
+            for (int c = 0; c < 2; ++c) {
+                previous[c] = audio.getSample(c, 127);
+                priorDifference[c] = previous[c] - audio.getSample(c, 126);
+            }
+        }
+        for (bool enable : {false, true}) {
+            p.setMotionTailEnabled(enable);
+            float boundary = 0.f, largest = 0.f, curvature = 0.f;
+            std::vector<double> cpu;
+            bool switched = false;
+            for (int b = 0; b < 1000; ++b) {
+                move();
+                const auto ts = std::chrono::steady_clock::now();
+                feed();
+                const bool observed = (engine->motionTailState() != State::Off) == enable;
+                const bool edge = !switched && observed;
+                const auto start = std::chrono::steady_clock::now();
+                stage2Process(p, audio, midi);
+                cpu.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count());
+                for (int c = 0; c < 2; ++c) {
+                    for (int i = 0; i < 128; ++i) {
+                        const float sample = audio.getSample(c, i);
+                        const float delta = sample - previous[c];
+                        largest = std::max(largest, std::abs(delta));
+                        curvature = std::max(curvature, std::abs(delta - priorDifference[c]));
+                        if (edge && i == 0) boundary = std::max(boundary, std::abs(delta));
+                        previous[c] = sample;
+                        priorDifference[c] = delta;
+                    }
+                }
+                switched |= observed;
+                head.samples += 128;
+                std::this_thread::sleep_until(ts + std::chrono::microseconds(2667));
+            }
+            std::sort(cpu.begin(), cpu.end());
+            std::printf("MO3b %s %s: edge %.9g FS, max delta %.9g FS, max second difference %.9g FS, p99 %.2f us\n",
+                        enable ? "On" : "Off", moving ? "moving Creative" : "stationary Physical", boundary, largest, curvature, cpu[989]);
+            check(switched && std::isfinite(largest) && curvature < .005f && cpu[989] < 2666.7,
+                  "MO3b live switch stays continuous and p99 fits the block budget");
+            if (enable) check(p.webMotionTailState() == State::Ready, "MO3b Motion ready during playback");
+        }
+    }
+    auto traces = engine->tailRefreshCount();
+    head.samples += 48000;
+    setP(p, "s1y", 5.5);
+    setP(p, "ly", 3.5);
+    for (int b = 0; b < 180; ++b) {
+        feed();
+        stage2Process(p, audio, midi);
+        head.samples += 128;
+    }
+    check(p.webMotionTailState() == State::Ready && engine->tailRefreshCount() == traces,
+          "MO3b moving both ends and seeking leaves Motion ready without a new trace");
+    const auto allocations = stage2AudioAllocations - allocationsBefore;
+    check(allocations == 0, "MO3b moving, seeking and switching modes allocate no C++ memory in processBlock");
+    std::printf("MO3b audio allocations %zu\n", allocations);
+    const bool edited = p.editScene([](verb::Scene& scene) { scene.height += .25; });
+    const bool waitingForEdit = p.webMotionTailState() == State::Preparing;
+    feed();
+    stage2Process(p, audio, midi);
+    const float previousWet = audio.getMagnitude(0, 128);
+    p.setPlayHead(nullptr);
+    check(edited && waitingForEdit && previousWet > 0.f && waitTail(p),
+          "MO3b geometry edit keeps the previous wet audible while a replacement prepares");
+    std::printf("MO3b geometry edit retained wet peak %.9g FS\n", previousWet);
+
+    VerbProcessor baked;
+    baked.setTailSettings({8000, false});
+    prepare(baked, 2);
+    baked.loadSceneText(p4test::kScene, "MO3b corridor", true);
+    verbp::MovementPath path;
+    path.points = {{{1, 2, 1.5}}, {{3, 6, 1.5}}};
+    if (waitReady(baked, 90) && baked.setMovementPath(verbp::kListener, path)
+        && baked.startPathBake(verbp::kListener) && p4test::waitBaked(baked, 120)) {
+        const auto bakeEngine = E9bAccess::engine(baked);
+        const auto hash = bakeEngine->bakeStats().hash;
+        baked.setMotionTailEnabled(true);
+        check(waitTail(baked) && !baked.startPathBake(verbp::kListener), "MO3b Motion ready, new Bake blocked");
+        const auto playingBefore = bakeEngine->bakeStats().lookups;
+        setP(baked, "lpath", .5);
+        h2test::pumpBlocks(baked, 180, 128);
+        check(bakeEngine->bakeStats().lookups == playingBefore && bakeEngine->bakeStats().hash == hash,
+              "MO3b Motion bypasses the existing Bake without clearing it");
+        const auto bakingState = save(baked);
+        auto saved = baked.getXmlFromBinary(bakingState.getData(), (int)bakingState.getSize());
+        check(saved && saved->getChildByName("BakeCache"), "MO3b On project stores BakeCache");
+        VerbProcessor again;
+        prepare(again, 2);
+        check(load(again, bakingState) && waitTail(again), "MO3b project restores Motion with BakeCache");
+        auto resaved = juce::parseXML(p4test::stateXml(again));
+        check(resaved && resaved->getChildByName("BakeCache"), "MO3b state re-saved while Motion is On still contains BakeCache");
+        again.setMotionTailEnabled(false);
+        const bool available = p4test::waitBaked(again, 15);
+        const auto againEngine = E9bAccess::engine(again);
+        for (int i = 0; i < 250 && againEngine->motionTailState() != State::Off; ++i)
+            p4test::pump(again, 1);
+        h2test::pumpBlocks(again, 180, 128);
+        const auto stats = againEngine->bakeStats();
+        check(available && stats.hash == hash && stats.lookups > 0, "MO3b switching Off resumes lookups from the saved Bake");
+        std::printf("MO3b Bake %016llx restored %016llx, %llu lookups\n", (unsigned long long)hash,
+                    (unsigned long long)stats.hash, (unsigned long long)stats.lookups);
+    } else check(false, "MO3b creates the control Bake table");
+    return fails == before ? 0 : 1;
+}
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // keep the output even if something crashes
     juce::ScopedJuceInitialiser_GUI init;
     struct EnvSuite { const char* name; int (*fn)(); };
     static const EnvSuite suites[] = {
+        {"VERB_ONLY_R040", testR040Stems},
+        {"VERB_ONLY_V04B", testV04bPathWander},
+        {"VERB_ONLY_V04C", testV04cZones},
+        {"VERB_ONLY_V04E", testV04eMidiOut},
+        {"VERB_ONLY_V04D", testV04dLinkToPath},
+        {"VERB_ONLY_V04A", testV04aPathShapes},
+        {"VERB_ONLY_MO3B", testMotionTailPlugin},
         {"VERB_ONLY_H2", testH2Suite},
         {"VERB_ONLY_H1", testH1Suite},
         {"VERB_ONLY_G4", testG4Modulation},
@@ -2554,6 +2820,13 @@ receiver R 0 0 1.5 0 0
     testG8ModulationHostOutputs();
     testH1Fast();
     testH2Fast();
+    testMotionTailPlugin();
+    testV04aPathShapes();
+    testV04bPathWander();
+    testV04cZones();
+    testV04eMidiOut();
+    testV04dLinkToPath();
+    testR040Stems();
     std::printf(fails ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", fails);
     return fails ? 1 : 0;
 }

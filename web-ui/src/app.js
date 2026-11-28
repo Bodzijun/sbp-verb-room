@@ -16,7 +16,7 @@ import { editTools, layerBar } from './pages/edit-room.js';
 import { createViewport } from './viewport/viewport.js';
 import { surfaceRefs, surface, layerKey } from './state/selectors.js';
 import { orientationMode } from './viewport/movement-path.js';
-import { budget } from './state/selectors.js';
+import { budget, motionEnabled, motionStatusText } from './state/selectors.js';
 import { snapFace } from './viewport/snap.js';
 import { viewportPalette, THEME_LABELS } from './viewport/palette.js';
 import { historyButtons } from './components/history.js';
@@ -112,6 +112,13 @@ function header() {
   const state = store.state, mode = state.parameters.values.mode;
   const fixtureIndex = FIXTURES.indexOf(bridge.selectedFixture || 'default-physical'), roomIndex = fixtureIndex >= 0 && fixtureIndex < 4 ? fixtureIndex : 0;
   const modeButton = (value, label) => button(label, () => { bridge.parameters.begin('mode'); bridge.parameters.change('mode', value); bridge.parameters.end('mode'); }, { className: mode === value ? 'active' : '', 'aria-pressed': String(mode === value) });
+  const motion = motionEnabled(state);
+  const motionButton = state.capabilities.features?.['tail.motion']?.available
+    ? button('Motion', () => store.command({ op: 'tail.setMotion', enabled: !motion }), {
+        className: `motion-toggle${motion ? ' active' : ''}`, 'aria-pressed': String(motion),
+        title: 'Experimental. The tail follows moving objects without waiting for Bake. Best in single rooms. Large multi-room scenes are less accurate. Baked tables are bypassed while Motion is on.'
+      })
+    : null;
   if(store.view.page === 'edit') return element('header',{className:'header edit-header'},[
     element('div',{className:'brand'},[element('span',{className:'brand-icon',text:'⬡'}),element('div',{},[element('strong',{text:'VERB ROOM'}),element('small',{text:'PHYSICALLY BASED REVERB'})])]),
     element('div',{className:'edit-room-heading'},[element('b',{text:`Edit room / ${state.document.sceneName}`}),element('small',{text:'Geometry → materials → sound'})]),
@@ -127,13 +134,20 @@ function header() {
       const command = roomCommand(key); if (command) store.command(command);
     }, { title: state.document.sceneName, reselect:true }),
     element('div', {className:'preset-actions'}, [button('Save', () => store.command({ op:'preset.save', name:state.document.sceneName })), button('Load file', () => store.command({ op: 'preset.load', source: 'file' })), button('Export IR', () => store.command({ op: 'ir.export' }))]),
-    element('div', { className: 'header-actions' }, [...historyButtons(store), unavailable(state, 'ab.compare', 'A / B'), element('div', { className: 'mode-switch' }, [modeButton(0, 'Physical'), modeButton(1, 'Creative'), element('small', { text: state.parameters.effective.mode === 'physical' ? 'ROOM-DERIVED' : 'CREATIVE OVERRIDES' })]), themePanel(), aboutButton(), button(store.view.page === 'main' ? 'Edit room ↗' : '✓ Done', () => {viewport?.cancelGesture?.();if(store.view.page==='main')store.setView({page:'edit',pathDrawing:null,pathDraft:null,pathRedo:null});else leaveEdit();}, { className: 'primary' })])]);
+    element('div', { className: 'header-actions' }, [...historyButtons(store), unavailable(state, 'ab.compare', 'A / B'), element('div', { className: 'mode-switch' }, [modeButton(0, 'Physical'), modeButton(1, 'Creative'), motionButton, element('small', { text: state.parameters.effective.mode === 'physical' ? 'ROOM-DERIVED' : 'CREATIVE OVERRIDES' })]), themePanel(), aboutButton(), button(store.view.page === 'main' ? 'Edit room ↗' : '✓ Done', () => {viewport?.cancelGesture?.();if(store.view.page==='main')store.setView({page:'edit',pathDrawing:null,pathDraft:null,pathRedo:null});else leaveEdit();}, { className: 'primary' })])]);
 }
 // N1: show / hide the engine's clutter objects. Remembered in preferences (default ON); only has an effect while clutter count > 0.
 function pathsButton() {
   const on = store.state.preferences?.showPaths !== false, count = (store.state.document.paths || []).filter(p => p?.points?.length >= 2).length;
   return button('Paths', () => store.command({ op: 'preferences.set', patch: { showPaths: !on } }), { className: `${on ? 'active' : ''}${count ? '' : ' idle'}`.trim(), 'aria-pressed': String(on), 'data-paths-toggle': on ? 'on' : 'off',
     title: count ? `${on ? 'Hide' : 'Show'} movement paths (${count}). A path being drawn or edited always stays visible.` : 'No movement paths yet. Select a source or the listener and press Draw path.' });
+}
+// V04e: show / hide drawn trigger zones (and their labels) in every view. A remembered UI preference like Paths
+// (absent = ON), never part of the scene or .verbroom. A zone selected in the Zones list or a zone tool keeps them visible.
+function zonesButton() {
+  const on = store.state.preferences?.showZones !== false, count = (store.state.document.zones || []).length;
+  return button('Zones', () => store.command({ op: 'preferences.set', patch: { showZones: !on } }), { className: `${on ? 'active' : ''}${count ? '' : ' idle'}`.trim(), 'aria-pressed': String(on), 'data-zones-toggle': on ? 'on' : 'off',
+    title: count ? `${on ? 'Hide' : 'Show'} trigger zones (${count}). A zone selected in the Zones list or being drawn always stays visible.` : 'No trigger zones yet. Edit room → Scene → Zones, or the T / G tools.' });
 }
 function clutterButton() {
   const on = store.state.preferences?.showClutter !== false, count = store.state.document.scene.clutter?.count || 0;
@@ -170,8 +184,9 @@ function toolbar() {
       button('Rays', () => store.setView({ rays: !store.view.rays }), { className: store.view.rays ? 'active' : '', 'aria-pressed': String(store.view.rays) }),
       clutterButton(),
       pathsButton(),
+      zonesButton(),
       modButton(),
-      ...(store.view.page==='edit'?[button('▧',()=>store.setView({perspectivePreview:!(store.view.perspectivePreview??['room','wall','floorZone','ceilingZone','plate'].includes(store.view.tool))}),{'aria-label':'Perspective preview','aria-pressed':String(store.view.perspectivePreview??['room','wall','floorZone','ceilingZone','plate'].includes(store.view.tool)),title:'3D inset · default follows drawing tool'})]:[]),
+      ...(store.view.page==='edit'?[button('▧',()=>store.setView({perspectivePreview:!(store.view.perspectivePreview??['room','wall','floorZone','ceilingZone','plate','zoneBox','zonePoly'].includes(store.view.tool))}),{'aria-label':'Perspective preview','aria-pressed':String(store.view.perspectivePreview??['room','wall','floorZone','ceilingZone','plate','zoneBox','zonePoly'].includes(store.view.tool)),title:'3D inset · default follows drawing tool'})]:[]),
       nav])]);
 }
 let cpuWarningLevel = 'none';
@@ -239,6 +254,14 @@ function render() {
 }
 function refreshSnapFace() { const text = document.querySelector('.snap-dd .dd-text'); if (text && viewport) text.textContent = snapFace(store.view, viewport.currentSnapStep()); }
 function updateStatus() {
+  const load = store.telemetry['status.load'];
+  const motionText = motionStatusText(store.state, load);
+  const tailStatus = app.querySelector('.rebuild-indicator');
+  if (tailStatus) {
+    tailStatus.classList.toggle('motion-status', !!motionText);
+    tailStatus.firstElementChild.textContent = motionText || 'Rebuilding…';
+    tailStatus.lastElementChild.hidden = motionText === 'Motion: ready';
+  }
   const analysis=store.telemetry['analysis.progress'],result=store.telemetry['analysis.result'],analysisNode=app.querySelector('.footer-analysis');
   if(analysis && analysis.jobId!==analysisJob){analysisJob=analysis.jobId;analysisStarted=Date.now();setTimeout(()=>{if(!closed)updateStatus();},1050);}
   if(analysisNode){const footer=analysisFooterState(analysis,result,analysisStarted,Date.now());analysisNode.hidden=!footer.visible;analysisNode.querySelector('.footer-analysis-text').textContent=footer.text;}
@@ -246,15 +269,15 @@ function updateStatus() {
   const bake=store.telemetry['status.load']?.pathBake,bakeNode=app.querySelector('.footer-bake');
   if(bakeNode){
     if(bake?.state==='baked'&&lastBakeState!=='baked'){bakeFinishedUntil=Date.now()+4000;setTimeout(()=>{if(!closed)updateStatus();},4100);}
-    lastBakeState=bake?.state||'';const text=bakeFooterText(bake);bakeNode.hidden=!text||(bake?.state==='baked'&&!bake?.reason&&Date.now()>bakeFinishedUntil);
+    lastBakeState=bake?.state||'';const text=bakeFooterText(bake);bakeNode.hidden=!!motionText||!text||(bake?.state==='baked'&&!bake?.reason&&Date.now()>bakeFinishedUntil);
     bakeNode.querySelector('.footer-bake-text').textContent=text;bakeNode.querySelector('.footer-bake-cancel').hidden=bake?.state!=='baking';
     // An outdated bake is a standing warning with its own action, not a passing status line.
     const stale=bake?.state==='outdated';bakeNode.classList.toggle('warn',stale);bakeNode.querySelector('.footer-bake-again').hidden=!stale;
   }
-  const rebuilding=!!store.telemetry['status.load']?.rebuilding;
+  const rebuilding=!motionText && !!load?.rebuilding;
   document.body.classList.toggle('rebuilding',rebuilding);
   document.querySelector('.decay-graph')?.setAttribute('aria-busy',String(rebuilding));
-  syncRebuildingBanner(rebuilding);
+  syncRebuildingBanner(rebuilding, !!motionText);
   const cpu = store.telemetry['status.load']?.cpu;
   const cpuNode = app.querySelector('.cpu-warning');
   if (cpuNode) {
@@ -306,7 +329,7 @@ if (typeof window !== 'undefined') {
     updateStatus();
   });
 }
-function syncRebuildingBanner(want) {
+function syncRebuildingBanner(want, hideImmediately = false) {
   rebuildBanner.want = !!want;
   if (rebuildBanner.want) {
     if (rebuildBanner.hideTimer) { clearTimeout(rebuildBanner.hideTimer); rebuildBanner.hideTimer = null; }
@@ -323,7 +346,7 @@ function syncRebuildingBanner(want) {
   } else {
     if (rebuildBanner.appearTimer) { clearTimeout(rebuildBanner.appearTimer); rebuildBanner.appearTimer = null; }
     if (rebuildBanner.visible) {
-      const remaining = REBUILD_MIN_VISIBLE_MS - (Date.now() - rebuildBanner.shownAt);
+      const remaining = hideImmediately ? 0 : REBUILD_MIN_VISIBLE_MS - (Date.now() - rebuildBanner.shownAt);
       if (remaining <= 0) {
         if (rebuildBanner.hideTimer) { clearTimeout(rebuildBanner.hideTimer); rebuildBanner.hideTimer = null; }
         rebuildBanner.visible = false;
@@ -364,7 +387,7 @@ async function init() {
     if (['snapshot','patch','parameters','view','resync','catalogs.list'].includes(reason)) {
       const state = store.state;
       const viewKey = ['view', 'snapshot', 'resync'].includes(reason)
-        ? JSON.stringify({ ...store.view, camera: undefined, previewCamera: undefined, pathDraft: undefined, cornerJoinResult: store.cornerJoinResult }) : rendered?.viewKey;
+        ? JSON.stringify({ ...store.view, camera: undefined, previewCamera: undefined, pathDraft: undefined, pathShapePreview: undefined, pathShapeLast: undefined, cornerJoinResult: store.cornerJoinResult }) : rendered?.viewKey;
       const docSig = rendered && rendered.document === state.document ? rendered.docSig : JSON.stringify(state.document);
       const prefsSig = rendered && rendered.preferences === state.preferences ? rendered.prefsSig : JSON.stringify({ ...(state.preferences || {}), sessionViewState: undefined });
       // Host channel counts / layout feed the inspector and the source budget text: a host change must rebuild them.
@@ -410,6 +433,7 @@ document.addEventListener('keydown', e => {
       }
       return;
     }
+    if(!hasSurfSel&&store.view.page==='edit'&&store.view.zoneEdit!=null&&!store.view.selection.length){const id=store.view.zoneEdit;store.setView({zoneEdit:null});store.command({op:'zone.delete',id});return;}
     if(store.view.page==='edit'&&store.view.selection.length){
       const refs=store.view.selection.filter(r=>!['source','listener','floor','ceiling'].includes(r.kind)).map(({kind,index})=>({kind,index}));
       const sources=store.view.selection.filter(r=>r.kind==='source').sort((a,b)=>b.index-a.index);
@@ -437,7 +461,7 @@ document.addEventListener('keydown', e => {
     else if (store.view.pathDrawing != null || store.view.pathDraft) store.setView({ pathDrawing: null, pathDraft: null });
     else store.setView({ selection: [], themeOpen: false, pathEditing: null, pathPoint: null, azKey: null });
   }
-  if(store.view.page==='edit'&&!modKey(e)&&!e.ctrlKey&&!e.altKey){const tool={v:'move',b:'box',r:'room',w:'wall',z:'floorZone',c:'ceilingZone',p:'plate'}[e.key.toLowerCase()];if(tool){e.preventDefault();store.setView({tool});viewport?.querySelector('canvas').focus();}}
+  if(store.view.page==='edit'&&!modKey(e)&&!e.ctrlKey&&!e.altKey){const tool={v:'move',b:'box',r:'room',w:'wall',z:'floorZone',c:'ceilingZone',p:'plate',t:'zoneBox',g:'zonePoly'}[e.key.toLowerCase()];if(tool){e.preventDefault();store.setView({tool,...(['zoneBox','zonePoly'].includes(tool)?{projection:'plan',zoneEdit:null}:{})});viewport?.querySelector('canvas').focus();}}
 });
 // The browser's own context menu (Back / Reload / Inspect) has no place in a plugin window; text fields keep theirs for copy/paste.
 document.addEventListener('contextmenu',e=>{if(!(/^(INPUT|TEXTAREA)$/.test(e.target.tagName)||e.target.isContentEditable))e.preventDefault();});

@@ -6,7 +6,7 @@ export const tryCapture = (el, e) => {
   try { el.setPointerCapture?.(e.pointerId); return true; } catch { return false; }
 };
 
-export function createTxGesture(store, label) {
+export function createTxGesture(store, label, { throttleMs = 33 } = {}) {
   const tx = `tx-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   let began = false, last = 0, pending = null, sentKey = '', timer = null;
   const flush = () => {
@@ -17,6 +17,8 @@ export function createTxGesture(store, label) {
     for (const c of cmds) store.command(c, tx);
   };
   return {
+    get txId() { return tx; },
+    get isActive() { return began; },
     send(cmdOrCmds) {
       const cmds = Array.isArray(cmdOrCmds) ? cmdOrCmds : [cmdOrCmds];
       if (!cmds.length) return;
@@ -24,12 +26,13 @@ export function createTxGesture(store, label) {
       if (key === sentKey) return;
       sentKey = key;
       pending = cmds;
-      if (performance.now() - last >= 33) flush();
-      else if (!timer) timer = setTimeout(flush, 33);
+      if (throttleMs <= 0 || performance.now() - last >= throttleMs) flush();
+      else if (!timer) timer = setTimeout(flush, throttleMs);
     },
     async end() {
       flush();
       if (began) await store.command({ op: 'transaction.commit' }, tx);
+      began = false;
     },
     cancel() {
       if (timer) { clearTimeout(timer); timer = null; }
@@ -43,9 +46,11 @@ export function createTxGesture(store, label) {
 export function txNumericField({
   store, label, txLabel = label, value, min, max, step = 0.1,
   disabled = false, title = '', className = 'readout', clampOnSubmit = false,
-  display, edit, getCommitCmd, onPreview
+  liveInput = false, throttleMs = 33,
+  display, edit, getCommitCmd, onPreview, onCancel
 }) {
   let current = value, fg = null, committed = false, skipChange = false;
+  let typingFg = null, typingInitial = value, rafInput = null;
   const fmt = display || (n => String(Number(n.toFixed(3))));
   const input = element('input', {
     type: 'text',
@@ -58,6 +63,21 @@ export function txNumericField({
     const lo = typeof min === 'function' ? min() : min;
     const hi = typeof max === 'function' ? max() : max;
     return Math.max(lo, Math.min(hi, v));
+  };
+  const closeTypingTx = async cancelled => {
+    if (rafInput !== null) { cancelAnimationFrame(rafInput); rafInput = null; }
+    const g = typingFg;
+    typingFg = null;
+    if (!g) return;
+    if (cancelled) {
+      g.cancel();
+      current = typingInitial;
+      onCancel?.(typingInitial);
+    } else {
+      await g.end();
+    }
+    input.removeAttribute('data-gesture-active');
+    window.dispatchEvent(new Event('verb-control-end'));
   };
   const submit = () => {
     if (disabled || skipChange) return;
@@ -79,7 +99,12 @@ export function txNumericField({
       const clamped = Math.max(lo, Math.min(hi, n));
       input.setCustomValidity('');
       input.value = fmt(clamped);
-      if (Math.abs(clamped - current) > 1e-9) {
+      if (typingFg) {
+        current = clamped;
+        onPreview?.(clamped);
+        typingFg.send(getCommitCmd(clamped));
+        closeTypingTx(false);
+      } else if (Math.abs(clamped - current) > 1e-9) {
         current = clamped;
         onPreview?.(clamped);
         store.command(getCommitCmd(clamped));
@@ -87,17 +112,51 @@ export function txNumericField({
       return;
     }
     input.setCustomValidity('');
-    if (Math.abs(n - current) > 1e-9) {
+    if (typingFg) {
+      current = n;
+      onPreview?.(n);
+      typingFg.send(getCommitCmd(n));
+      closeTypingTx(false);
+    } else if (Math.abs(n - current) > 1e-9) {
       current = n;
       onPreview?.(n);
       store.command(getCommitCmd(n));
     }
   };
-  input.addEventListener('input', () => { skipChange = false; });
+  input.addEventListener('input', () => {
+    skipChange = false;
+    if (!liveInput || disabled) return;
+    const raw = input.value.trim();
+    const n = Number(raw);
+    const lo = typeof min === 'function' ? min() : min;
+    const hi = typeof max === 'function' ? max() : max;
+    if (!raw || !Number.isFinite(n) || n < lo || n > hi) return;
+    input.setCustomValidity('');
+    if (!typingFg) {
+      typingInitial = current;
+      typingFg = createTxGesture(store, txLabel, { throttleMs });
+      input.setAttribute('data-gesture-active', 'true');
+    }
+    current = n;
+    onPreview?.(n);
+    typingFg.send(getCommitCmd(n));
+  });
   input.addEventListener('change', submit);
+  input.addEventListener('blur', () => {
+    if (typingFg && !skipChange) closeTypingTx(false);
+  });
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); submit(); input.blur(); }
-    if (e.key === 'Escape') { e.preventDefault(); skipChange = true; input.setCustomValidity(''); input.value = fmt(current); input.blur(); }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      skipChange = true;
+      input.setCustomValidity('');
+      if (typingFg) {
+        closeTypingTx(true);
+      }
+      input.value = fmt(current);
+      input.blur();
+    }
   });
   const offVf = valueField(input, {
     get: () => current,
@@ -108,7 +167,8 @@ export function txNumericField({
     edit: edit || (n => String(Number(n.toFixed(4)))),
     start: () => {
       committed = false;
-      fg = createTxGesture(store, txLabel);
+      typingInitial = current;
+      fg = createTxGesture(store, txLabel, { throttleMs });
     },
     preview: v => {
       const c = clampVal(v);
@@ -126,13 +186,24 @@ export function txNumericField({
         store.command(getCommitCmd(c));
       }
     },
-    end: async () => {
+    end: async cancelled => {
       const g = fg; fg = null;
-      if (g) { if (committed) await g.end(); else g.cancel(); }
+      if (g) {
+        if (committed && !cancelled) await g.end();
+        else {
+          g.cancel();
+          current = typingInitial;
+          onCancel?.(typingInitial);
+        }
+      }
     }
   });
   if (title) input.title = title;
-  input.dispose = () => offVf();
+  input.dispose = () => {
+    if (rafInput !== null) { cancelAnimationFrame(rafInput); rafInput = null; }
+    if (typingFg) { typingFg.cancel(); typingFg = null; }
+    offVf();
+  };
   return input;
 }
 

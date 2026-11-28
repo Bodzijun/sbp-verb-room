@@ -12,7 +12,7 @@ import {
 } from '../src/components/modulation-model.js';
 
 const require = createRequire(import.meta.url);
-const shotsDir = resolve('..', 'out', 'G8', 'screenshots');
+const shotsDir = process.env.VERB_BROWSER_SHOTS_DIR || resolve('..', 'out', 'G8', 'screenshots');
 mkdirSync(shotsDir, { recursive: true });
 
 async function withPage(fn, viewport = { width: 1280, height: 760 }) {
@@ -42,8 +42,8 @@ async function pickScopedOption(container, name, optionText) {
   await container.page().locator('.dd-popup [role=option]', { hasText: optionText }).first().click();
 }
 
-test('modulation-model exports 11 drivers, 9 targets (incl. none), safe range clamping, Path LFO swing & math parity', () => {
-  assert.equal(MOD_DRIVERS.length, 11);
+test('modulation-model exports 14 drivers, 9 targets (incl. none), safe range clamping, Path LFO swing & math parity', () => {
+  assert.equal(MOD_DRIVERS.length, 14);
   assert.equal(MOD_TARGETS.length, 9);
   assert.equal(MOD_TARGETS.at(-1)?.id, 'none');
   assert.equal(MOD_PRESETS.length, 5);
@@ -271,7 +271,7 @@ test('G7 Modulation UI: docked editor in tab, no auto-open, Mod toolbar toggle, 
     await pickScopedOption(tab, 'Modulation target', 'Host output only');
     await page.waitForFunction(() => window.verbRoom.store.state.document.modulation.routes[0].target === 'none');
     await tab.locator('.mod-dock-editor-col .mod-hostout-note', { hasText: 'Host out' }).waitFor();
-    await page.screenshot({ path: resolve('..', 'out', 'G8', 'screenshots', 'g8_host_out_docked.png') });
+    await page.screenshot({ path: resolve(shotsDir, 'g8_host_out_docked.png') });
     await pickScopedOption(tab, 'Host output slot', '—');
     await page.waitForFunction(() => !window.verbRoom.store.state.document.modulation.routes[0].hostOut);
     await pickScopedOption(tab, 'Modulation target', 'Wet / dry mix Δ');

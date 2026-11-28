@@ -21,7 +21,7 @@ const executablePath = process.env.CHROME_PATH || [
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 ].find(existsSync);
 
-const SHOTS_DIR = fileURLToPath(new URL('../../out/G9/shots', import.meta.url));
+const SHOTS_DIR = process.env.VERB_BROWSER_SHOTS_DIR || fileURLToPath(new URL('../../out/G9/shots', import.meta.url));
 
 async function withPage(fn) {
   const { server, url } = await serve({ port: 0 });

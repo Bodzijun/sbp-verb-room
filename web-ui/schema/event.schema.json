@@ -170,6 +170,7 @@
         "tailCurrent": {
           "type": "boolean"
         },
+        "motionTail": { "enum": ["preparing", "ready"] },
         "rebuilding": {
           "type": "boolean",
           "description": "Real requested/applied processor state has differed for at least 150 ms."
@@ -223,6 +224,30 @@
         "pathBake": {
           "$ref": "#/$defs/PathBakeStatus"
         },
+        "rigPoses": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": { "type": "integer", "minimum": 0, "maximum": 31 },
+              "xyz": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+            },
+            "required": ["source", "xyz"],
+            "additionalProperties": false
+          }
+        },
+        "transport": {
+          "type": "object",
+          "properties": {
+            "playing": { "type": "boolean" },
+            "samplePos": { "type": "integer" },
+            "timeSec": { "type": "number" },
+            "sampleRate": { "type": "number", "minimum": 1 }
+          },
+          "additionalProperties": false,
+          "required": ["playing", "samplePos", "timeSec"]
+        },
         "modulation": {
           "type": "object",
           "properties": {
@@ -234,7 +259,17 @@
                 "properties": {
                   "raw": { "type": "number" },
                   "value": { "type": "number" },
-                  "active": { "type": "boolean" }
+                  "active": { "type": "boolean" },
+                  "midi": {
+                    "type": "object",
+                    "description": "V04e: MIDI out indicator of this route, present once it has sent something: send counter + last message [status, data1, data2].",
+                    "properties": {
+                      "count": { "type": "integer", "minimum": 1 },
+                      "last": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 }, "minItems": 3, "maxItems": 3 }
+                    },
+                    "required": ["count", "last"],
+                    "additionalProperties": false
+                  }
                 },
                 "additionalProperties": false,
                 "required": ["raw", "value", "active"]
@@ -243,6 +278,44 @@
           },
           "additionalProperties": false,
           "required": ["routes"]
+        },
+        "zones": {
+          "type": "object",
+          "description": "V04c live zone occupancy (objects 0..31 sources, 32 listener). Present only while audio runs and zones exist.",
+          "properties": {
+            "occupancy": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999
+                  },
+                  "objects": {
+                    "type": "array",
+                    "maxItems": 33,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 32
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "objects"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "occupancy"
+          ],
+          "additionalProperties": false
         }
       },
       "additionalProperties": false,

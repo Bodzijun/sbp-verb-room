@@ -79,11 +79,12 @@ juce::var EditorBridge::document() const {
     for (const auto& s : proc.getSources()) sources.add(sourceJson(s));
     const auto output = proc.getOutputCfg(); const auto tail = proc.getTailSettings(); const auto layers = proc.getLayerModes();
     juce::Array<juce::var> paths;
-    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);juce::Array<juce::var> pts;for(auto& q:p.points)pts.add(array({q[0],q[1],q[2]}));auto po=obj({{"points",pts},{"enabled",p.enabled},{"closed",p.closed},{"smooth",p.smooth},{"orient",p.orient},{"laps",p.laps}});if(p.lookAt){po.getDynamicObject()->setProperty("lookAt",true);if(p.lookPoint)po.getDynamicObject()->setProperty("lookPos",array({p.lookPos[0],p.lookPos[1],p.lookPos[2]}));else if(p.lookTarget>=0)po.getDynamicObject()->setProperty("lookTarget",p.lookTarget);}if(p.orientOffset!=0.0)po.getDynamicObject()->setProperty("orientOffset",p.orientOffset);if(p.group>=0)po.getDynamicObject()->setProperty("group",p.group);if(p.start!=0.0)po.getDynamicObject()->setProperty("start",p.start);if(p.end!=100.0)po.getDynamicObject()->setProperty("end",p.end);bool anyTime=false;for(const auto& t:p.times)if(t.has_value()){anyTime=true;break;}if(anyTime&&p.times.size()==p.points.size()){juce::Array<juce::var> ts;for(const auto& t:p.times)ts.add(t.has_value()?juce::var(*t):juce::var());po.getDynamicObject()->setProperty("times",ts);}bool anyEase=false;for(auto e:p.easings)if(e!=verbp::PathEasing::Linear){anyEase=true;break;}if(anyEase&&p.easings.size()==p.points.size()){juce::Array<juce::var> es;for(auto e:p.easings){const char* en="linear";if(e==verbp::PathEasing::EaseIn)en="easeIn";else if(e==verbp::PathEasing::EaseOut)en="easeOut";else if(e==verbp::PathEasing::EaseInOut)en="easeInOut";es.add(juce::String(en));}po.getDynamicObject()->setProperty("easings",es);}if(!p.azKeys.empty()){juce::Array<juce::var> aks;for(const auto& k:p.azKeys){const char* en="linear";if(k.easing==verbp::AzimuthEasing::EaseIn)en="easeIn";else if(k.easing==verbp::AzimuthEasing::EaseOut)en="easeOut";else if(k.easing==verbp::AzimuthEasing::EaseInOut)en="easeInOut";else if(k.easing==verbp::AzimuthEasing::Hold)en="hold";aks.add(obj({{"t",k.t},{"az",k.azDeg},{"easing",juce::String(en)}}));}po.getDynamicObject()->setProperty("azKeys",aks);}if(!p.lfo.isDefault()){po.getDynamicObject()->setProperty("lfo",obj({{"enabled",p.lfo.enabled},{"shape",juce::String(verbp::lfoShapeName(p.lfo.shape))},{"rateHz",p.lfo.rateHz},{"depth",p.lfo.depth},{"phaseDeg",p.lfo.phaseDeg},{"seed",(int)p.lfo.seed}}));}paths.add(po);}
+    for(int o=0;o<=verbp::kMaxSources;++o){auto p=proc.getMovementPath(o);juce::Array<juce::var> pts;for(auto& q:p.points)pts.add(array({q[0],q[1],q[2]}));auto po=obj({{"points",pts},{"enabled",p.enabled},{"closed",p.closed},{"smooth",p.smooth},{"orient",p.orient},{"laps",p.laps}});if(p.endless)po.getDynamicObject()->setProperty("endless",true);if(p.endless||p.endlessPeriodS!=verbp::kDefaultEndlessPeriodS)po.getDynamicObject()->setProperty("endlessPeriodS",p.endlessPeriodS);if(p.lookAt){po.getDynamicObject()->setProperty("lookAt",true);if(p.lookPoint)po.getDynamicObject()->setProperty("lookPos",array({p.lookPos[0],p.lookPos[1],p.lookPos[2]}));else if(p.lookTarget>=0)po.getDynamicObject()->setProperty("lookTarget",p.lookTarget);}if(p.orientOffset!=0.0)po.getDynamicObject()->setProperty("orientOffset",p.orientOffset);if(p.group>=0)po.getDynamicObject()->setProperty("group",p.group);if(p.start!=0.0)po.getDynamicObject()->setProperty("start",p.start);if(p.end!=100.0)po.getDynamicObject()->setProperty("end",p.end);bool anyTime=false;for(const auto& t:p.times)if(t.has_value()){anyTime=true;break;}if(anyTime&&p.times.size()==p.points.size()){juce::Array<juce::var> ts;for(const auto& t:p.times)ts.add(t.has_value()?juce::var(*t):juce::var());po.getDynamicObject()->setProperty("times",ts);}bool anyEase=false;for(auto e:p.easings)if(e!=verbp::PathEasing::Linear){anyEase=true;break;}if(anyEase&&p.easings.size()==p.points.size()){juce::Array<juce::var> es;for(auto e:p.easings){const char* en="linear";if(e==verbp::PathEasing::EaseIn)en="easeIn";else if(e==verbp::PathEasing::EaseOut)en="easeOut";else if(e==verbp::PathEasing::EaseInOut)en="easeInOut";es.add(juce::String(en));}po.getDynamicObject()->setProperty("easings",es);}if(!p.azKeys.empty()){juce::Array<juce::var> aks;for(const auto& k:p.azKeys){const char* en="linear";if(k.easing==verbp::AzimuthEasing::EaseIn)en="easeIn";else if(k.easing==verbp::AzimuthEasing::EaseOut)en="easeOut";else if(k.easing==verbp::AzimuthEasing::EaseInOut)en="easeInOut";else if(k.easing==verbp::AzimuthEasing::Hold)en="hold";aks.add(obj({{"t",k.t},{"az",k.azDeg},{"easing",juce::String(en)}}));}po.getDynamicObject()->setProperty("azKeys",aks);}if(!p.lfo.isDefault()){po.getDynamicObject()->setProperty("lfo",obj({{"enabled",p.lfo.enabled},{"shape",juce::String(verbp::lfoShapeName(p.lfo.shape))},{"rateHz",p.lfo.rateHz},{"depth",p.lfo.depth},{"phaseDeg",p.lfo.phaseDeg},{"seed",(int)p.lfo.seed}}));}if(!p.wander.isDefault()){po.getDynamicObject()->setProperty("wander",obj({{"enabled",p.wander.enabled},{"ampHorizM",p.wander.ampHorizM},{"ampVertM",p.wander.ampVertM},{"rateHz",p.wander.rateHz},{"smoothness",p.wander.smoothness},{"pinEnds",p.wander.pinEnds},{"horizOnly",p.wander.horizOnly},{"seed",(int)p.wander.seed}}));}if(p.follow.active()){po.getDynamicObject()->setProperty("follow",obj({{"target",p.follow.target},{"offset",array({p.follow.offset[0],p.follow.offset[1],p.follow.offset[2]})},{"followWander",p.follow.followWander},{"frame",juce::String("path")}}));}paths.add(po);}
     auto doc = obj({{"paths",paths},{"sceneName", proc.getSceneName()}, {"scene", sceneJson(scene, proc.getAutomationRange(), home)}, {"sources", sources}, {"output", obj({{"layout", output.layout}, {"radiusM", output.radius}, {"micPattern", output.micPattern},
           {"ambisonicsNormalization", output.ambisonicsNormalization}, {"ambisonicsLevelDb", output.ambisonicsLevelDb}})},
         {"tail", obj({{"baseRays", tail.rays}, {"adaptive", tail.adaptive}})}, {"editorFlags", obj({{"navLocked", proc.navigationLocked()}, {"outlinerVisible", proc.outlinerVisible()}, {"mixerCompact", proc.mixerCompactEnabled()}, {"inputMeters", proc.inputMetersEnabled()}, {"keepRouting", proc.keepRoutingEnabled()}, {"keepProcessing", proc.keepProcessingEnabled()},
         {"layerModes", obj({{"walls", layers[0]}, {"floors", layers[1]}, {"ceilings", layers[2]}, {"plates", layers[3]}})}})}});
+    if (proc.motionTailEnabled()) doc.getDynamicObject()->setProperty("motionTail", true);
     const auto modRoutes = proc.getModulationRoutes();
     if (!modRoutes.empty()) {
         juce::Array<juce::var> mArr;
@@ -113,9 +114,32 @@ juce::var EditorBridge::document() const {
                 rObj.getDynamicObject()->setProperty("hostOut", r.hostOut);
             if (r.driver == verbp::ModDriver::DistanceToPoint)
                 rObj.getDynamicObject()->setProperty("point", array({r.pointX, r.pointY, r.pointZ}));
+            if (verbp::modDriverUsesZone(r.driver) && r.zoneId > 0)
+                rObj.getDynamicObject()->setProperty("zoneId", r.zoneId);
+            if (r.midi.enabled()) {  // V04e: omitted when the route sends no MIDI (old documents unchanged)
+                const auto& mo = r.midi;
+                rObj.getDynamicObject()->setProperty("midi", obj({
+                    {"mode", juce::String(verbp::modMidiModeName(mo.mode))}, {"channel", mo.channel}, {"number", mo.number},
+                    {"velocity", mo.velocity}, {"velocityFromValue", mo.velocityFromValue}, {"threshold", mo.threshold},
+                    {"hysteresis", mo.hysteresis}, {"lengthMs", mo.lengthMs}, {"ccLo", mo.ccLo}, {"ccHi", mo.ccHi}, {"program", mo.program}}));
+            }
             mArr.add(rObj);
         }
         doc.getDynamicObject()->setProperty("modulation", obj({{"routes", mArr}}));
+    }
+    // V04c: trigger zones, omitted when there are none (old documents unchanged).
+    const auto zones = proc.getTriggerZones();
+    if (!zones.empty()) {
+        juce::Array<juce::var> zArr;
+        for (const auto& z : zones) {
+            juce::Array<juce::var> pts;
+            for (const auto& q : z.points) pts.add(array({q.first, q.second}));
+            auto zo = obj({{"id", z.id}, {"name", juce::String::fromUTF8(z.name.c_str())}, {"kind", z.polygon ? "polygon" : "box"}, {"points", pts},
+                           {"zMin", z.zMin}, {"zMax", z.zMax}, {"edge", z.edge}, {"hysteresis", z.hysteresis}, {"enabled", z.enabled}, {"visible", z.visible}});
+            if (!z.colour.empty()) zo.getDynamicObject()->setProperty("colour", juce::String(z.colour));
+            zArr.add(zo);
+        }
+        doc.getDynamicObject()->setProperty("zones", zArr);
     }
     return doc;
 }
@@ -125,11 +149,17 @@ juce::var EditorBridge::snapshotAttempt(int retries) {
     const auto revision = proc.getRevision(), sceneSerial = proc.getSceneSerial(), loadSerial = proc.getLoadSerial();
     const int loadState = proc.getLoadState();
     auto caps = juce::JSON::parse(capabilityJson); caps.getDynamicObject()->setProperty("pluginVersion", VERB_WEB_PLUGIN_VERSION);
-    auto params = parameters.snapshot(tailCurrent); params.getDynamicObject()->setProperty("descriptors", parameters.descriptors());
+    prop(caps, "features").getDynamicObject()->setProperty("tail.motion", obj({{"available", true}, {"status", "available"}}));
+    const auto motion = proc.webMotionTailState();
+    const bool snapshotTailCurrent = motion == verb::Engine::MotionTailState::Off
+        ? tailCurrent : motion == verb::Engine::MotionTailState::Ready;
+    auto params = parameters.snapshot(snapshotTailCurrent); params.getDynamicObject()->setProperty("descriptors", parameters.descriptors());
     auto prefs = preferences.clone(); const auto view = proc.getEditorSession().viewState(); if (view.isObject()) prefs.getDynamicObject()->setProperty("sessionViewState", view);
     auto payload = obj({{"revision", decimal(revision)}, {"sceneSerial", decimal(sceneSerial)}, {"loadSerial", decimal(loadSerial)}, {"capabilities", caps}, {"limits", juce::JSON::parse(limitJson)},
-        {"parameters", params}, {"document", document()}, {"host", host()}, {"load", obj({{"state", loadState}, {"status", proc.getStatus()}, {"tailCurrent", tailCurrent}})}, {"preferences", prefs},
+        {"parameters", params}, {"document", document()}, {"host", host()}, {"load", obj({{"state", loadState}, {"status", proc.getStatus()}, {"tailCurrent", snapshotTailCurrent}})}, {"preferences", prefs},
         {"jobs", obj({{"export", obj({{"state", proc.getExportState()}, {"message", proc.getExportMessage()}})}, {"rt60", obj({{"state", proc.getTargetRT60State()}})}, {"analysis", analysisRunning ? obj({{"jobId", analysisId}, {"state", "running"}, {"progress", analysisProgress.load()}}) : juce::var()}})}});
+    if (motion != verb::Engine::MotionTailState::Off)
+        prop(payload, "load").getDynamicObject()->setProperty("motionTail", motion == verb::Engine::MotionTailState::Ready ? "ready" : "preparing");
     if (retries > 0 && (revision != proc.getRevision() || sceneSerial != proc.getSceneSerial() || loadSerial != proc.getLoadSerial() || loadState != proc.getLoadState())) return snapshotAttempt(retries - 1);
     // Track exactly the serials sent. Even a continuously changing loader will force another snapshot.
     sentRevision = revision; sentScene = sceneSerial; sentLoad = loadSerial; lastState = loadState; sentHost = hostSignature();
@@ -421,12 +451,45 @@ void EditorBridge::tick(bool isVisible, double now) {
     // A stopped/suspended host cannot consume a ready convolver swap or send
     // requested decay to the engine. That is waiting for audio, not computing.
     const int loadState=proc.getLoadState();
-    const bool pending=loadState==1 || (loadState==2 && (!proc.isWebSceneCurrent() || (audioActive&&!tailCurrent)));
+    const auto motion = proc.webMotionTailState();
+    const bool pending = motion == verb::Engine::MotionTailState::Off
+        && (loadState==1 || (loadState==2 && (!proc.isWebSceneCurrent() || (audioActive&&!tailCurrent))));
     if (!pending) rebuildPendingSince = -1;
     else if (rebuildPendingSince < 0) rebuildPendingSince = now;
     if (emit && (resumed || previousTailCurrent != tailCurrent)) emit("verb.parameters", parameters.snapshot(tailCurrent));
     if (wants("status")) {
         auto statusPayload = obj({{"event", "status.load"}, {"state", proc.getLoadState()}, {"status", proc.getStatus()}, {"sceneSerial", decimal(proc.getSceneSerial())}, {"loadSerial", decimal(proc.getLoadSerial())}, {"tailCurrent", tailCurrent}, {"rebuilding", pending && now - rebuildPendingSince >= 150}, {"pathBakePercent",proc.pathBakePercent()}, {"pathBake",proc.pathBakeStatus()}, {"cpu", cachedCpu}});
+        if (motion != verb::Engine::MotionTailState::Off)
+            statusPayload.getDynamicObject()->setProperty("motionTail", motion == verb::Engine::MotionTailState::Ready ? "ready" : "preparing");
+        if (proc.webAnyEndlessPathActive()) {
+            const auto tr = proc.webTransportTelemetry();
+            const bool trPlaying = audioActive && tr.playing;
+            statusPayload.getDynamicObject()->setProperty("transport", obj({
+                {"playing", trPlaying},
+                {"samplePos", (int64_t)(trPlaying ? tr.samplePos : 0)},
+                {"timeSec", trPlaying && std::isfinite(tr.timeSec) ? tr.timeSec : 0.0},
+                {"sampleRate", tr.sampleRate > 0.0 && std::isfinite(tr.sampleRate) ? tr.sampleRate : 48000.0}
+            }));
+        }
+        if (audioActive && proc.webTransportTelemetry().playing) {
+            const int sourceCount = static_cast<int>(proc.getSources().size());
+            uint64_t rigMembers = 0;
+            for (int source = 0; source < sourceCount; ++source) {
+                const auto path = proc.getMovementPath(source);
+                const int target = path.follow.target;
+                if (path.enabled && target >= 0 && target < sourceCount && target != source)
+                    rigMembers |= (uint64_t{1} << source) | (uint64_t{1} << target);
+            }
+            if (rigMembers != 0) {
+                juce::Array<juce::var> poses;
+                for (int source = 0; source < sourceCount; ++source) {
+                    if ((rigMembers & (uint64_t{1} << source)) == 0) continue;
+                    const auto xyz = proc.livePosition(source);
+                    poses.add(obj({{"source", source}, {"xyz", array({xyz[0], xyz[1], xyz[2]})}}));
+                }
+                statusPayload.getDynamicObject()->setProperty("rigPoses", poses);
+            }
+        }
         const int modCount = proc.webConfiguredModRouteCount();
         if (modCount > 0) {
             std::array<VerbProcessor::ModLiveSample, verbp::kMaxModRoutes> modSamples{};
@@ -437,13 +500,34 @@ void EditorBridge::tick(bool isVisible, double now) {
             for (int i = 0; i < nShow; ++i) {
                 const auto& s = modSamples[(size_t)i];
                 const bool act = fresh && s.active;
-                routeArr.add(obj({
+                auto ro = obj({
                     {"raw", act && std::isfinite(s.raw) ? (double)s.raw : 0.0},
                     {"value", act && std::isfinite(s.value) ? (double)s.value : 0.0},
                     {"active", act}
-                }));
+                });
+                // V04e: MIDI out indicator: send counter + last message [status, data1, data2] (only once something was sent).
+                const uint32_t sent = proc.webMidiSendCount(i), last = proc.webMidiLastMessage(i);
+                if (sent > 0 && (last >> 24) != 0)
+                    ro.getDynamicObject()->setProperty("midi", obj({{"count", (int64_t)sent},
+                        {"last", array({(int)(last & 0xff), (int)((last >> 8) & 0xff), (int)((last >> 16) & 0xff)})}}));
+                routeArr.add(ro);
             }
             statusPayload.getDynamicObject()->setProperty("modulation", obj({{"routes", routeArr}}));
+        }
+        // V04c: live zone occupancy (read-only telemetry; no parameter). Objects: 0..31 sources, 32 listener.
+        {
+            std::array<uint64_t, verbp::kMaxTriggerZones> masks{};
+            int zCount = 0;
+            if (audioActive && proc.webZoneTelemetry(masks, zCount) && zCount > 0) {
+                const auto zl = proc.getTriggerZones();
+                juce::Array<juce::var> occ;
+                for (int i = 0; i < zCount && i < (int)zl.size(); ++i) {
+                    juce::Array<juce::var> inside;
+                    for (int o = 0; o <= verbp::kMaxSources; ++o) if (masks[(size_t)i] & ((uint64_t)1 << o)) inside.add(o);
+                    occ.add(obj({{"id", zl[(size_t)i].id}, {"objects", inside}}));
+                }
+                statusPayload.getDynamicObject()->setProperty("zones", obj({{"occupancy", occ}}));
+            }
         }
         emitEvent(statusPayload);
     }

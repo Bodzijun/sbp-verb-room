@@ -13,14 +13,14 @@ const require = createRequire(import.meta.url);
 const { chromium } = require('C:/Users/User/AppData/Local/ms-playwright-go/1.57.0/package');
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const SHOTS_DIR = path.join(REPO_ROOT, 'out', 'G10', 'shots');
+const SHOTS_DIR = process.env.VERB_BROWSER_SHOTS_DIR || path.join(REPO_ROOT, 'out', 'G10', 'shots');
 
 test('G10 unit: about-data sponsors/links and mock app.openExternal allow-list', { timeout: 15000 }, async () => {
   assert.deepEqual(SPONSORS, ['smandrap', 'Teniente Powell']);
   assert.equal(PLUGIN_INFO.name, 'Verb Room');
   assert.equal(PLUGIN_INFO.tagline, 'Physically based room reverb for moving sources and listener');
   assert.match(PLUGIN_INFO.license, /AGPLv3.*Built with JUCE/);
-  assert.equal(WHATS_NEW_VERSION, '0.3.1');
+  assert.equal(WHATS_NEW_VERSION, '0.4.0');
   assert.ok(WHATS_NEW.length >= 6);
   assert.ok(TIPS.length >= 5);
   assert.equal(SUPPORT.kofi.url, 'https://ko-fi.com/s/405ebacfcc');
@@ -209,10 +209,10 @@ test('G10 browser E2E: About modal, Main/Edit headers, focus trap, dynamic versi
     assert.match(aboutAudit.fullText, /Verb Room/);
     assert.match(aboutAudit.fullText, /Physically based room reverb for moving sources and listener/);
     assert.match(aboutAudit.fullText, /AGPLv3 · Built with JUCE/);
-    assert.match(aboutAudit.fullText, /What's new in 0\.3\.1/);
-    assert.match(aboutAudit.fullText, /Baked late-tail/);
-    assert.match(aboutAudit.fullText, /64 channels/);
-    assert.match(aboutAudit.fullText, /Positioned dry/);
+    assert.match(aboutAudit.fullText, /What's new in 0\.4\.0/);
+    assert.match(aboutAudit.fullText, /Motion updates the room response/);
+    assert.match(aboutAudit.fullText, /trigger zones to drive Mod Out/);
+    assert.match(aboutAudit.fullText, /render stems with Source Solo/);
     assert.match(aboutAudit.fullText, /Creative mode/);
     assert.match(aboutAudit.fullText, /Bake path/);
     assert.match(aboutAudit.fullText, /Record automation/);

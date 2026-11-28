@@ -61,7 +61,8 @@ juce_add_plugin(VerbPlugin
     PRODUCT_NAME "Verb Room"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
-    NEEDS_MIDI_OUTPUT FALSE
+    NEEDS_MIDI_OUTPUT TRUE   # V04e: modulation routes may send notes/CC (event output bus); still an audio effect
+    IS_MIDI_EFFECT FALSE
     COPY_PLUGIN_AFTER_BUILD FALSE
     ${VERB_WEBVIEW_PLUGIN_ARGS}
     VST3_CATEGORIES Fx Reverb Spatial)
@@ -95,6 +96,12 @@ target_link_libraries(VerbPluginTest PRIVATE
     verbcore
     juce::juce_audio_utils
     juce::juce_recommended_config_flags)
+
+# The full processor harness holds several large VerbProcessor instances on the same test thread.
+# Its combined fixture calls exceed the default 1 MiB stack on Windows.
+if(MSVC)
+  target_link_options(VerbPluginTest PRIVATE /STACK:4194304)
+endif()
 
 add_test(NAME portable_presets COMMAND VerbPluginTest)
 add_test(NAME spatial_editor COMMAND VerbPluginTest)

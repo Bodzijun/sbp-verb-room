@@ -1024,6 +1024,15 @@
         "op"
       ]
     },
+    "TailSetMotion": {
+      "type": "object",
+      "properties": {
+        "op": { "const": "tail.setMotion" },
+        "enabled": { "type": "boolean" }
+      },
+      "additionalProperties": false,
+      "required": ["op", "enabled"]
+    },
     "TailSetQuality": {
       "type": "object",
       "properties": {
@@ -1451,6 +1460,9 @@
           "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/TailSetQuality"
         },
         {
+          "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/TailSetMotion"
+        },
+        {
           "$ref": "https://verbroom.invalid/web-ui/schema/command.schema.json#/$defs/HistoryUndo"
         },
         {
@@ -1547,6 +1559,18 @@
           "$ref": "#/$defs/PathSetLfo"
         },
         {
+          "$ref": "#/$defs/PathSetWander"
+        },
+        {
+          "$ref": "#/$defs/PathLink"
+        },
+        {
+          "$ref": "#/$defs/PathSetFollow"
+        },
+        {
+          "$ref": "#/$defs/PathUnlink"
+        },
+        {
           "$ref": "#/$defs/ModulationAddRoute"
         },
         {
@@ -1557,6 +1581,18 @@
         },
         {
           "$ref": "#/$defs/ModulationSetRoutes"
+        },
+        {
+          "$ref": "#/$defs/ZoneCreate"
+        },
+        {
+          "$ref": "#/$defs/ZoneSet"
+        },
+        {
+          "$ref": "#/$defs/ZoneDelete"
+        },
+        {
+          "$ref": "#/$defs/ZoneMove"
         },
         {
           "$ref": "#/$defs/PathBake"
@@ -1812,6 +1848,14 @@
           "minimum": 1,
           "maximum": 64
         },
+        "endless": {
+          "type": "boolean"
+        },
+        "endlessPeriodS": {
+          "type": "number",
+          "minimum": 0.25,
+          "maximum": 3600
+        },
         "group": {
           "type": "integer",
           "minimum": -1,
@@ -1866,6 +1910,9 @@
         },
         "lfo": {
           "$ref": "#/$defs/PathLfoInput"
+        },
+        "wander": {
+          "$ref": "#/$defs/PathWanderInput"
         }
       },
       "required": [
@@ -2037,6 +2084,14 @@
           "minimum": 1,
           "maximum": 64
         },
+        "endless": {
+          "type": "boolean"
+        },
+        "endlessPeriodS": {
+          "type": "number",
+          "minimum": 0.25,
+          "maximum": 3600
+        },
         "group": {
           "type": "integer",
           "minimum": -1,
@@ -2054,6 +2109,9 @@
         },
         "lfo": {
           "$ref": "#/$defs/PathLfoInput"
+        },
+        "wander": {
+          "$ref": "#/$defs/PathWanderInput"
         }
       },
       "required": [
@@ -2502,6 +2560,76 @@
       "required": ["op", "object", "lfo"],
       "additionalProperties": false
     },
+    "PathWanderInput": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ampHorizM": { "type": "number", "minimum": 0, "maximum": 20 },
+        "ampVertM": { "type": "number", "minimum": 0, "maximum": 10 },
+        "rateHz": { "type": "number", "minimum": 0.05, "maximum": 8 },
+        "smoothness": { "type": "number", "minimum": 0, "maximum": 1 },
+        "pinEnds": { "type": "boolean" },
+        "horizOnly": { "type": "boolean" },
+        "seed": { "type": "integer", "minimum": 1, "maximum": 999999 }
+      },
+      "additionalProperties": false
+    },
+    "PathSetWander": {
+      "type": "object",
+      "properties": {
+        "op": { "const": "path.setWander" },
+        "object": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "wander": { "$ref": "#/$defs/PathWanderInput" }
+      },
+      "required": ["op", "object", "wander"],
+      "additionalProperties": false
+    },
+    "FollowOffsetInput": {
+      "type": "array",
+      "description": "V04d: offset in the path frame [forward, left, up] in metres (forward = horizontal tangent of the target's drawn path, left = horizontal perpendicular, up = world Z).",
+      "items": { "type": "number", "minimum": -50, "maximum": 50 },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "PathLink": {
+      "type": "object",
+      "description": "V04d: link one or several sources to another source's path (rig). One undo step.",
+      "properties": {
+        "op": { "const": "path.link" },
+        "object": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "objects": { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 31 }, "minItems": 1, "maxItems": 32 },
+        "target": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "offset": { "$ref": "#/$defs/FollowOffsetInput" },
+        "followWander": { "type": "boolean" }
+      },
+      "required": ["op", "target"],
+      "oneOf": [ { "required": ["object"] }, { "required": ["objects"] } ],
+      "additionalProperties": false
+    },
+    "PathSetFollow": {
+      "type": "object",
+      "description": "V04d: edit a follower's link (offset gesture = one undo step inside a transaction; target change; Follow wander).",
+      "properties": {
+        "op": { "const": "path.setFollow" },
+        "object": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "target": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "offset": { "$ref": "#/$defs/FollowOffsetInput" },
+        "followWander": { "type": "boolean" }
+      },
+      "required": ["op", "object"],
+      "minProperties": 3,
+      "additionalProperties": false
+    },
+    "PathUnlink": {
+      "type": "object",
+      "description": "V04d: convert a follower into an own path (the current offset curve sampled into 64 points).",
+      "properties": {
+        "op": { "const": "path.unlink" },
+        "object": { "type": "integer", "minimum": 0, "maximum": 31 }
+      },
+      "required": ["op", "object"],
+      "additionalProperties": false
+    },
     "ModCurveNodeInput": {
       "type": "object",
       "properties": {
@@ -2556,9 +2684,13 @@
             "speed",
             "radialSpeed",
             "pathPosition",
-            "distanceToNearestWall"
+            "distanceToNearestWall",
+            "inZone",
+            "zoneIndex",
+            "distanceToZone"
           ]
         },
+        "zoneId": {"type": "integer", "minimum": 0, "maximum": 9999, "description": "V04c: zone id for the inZone / distanceToZone drivers (required, >= 1); ignored (0) for other drivers."},
         "point": {
           "type": "array",
           "items": { "type": "number", "minimum": -200, "maximum": 200 },
@@ -2581,6 +2713,25 @@
           ]
         },
         "hostOut": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "midi": {
+          "type": "object",
+          "description": "V04e: optional MIDI out; mode 'off' (or omitting the key) removes it. Missing fields take the defaults channel 1, number 60, velocity 100, threshold 0.5, hysteresis 0.05, lengthMs 100, ccLo 0, ccHi 127.",
+          "properties": {
+            "mode": { "enum": ["off", "gate", "trigger", "cc", "index"] },
+            "channel": { "type": "integer", "minimum": 1, "maximum": 16 },
+            "number": { "type": "integer", "minimum": 0, "maximum": 127 },
+            "velocity": { "type": "integer", "minimum": 1, "maximum": 127 },
+            "velocityFromValue": { "type": "boolean" },
+            "threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+            "hysteresis": { "type": "number", "minimum": 0, "maximum": 0.5 },
+            "lengthMs": { "type": "number", "minimum": 1, "maximum": 5000 },
+            "ccLo": { "type": "integer", "minimum": 0, "maximum": 127 },
+            "ccHi": { "type": "integer", "minimum": 0, "maximum": 127 },
+            "program": { "type": "boolean" }
+          },
+          "required": ["mode"],
+          "additionalProperties": false
+        },
         "attackMs": { "type": "number", "minimum": 0, "maximum": 2000 },
         "releaseMs": { "type": "number", "minimum": 0, "maximum": 5000 }
       },
@@ -2613,6 +2764,218 @@
         "index": { "type": "integer", "minimum": 0, "maximum": 63 }
       },
       "required": ["op", "index"],
+      "additionalProperties": false
+    },
+    "ZoneCreate": {
+      "type": "object",
+      "description": "V04c: add a trigger zone (max 16). One undo step 'Add zone'.",
+      "properties": {
+        "op": {
+          "const": "zone.create"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "box",
+            "polygon"
+          ]
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "minimum": -1000,
+              "maximum": 1000
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "minItems": 2,
+          "maxItems": 32,
+          "description": "box: two opposite plan corners; polygon: 3..32 vertices of a simple outline (metres, clamped to the room)."
+        },
+        "zMin": {
+          "type": "number",
+          "minimum": -1000,
+          "maximum": 1000
+        },
+        "zMax": {
+          "type": "number",
+          "minimum": -1000,
+          "maximum": 1000
+        },
+        "edge": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Soft edge width (m); 0 = hard edge."
+        },
+        "hysteresis": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Exit hysteresis (m), default 0.05."
+        },
+        "colour": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "op",
+        "kind",
+        "points"
+      ],
+      "additionalProperties": false
+    },
+    "ZoneSet": {
+      "type": "object",
+      "description": "V04c: change fields of a zone (partial). Coalesces per zone; wrap drags in a transaction.",
+      "properties": {
+        "op": {
+          "const": "zone.set"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "box",
+            "polygon"
+          ]
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "minimum": -1000,
+              "maximum": 1000
+            },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "minItems": 2,
+          "maxItems": 32,
+          "description": "box: two opposite plan corners; polygon: 3..32 vertices of a simple outline (metres, clamped to the room)."
+        },
+        "zMin": {
+          "type": "number",
+          "minimum": -1000,
+          "maximum": 1000
+        },
+        "zMax": {
+          "type": "number",
+          "minimum": -1000,
+          "maximum": 1000
+        },
+        "edge": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Soft edge width (m); 0 = hard edge."
+        },
+        "hysteresis": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Exit hysteresis (m), default 0.05."
+        },
+        "colour": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^#[0-9a-fA-F]{6}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "op",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "ZoneDelete": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "const": "zone.delete"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        }
+      },
+      "required": [
+        "op",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "ZoneMove": {
+      "type": "object",
+      "description": "V04c: reorder (list order = Zone index priority).",
+      "properties": {
+        "op": {
+          "const": "zone.move"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        }
+      },
+      "required": [
+        "op",
+        "id",
+        "index"
+      ],
       "additionalProperties": false
     },
     "ModulationSetRoutes": {

@@ -5,6 +5,10 @@ export function createStore(bridge) {
   let state = null, serial = 0, queue = Promise.resolve(), ready = false, epoch = 0, queued = 0;
   let telemetry = {}, error = null, cornerJoinResult = null;
   const view = { page: 'main', tab: 'decay', projection: 'plan', selection: [], energy: false, rays: false, tool: 'move', snap: true, autoLink: true, bands: [true, true, true, true, true, true, true] };
+  const persistedViewState = v => {
+    const { pathOldGhost, pathShapePreview, pathShapeLast, pathPointsOpen, ...rest } = clone(v);
+    return rest;
+  };
   const notify = reason => listeners.forEach(fn => fn({ state, telemetry, error, ready, view, reason }));
   let resyncPending = false;
   const requestSnapshot = () => {
@@ -18,8 +22,13 @@ export function createStore(bridge) {
     if (message.kind === 'snapshot') {
       const first = state === null;
       if (state?.loadSerial !== p.loadSerial) cornerJoinResult = null;
+      if ((state?.loadSerial !== p.loadSerial || state?.document.motionTail !== p.document.motionTail)
+          && telemetry['status.load']?.motionTail) {
+        const { motionTail, ...load } = telemetry['status.load'];
+        telemetry = { ...telemetry, 'status.load': load };
+      }
       state = freeze(clone(p)); ready = true;
-      if (first && p.preferences?.sessionViewState) Object.assign(view, clone(p.preferences.sessionViewState));
+      if (first && p.preferences?.sessionViewState) Object.assign(view, persistedViewState(p.preferences.sessionViewState));
       notify('snapshot');
     } else if (message.kind === 'patch') {
       if (!state || p.fromRevision !== state.revision) { resync(); return; }
@@ -135,11 +144,18 @@ export function createStore(bridge) {
       if(patch.energy===true&&!view.energy&&view.projection!=='plan'){patch.energyPreviousView=view.projection;patch.projection='plan';}
       else if(patch.energy===false&&view.energy){if(view.energyPreviousView&&view.projection==='plan')patch.projection=view.energyPreviousView;patch.energyPreviousView=null;}
       else if('projection' in patch&&patch.projection!==view.projection)patch.energyPreviousView=null;
+      if ('selection' in patch && view.pathOldGhost && !('pathOldGhost' in patch)) {
+        const ghostObj = view.pathOldGhost.object;
+        const stillSelected = Array.isArray(patch.selection) && patch.selection.some(r =>
+          (ghostObj === 32 && r.kind === 'listener') || (ghostObj !== 32 && r.kind === 'source' && r.index === ghostObj)
+        );
+        if (!stillSelected) patch.pathOldGhost = null;
+      }
       Object.assign(view, patch);
       // Sticky ray source: clearing the selection (orbit, click on empty space, selecting the listener) keeps the rays of the last selected source.
       const selectedSource=view.selection.find(s=>s.kind==='source'), raySourceChanged=!!selectedSource&&selectedSource.index!==store.raySource;
       if(selectedSource)store.raySource=selectedSource.index;
-      notify('view'); if (bridge.mode === 'juce' && ready && (raySourceChanged || 'rayOrder' in patch || patch.rays)) store.command({op:'reflections.query',sourceIndex:Math.min(store.raySource ?? 0,Math.max(0,(state?.document?.sources?.length ?? 1)-1)),maxOrder:Math.min(1,view.rayOrder ?? 1),maxPaths:128}); if (persist && ready) return store.command({ op: 'session.setViewState', viewState: clone(view) }); },
+      notify('view'); if (bridge.mode === 'juce' && ready && (raySourceChanged || 'rayOrder' in patch || patch.rays)) store.command({op:'reflections.query',sourceIndex:Math.min(store.raySource ?? 0,Math.max(0,(state?.document?.sources?.length ?? 1)-1)),maxOrder:Math.min(1,view.rayOrder ?? 1),maxPaths:128}); if (persist && ready) return store.command({ op: 'session.setViewState', viewState: persistedViewState(view) }); },
     async flags(patch) {
       if (bridge.mode === 'mock') return store.command({ op: 'preferences.set', patch: { editorFlags: patch } });
       const { layerModes, ...flags } = patch;
@@ -150,8 +166,8 @@ export function createStore(bridge) {
     },
     recover(error) {
       for(const [id,tx] of transactions)if(tx.open)store.command({op:'transaction.cancel'},id);
-      view.selection=[];notify('transactionfailed');
-      store.command({op:'session.setViewState',viewState:clone(view)});
+      view.selection=[];view.pathOldGhost=null;notify('transactionfailed');
+      store.command({op:'session.setViewState',viewState:persistedViewState(view)});
     },
     clearError() { error = null; notify('dismiss'); },
     async fixture(name) { epoch++; ready = false; telemetry = {}; error = null; view.selection = []; view.camera = null; await bridge.selectFixture(name); await store.command({ op: 'telemetry.subscribe', topics: ['meters', 'tail', 'status', 'analysis'] }); },

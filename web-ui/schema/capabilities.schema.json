@@ -109,6 +109,9 @@
             "tail.diagnostics": {
               "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
             },
+            "tail.motion": {
+              "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
+            },
             "energy.map": {
               "$ref": "https://verbroom.invalid/web-ui/schema/capabilities.schema.json#/$defs/Feature"
             },

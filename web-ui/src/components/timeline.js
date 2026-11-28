@@ -235,7 +235,9 @@ export function timelinePanel(ctx) {
     const bar = element('div', { className: 'tl-bar', title: `${row.label}: ${fmt(row.start)} - ${fmt(row.end)} % (drag to shift the window)`, 'aria-label': `${row.label} window` });
     const hStart = element('div', { className: 'tl-h tl-h-start', role: 'slider', tabIndex: 0, 'aria-label': `${row.label} Start %`, 'aria-valuemin': 0, 'aria-valuemax': 100, 'data-handle': 'start' });
     const hEnd = element('div', { className: 'tl-h tl-h-end', role: 'slider', tabIndex: 0, 'aria-label': `${row.label} End %`, 'aria-valuemin': 0, 'aria-valuemax': 100, 'data-handle': 'end' });
-    const lapsLabel = row.closed && row.laps > 1 ? element('span', { className: 'tl-laps', text: `×${row.laps} laps` }) : null;
+    const lapsLabel = row.closed && row.endless
+      ? element('span', { className: 'tl-laps tl-endless', text: `∞ · ${Number(row.endlessPeriodS.toFixed(1))} s` })
+      : (row.closed && row.laps > 1 ? element('span', { className: 'tl-laps', text: `×${row.laps} laps` }) : null);
     const ph = element('div', { className: 'tl-ph', 'data-driver': String(row.driver) });
     const lfoCfg = store.state.document.paths?.[row.driver]?.lfo;
     const lfoDepthPct = lfoCfg?.enabled && lfoCfg.depth > 0 ? lfoCfg.depth * 100 : 0;

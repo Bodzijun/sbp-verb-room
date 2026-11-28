@@ -6,6 +6,7 @@
 #include "AutomationRange.h"
 #include "Modulation.h"
 #include "MovementPath.h"
+#include "PathShapes.h"
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -113,15 +114,19 @@ public:
 
     const juce::String getName() const override { return "Verb Room"; }
     void prepareToPlay(double sampleRate, int samplesPerBlock) override;
-    void releaseResources() override {}
+    void releaseResources() override { midiReleaseRequest.store(true, std::memory_order_release); }
     bool isBusesLayoutSupported(const BusesLayout&) const override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using juce::AudioProcessor::processBlock;
+    // V04e: host bypass (VST3 wrapper bypass parameter): audio as JUCE does it, plus note-offs for anything a route holds.
+    void processBlockBypassed(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    using juce::AudioProcessor::processBlockBypassed;
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
     void bakeDiagnosticEditorOpened(bool opened) noexcept; // editor lifetime, opt-in diagnostic
     bool acceptsMidi() const override { return false; }
-    bool producesMidi() const override { return false; }
+    // V04e: an audio effect that also produces MIDI (modulation routes -> notes/CC). It does not need MIDI input.
+    bool producesMidi() const override { return true; }
     // Hosts may query and cache this before the asynchronous room has loaded.
     // Report the maximum supported tail from the outset, including engine latency.
     // With "Keep processing during silence" ON the plugin reports an infinite tail (JUCE VST3 maps +inf to kInfiniteTail),
@@ -138,6 +143,9 @@ public:
     bool setMovementPath(int object, const verbp::MovementPath&);
     std::vector<verbp::ModulationRoute> getModulationRoutes() const;
     bool setModulationRoutes(const std::vector<verbp::ModulationRoute>& routes);
+    // V04c: trigger zones (scene document state; no APVTS parameter, no engine effect).
+    std::vector<verbp::TriggerZone> getTriggerZones() const;
+    bool setTriggerZones(const std::vector<verbp::TriggerZone>& zones);
     static juce::String pathParamId(int o) { return o==verbp::kListener ? "lpath" : "s"+juce::String(o+1)+"path"; }
     bool autoMakeupDb(float& value) const;
 
@@ -218,6 +226,9 @@ public:
     void setOutputCfg(const verbp::OutputCfg&);
     verbp::TailSettings getTailSettings() const;
     void setTailSettings(verbp::TailSettings);
+    bool motionTailEnabled() const noexcept { return (motionTailRequest.load() & 1) != 0; }
+    void setMotionTailEnabled(bool enabled);
+    verb::Engine::MotionTailState webMotionTailState() const;
     std::shared_ptr<const verb::TailDiagnostics> getTailDiagnostics() const;
     bool isTailCurrent() const;
     // Immutable web snapshots published by the scene worker; none acquires engineLock.
@@ -296,13 +307,41 @@ public:
     // Web meters accumulate between polls; native last-block metering is unchanged.
     void setWebMetersActive(bool on) { webMetersActive.store(on, std::memory_order_relaxed); }
     float liveAzimuth(int object) const noexcept { return object >= 0 && object <= verbp::kMaxSources ? liveAz[(size_t)object].load(std::memory_order_relaxed) : 0.f; }
+    // V04d: effective source pose (x, y, z in metres, before Size scaling) of the last rendered segment.
+    std::array<double, 3> livePosition(int source) const noexcept {
+        if (source < 0 || source >= verbp::kMaxSources) return {0.0, 0.0, 0.0};
+        return {livePos[(size_t)source][0].load(std::memory_order_relaxed), livePos[(size_t)source][1].load(std::memory_order_relaxed), livePos[(size_t)source][2].load(std::memory_order_relaxed)};
+    }
     struct ModLiveSample {
         float raw = 0.f;
         float value = 0.f;
         bool active = false;
     };
+    // V04e: last MIDI message sent by route i (status | d1 << 8 | d2 << 16 | 1 << 24 when valid) and the send counter.
+    uint32_t webMidiLastMessage(int route) const noexcept { return route >= 0 && route < verbp::kMaxModRoutes ? midiLiveMsg[(size_t)route].load(std::memory_order_relaxed) : 0u; }
+    uint32_t webMidiSendCount(int route) const noexcept { return route >= 0 && route < verbp::kMaxModRoutes ? midiLiveCount[(size_t)route].load(std::memory_order_relaxed) : 0u; }
+    uint64_t midiEventsTotal() const noexcept { return midiTotal.load(std::memory_order_relaxed); }
+    void requestMidiRelease() noexcept { midiReleaseRequest.store(true, std::memory_order_release); }
     int webConfiguredModRouteCount() const noexcept { return modConfiguredCount.load(std::memory_order_acquire); }
     bool webModTelemetry(ModLiveSample* out, int maxCount, int& outCount) const noexcept;
+    // V04c: live zone occupancy (bit o = object o inside, o = 0..31 sources, 32 listener) of the last processed block.
+    // Returns false when no block with the current zone list has been processed yet.
+    bool webZoneTelemetry(std::array<uint64_t, verbp::kMaxTriggerZones>& masks, int& count) const noexcept;
+    struct WebTransportTelemetry {
+        bool playing = false;
+        int64_t samplePos = 0;
+        double timeSec = 0.0;
+        double sampleRate = 48000.0;
+    };
+    WebTransportTelemetry webTransportTelemetry() const noexcept {
+        WebTransportTelemetry t;
+        t.playing = webTransPlaying.load(std::memory_order_relaxed);
+        t.samplePos = webTransSamplePos.load(std::memory_order_relaxed);
+        t.timeSec = webTransTimeSec.load(std::memory_order_relaxed);
+        t.sampleRate = webTransSr.load(std::memory_order_relaxed);
+        return t;
+    }
+    bool webAnyEndlessPathActive() const noexcept { return webAnyEndless.load(std::memory_order_relaxed); }
     static juce::String modOutParamId(int slotZeroBased) { return "mo" + juce::String(slotZeroBased + 1); }
     juce::AudioProcessorParameter* modOutParameter(int slotZeroBased) const noexcept {
         return (slotZeroBased >= 0 && slotZeroBased < verbp::kMaxModHostOuts) ? modOutParams[(size_t)slotZeroBased] : nullptr;
@@ -382,6 +421,8 @@ private:
     std::shared_ptr<const verb::Scene> webModeledScene;
     std::shared_ptr<const verb::TailDiagnostics> webTailDiagnostics;
     std::atomic<bool> webTailCurrent{false};
+    std::atomic<uint64_t> motionTailRequest{0}, webMotionReadyRequest{0};
+    uint64_t appliedMotionTailRequest = 0; // loader thread only
     std::atomic<int> webBakePercent{0};
     std::atomic<int> webBakeStart{-2};
     std::atomic<bool> webBakeCancel{false};
@@ -423,6 +464,7 @@ private:
     verbp::TailSettings tailSettings;
     verb::Engine::RecordedPassData savedRecordedPass;
     std::vector<verb::BakedTable> savedBakeTables; // P4: BakeCache tables parsed from the state being loaded (dispLock)
+    std::vector<verb::BakedTable> endlessStashedBakeTables; // V04a: baked tables stashed while Endless is active (dispLock)
     std::atomic<bool> bakeTooLargeToStore{false}; // P4: the last state save exceeded the bake persistence size cap
     std::atomic<int> state{0};
     std::atomic<bool> inputMetersOn{true};
@@ -466,6 +508,13 @@ private:
     mutable juce::CriticalSection modLock;
     std::vector<verbp::ModulationRoute> modRoutes;
     std::unique_ptr<verbp::ModRoutesMailbox> modMailbox;
+    std::vector<verbp::TriggerZone> triggerZones;                 // guarded by modLock
+    std::unique_ptr<verbp::TriggerZoneMailbox> zoneMailbox;
+    std::unique_ptr<verbp::TriggerZoneTracker> zoneTracker;       // audio thread only
+    std::atomic<uint64_t> zonePublishedGen{0};
+    std::array<std::atomic<uint64_t>, verbp::kMaxTriggerZones> zoneLiveMask{};
+    std::atomic<int> zoneLiveCount{0};
+    std::atomic<uint64_t> zoneLiveGen{0};
     juce::CriticalSection wallMailLock;
     std::unique_ptr<verbp::WallSnapshotMailbox> wallMailbox;
     std::unique_ptr<verbp::ModulationProcessor> modProc;
@@ -477,6 +526,21 @@ private:
     std::array<std::atomic<uint8_t>, verbp::kMaxModRoutes> modLiveActive{};
     std::atomic<int> modLiveCount{0};
     std::atomic<uint64_t> modLiveGen{0};
+    // V04e: MIDI out generator (audio thread only) + release request from other threads (state load, releaseResources).
+    std::unique_ptr<verbp::ModMidiGenerator<verbp::kMaxModRoutes>> midiGen;
+    std::atomic<bool> midiReleaseRequest{false};
+    bool midiPrevRunning = false;
+    std::array<std::atomic<uint32_t>, verbp::kMaxModRoutes> midiLiveMsg{};
+    std::array<std::atomic<uint32_t>, verbp::kMaxModRoutes> midiLiveCount{};
+    std::atomic<uint64_t> midiTotal{0};
+    void emitRouteMidi(const verbp::ModRouteSet& set, const float* raw, bool running, int periodStart, int len, double sampleRate, juce::MidiBuffer& midi) noexcept;
+    std::atomic<bool> webTransPlaying{false};
+    std::atomic<int64_t> webTransSamplePos{0};
+    std::atomic<double> webTransTimeSec{0.0};
+    std::atomic<double> webTransSr{48000.0};
+    std::atomic<bool> webAnyEndless{false};
+    std::array<std::array<std::atomic<double>, 3>, verbp::kMaxSources> livePos{};  // V04d
+    void publishPathLocked(int object);  // V04d: publishes a path (a follower resolved against its target); pathLock held
     std::array<std::atomic<float>, verbp::kMaxSources+1> liveAz{};  // E19: azimuth actually applied in the last block (after Along path / Look at)
     std::atomic<float>* pathParams[verbp::kMaxSources+1] = {};
     std::atomic<float>* makeupParam = nullptr;

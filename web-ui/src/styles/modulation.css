@@ -214,7 +214,16 @@
 .path-lfo .value-slider .numeric { display:flex; align-items:center; gap:5px; min-width:0; width:100%; }
 .path-lfo .value-slider .readout { width:46px; flex:none; }
 .path-lfo-note { margin:0; line-height:1.3; }
+.path-wander-top { display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:wrap; }
+.path-wander-reseed { padding:2px 7px; min-height:20px; font-size:11px; white-space:nowrap; border-color:color-mix(in srgb,#34d399 45%,var(--border)); color:#a7f3d0; }
+.path-wander-flags { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; }
+.path-wander-readout { font-size:11px; color:#8ee8c4; font-variant-numeric:tabular-nums; line-height:1.3; }
+.path-wander.is-physical .path-wander-readout { color:var(--muted); }
 
 /* Timeline Path LFO range indicator */
 .tl-lfo-band { position:absolute; top:3px; bottom:3px; border-radius:2px; background:color-mix(in srgb,var(--c,#21b99b) 24%,transparent); border:1px dashed color-mix(in srgb,var(--c,#21b99b) 75%,#fff); pointer-events:none; z-index:2; }
 .tl-lfo-band.dim { opacity:.42; border-style:dotted; }
+
+/* V04e: dock MIDI mode select (choosing a mode shows the full MIDI out row in the dock; the editor is not detached) */
+.mod-field-midi { flex:none; }
+.mod-dock-editor-col .mod-field-midi .dd { flex:none; width:52px; min-width:48px; max-width:58px; }

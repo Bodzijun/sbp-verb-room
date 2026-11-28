@@ -334,9 +334,15 @@ CommandResult EditorSession::mutate(const Descriptor& d, const juce::var& payloa
     //      relative to the start, never accumulated), then move the processor from the applied state to the new one
     Tx& t = *tx;
     std::vector<TxCmd> cmds = t.cmds;
+    std::string txCk = ck;
+    if (txCk.empty() && op == "path.set") {
+        const auto objProp = payload.getProperty("object", {});
+        if (objProp.isInt() || objProp.isInt64())
+            txCk = "path.set|" + std::to_string(static_cast<int>(objProp));
+    }
     TxCmd nc;
-    nc.d = &d; nc.payload = payload; nc.ckey = ck;
-    auto same = !ck.empty() ? std::find_if(cmds.begin(), cmds.end(), [&](const TxCmd& c) { return c.ckey == ck; }) : cmds.end();
+    nc.d = &d; nc.payload = payload; nc.ckey = txCk;
+    auto same = !txCk.empty() ? std::find_if(cmds.begin(), cmds.end(), [&](const TxCmd& c) { return c.ckey == txCk; }) : cmds.end();
     const auto sameIndex = static_cast<size_t>(same - cmds.begin());
     if (same != cmds.end()) *same = nc; else cmds.push_back(nc);
     Model cand = t.start;
@@ -429,6 +435,7 @@ CommandResult EditorSession::dispatch(const juce::var& payload, const juce::Stri
         if(!value.isVoid()&&!(value.isString()&&value.toString()=="all")){if(!(value.isInt()||value.isInt64())||(int)value<0||(int)value>kListener)return error(requestId,{"invalid","object must be 0..32, all, or omitted","object"});object=(int)value;}
         if(op=="path.bakeCancel"){proc.cancelPathBake();r=ok(requestId,"accepted",{},false);}
         else if(op=="path.bakeClear"){proc.clearPathBake();r=ok(requestId,"accepted",{},false);}
+        else if(proc.motionTailEnabled())r=error(requestId,{"notReady","Turn off Motion to bake the path",""});
         else if(proc.startPathBake(object))r=ok(requestId,"accepted",{},false);
         else r=error(requestId,{"notReady","Enable a path or record a pass before baking","object"});
     }

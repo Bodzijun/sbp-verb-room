@@ -37,6 +37,11 @@ struct TailHist {
 // minDetectRadius > 0 raises the receiver detection sphere to at least that radius (P3 bake-only override;
 // 0 keeps the production radius, bit-identical).
 TailHist traceTail(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize = true, const std::function<bool()>& cancelled = {}, const TailExecution& execution = {}, double minDetectRadius = 0.);
+// Motion worker only. Accumulate directly into the supplied time windows and
+// use a spatial probe search, retaining the original traced energy model.
+TailHist traceTailWindows(const Scene&, const Transducer&, const std::vector<Transducer>&,
+                          int order, int rays, const double* windowEnds, size_t windows,
+                          const TailExecution&, double minDetectRadius);
 // Integrated late energy for offline spatial analysis. No time histogram or
 // extrapolation is allocated; callbacks run only on the caller's worker thread.
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene&, const Transducer&,

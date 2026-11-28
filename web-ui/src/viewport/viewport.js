@@ -1,5 +1,6 @@
 import { modKey } from '../state/platform.js';
-import { compilePath, evaluatePath, evaluateAzimuthKeys, hasActiveAzimuthKeys, pathGroupDriver, pathId, pathPositionLocked, withPathPoses } from './movement-path.js';
+import { compilePath, evaluatePath, evaluateTimeMap, endlessTransportPhase, endlessEffectiveU, evaluateAzimuthKeys, hasActiveAzimuthKeys, pathGroupDriver, pathId, pathPositionLocked, withPathPoses, wanderEndEnvelope, isFollower, followerCurve, followerPose, evaluateEndlessPath } from './movement-path.js';
+import { generatePathShapeForRoom } from './path-shapes.js';
 import { facingAngle, cursorEnergyLevel } from './t13.js';
 import { viewportState, positionId } from './effective-scene.js';
 import { element, button } from '../components/dom.js';
@@ -20,6 +21,7 @@ import { cornerXY, movedVertexCorners, sameCorner, snapTranslation, snapVertex, 
 import { viewportEvent } from '../state/render-policy.js';
 import { scaleIndicatorState, wallLengthM, formatMetres2 } from './room-metrics.js';
 import { sceneAutomationRange } from '../bridge/mock-model.js';
+import { zoneList, zoneColour, zoneOutline, zoneProblem, polygonSimple, liveOccupancy, computeZoneOccupancy, ZONE_MAX, ZONE_PALETTE, nextZoneId } from '../state/trigger-zones.js';
 // Default material strokes stay inside the warm canvas palette. Explicit user
 // colours and theme overrides are preserved; alpha never depends on class/type.
 const same = (a, b) => a.kind === b.kind && a.index === b.index;
@@ -109,6 +111,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   let autoFrame = true, sceneKey = '', lastSize = null, lastPage = store.view.page, lastLoadState = null, pendingRoomFit = false;
   let draftCursor=null,draftTool=store.view.tool,chainGroup=null,previewViewport=null,previewStore=null,inset=null;
   let labelVisibility=new Map();
+  let zoneHits=[],zoneHandleHits=[],zoneOccKey='';
   let rayCache = { key:'', paths:[] }, gridCache = { key:'', lines:[] }, rayHits = [], pickedRay = null, lastPaths = [];
   const ctx = canvas.getContext('2d');
   const reportedErrors=new Set();
@@ -289,6 +292,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         ctx.beginPath();visible.map(p=>project(p,camera,width,height)).forEach((p,i)=>i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));ctx.closePath();ctx.globalAlpha=.035;ctx.fill();ctx.globalAlpha=.3;ctx.stroke();
       }ctx.globalAlpha=1;ctx.setLineDash([]);
     }
+    drawTriggerZones(roles, d);
     rayLegend.hidden = !store.view.rays; rayHits = [];
     if (store.view.rays) {
       // The ray source stays on the last selected source when the selection is cleared (e.g. by orbiting the camera).
@@ -546,11 +550,12 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     if(!marquee.hidden){const lo=drag.start.map((v,i)=>Math.min(v,drag.last[i]));Object.assign(marquee.style,{left:`${lo[0]}px`,top:`${lo[1]}px`,width:`${Math.abs(drag.last[0]-drag.start[0])}px`,height:`${Math.abs(drag.last[1]-drag.start[1])}px`});root.dataset.marqueeCount=String(wouldSelect.length);}
     root.dataset.draftPoints=String(draft.length);
     if (draft.length) {
-      ctx.strokeStyle=roles.selection;ctx.fillStyle=roles.background;ctx.lineWidth=2;
-      const points=store.view.tool==='room'&&draftCursor?rectangle(draft[0],draftCursor.world):draft;
+      const zoneTool=['zoneBox','zonePoly'].includes(store.view.tool),rectTool=['room','zoneBox'].includes(store.view.tool);
+      ctx.strokeStyle=zoneTool?ZONE_PALETTE[(nextZoneId(zoneList(store.state))-1)%ZONE_PALETTE.length]:roles.selection;ctx.fillStyle=roles.background;ctx.lineWidth=2;
+      const points=rectTool&&draftCursor?rectangle(draft[0],draftCursor.world):draft;
       ctx.beginPath();points.forEach((p,i)=>{const q=project([...p,0],camera,width,height);i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]);});
-      if(store.view.tool==='room')ctx.closePath();ctx.stroke();
-      if(draftCursor&&store.view.tool!=='room'){
+      if(rectTool)ctx.closePath();if(zoneTool&&points.length>2){ctx.save();ctx.globalAlpha=.12;ctx.fillStyle=ctx.strokeStyle;ctx.fill();ctx.restore();}ctx.stroke();
+      if(draftCursor&&!rectTool){
         ctx.setLineDash([5,3]);worldLine([...draft.at(-1),0],[...draftCursor.world,0]);
         if(draft.length>=2&&store.view.tool!=='wall')worldLine([...draftCursor.world,0],[...draft[0],0]);ctx.setLineDash([]);
       }
@@ -561,7 +566,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     drawingReadout.hidden = !readout;
     if(!drawingReadout.hidden){
       const q=readout,from=drag?.snapReadout ? q.from : draft.at(-1),dx=from?q.world[0]-from[0]:0,dy=from?q.world[1]-from[1]:0;
-      if (!drag?.snapReadout && store.view.tool === 'room' && from) {
+      if (!drag?.snapReadout && ['room','zoneBox'].includes(store.view.tool) && from) {
         drawingReadout.textContent = `${Math.abs(dx).toFixed(2)} × ${Math.abs(dy).toFixed(2)} m · ${q.snap}`;
       } else {
         drawingReadout.textContent=`${Math.hypot(dx,dy).toFixed(2)} m · ${Math.atan2(dy,dx)*180/Math.PI<0?'-':''}${Math.abs(Math.atan2(dy,dx)*180/Math.PI).toFixed(1)}° · ${q.snap}`;
@@ -596,7 +601,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   let reportedStep = null;
   const snapStep = () => effectiveStep(store.view, camera, height);
   function publishSnapStep() { const step = snapStep(); if (step !== reportedStep) { reportedStep = step; root.dataset.snapStep = String(step); root.dispatchEvent(new CustomEvent('snapstep', { detail: step })); } }
-  const isDrawing=()=>store.view.page==='edit'&&['room','wall','floorZone','ceilingZone','plate'].includes(store.view.tool);
+  const isDrawing=()=>store.view.page==='edit'&&['room','wall','floorZone','ceilingZone','plate','zoneBox','zonePoly'].includes(store.view.tool);
   const rectangle=(a,b)=>[[a[0],a[1]],[b[0],a[1]],[b[0],b[1]],[a[0],b[1]]];
   function drawingPoint(p,e){
     const raw=pointOnTargetPlane(p,camera,width,height).slice(0,2);
@@ -653,15 +658,123 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     d.final = { op: 'surface.translate', refs, deltaM: d.liveDelta, includeGroups, autoLink,
       ...(hit ? { snapFrom: hit.from, snapTarget: hit.target } : {}) };
   }
+  // ---------------------------------------------------------------- V04c trigger zones
+  function zoneOccupancyMap(){
+    const wire=liveOccupancy(authorStore.state,authorStore.telemetry);
+    if(wire)return wire;
+    const st=withPathPoses(authorStore.state);
+    return new Map(computeZoneOccupancy(zoneList(authorStore.state),st.parameters.values,st.document.sources.length).map(o=>[o.id,o.objects]));
+  }
+  function createZone(cmd){
+    if(zoneList(store.state).length>=ZONE_MAX){hover.textContent='At most 16 zones';return;}
+    Promise.resolve(store.command({op:'zone.create',...cmd})).then(r=>{const id=r?.payload?.details?.zoneId??r?.details?.zoneId;if(Number.isInteger(id))store.setView({zoneEdit:id,tool:'move',selection:[]});else store.setView({tool:'move'});});
+  }
+  // Live geometry while a zone gesture runs (the preview is local; the processor gets throttled zone.set inside one transaction).
+  function liveZone(z){const d=activeDrag();return d?.type==='zone'&&d.zoneId===z.id&&d.livePoints?{...z,points:d.livePoints}:z;}
+  function drawTriggerZones(roles,d){
+    zoneHits=[];zoneHandleHits=[];
+    const zones=zoneList(store.state);root.dataset.zonesDrawn='0';root.dataset.zonesLit='';
+    if(!zones.length)return;
+    const occ=zoneOccupancyMap(),edit=store.view.page==='edit',sel=store.view.zoneEdit??null,lit=[];
+    let drawn=0;
+    // V04e: global Zones toggle (preference, absent = ON). Hidden zones are not drawn and not hit-tested; the zone being
+    // edited (selected in the list) and every zone while a zone tool is active stay visible.
+    const showZones=authorStore.state.preferences?.showZones!==false,zoneTool=edit&&['zoneBox','zonePoly'].includes(store.view.tool);
+    root.dataset.zonesHidden=showZones?'0':'1';
+    zones.forEach((z0,i)=>{
+      if(z0.visible===false&&sel!==z0.id)return;
+      if(!showZones&&!zoneTool&&sel!==z0.id)return;
+      const z=liveZone(z0),outline=zoneOutline(z);if(outline.length<3)return;
+      const colour=zoneColour(z0,i),on=z0.enabled!==false&&(occ.get(z0.id)||[]).length>0,disabled=z0.enabled===false,selected=sel===z0.id;
+      if(on)lit.push(z0.id);
+      const lo=Math.min(z.zMin,z.zMax),hi=Math.max(z.zMin,z.zMax);
+      const faces=camera.view==='plan'?[outline.map(q=>[q[0],q[1],hi])]:[outline.map(q=>[q[0],q[1],lo]),outline.map(q=>[q[0],q[1],hi]),...outline.map((q,k)=>{const r=outline[(k+1)%outline.length];return [[q[0],q[1],lo],[r[0],r[1],lo],[r[0],r[1],hi],[q[0],q[1],hi]];})];
+      ctx.save();ctx.fillStyle=colour;ctx.strokeStyle=colour;
+      for(const f of faces){
+        const vis=clipPolygonNear(f,camera);if(!vis)continue;
+        const sc=vis.map(q=>project(q,camera,width,height));
+        ctx.beginPath();sc.forEach((q,k)=>k?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]));ctx.closePath();
+        ctx.globalAlpha=disabled?0:on?(camera.view==='plan'?.3:.12):(camera.view==='plan'?.09:.035);ctx.fill();
+        ctx.setLineDash(disabled?[3,4]:z.edge>0?[8,3]:[]);ctx.lineWidth=on?2.4:selected?1.8:1.2;ctx.globalAlpha=disabled?.45:on?1:.75;ctx.stroke();
+      }
+      if(on){const top=clipPolygonNear(outline.map(q=>[q[0],q[1],hi]),camera);if(top){const sc=top.map(q=>project(q,camera,width,height));ctx.beginPath();sc.forEach((q,k)=>k?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]));ctx.closePath();ctx.setLineDash([]);ctx.lineWidth=7;ctx.globalAlpha=.22;ctx.stroke();}}
+      ctx.setLineDash([]);
+      // label at the centroid of the top outline
+      const cx=outline.reduce((n,q)=>n+q[0],0)/outline.length,cy=outline.reduce((n,q)=>n+q[1],0)/outline.length,lp=project([cx,cy,hi],camera,width,height);
+      if(lp[2]>.1){ctx.globalAlpha=disabled?.5:1;ctx.font='600 11px system-ui, sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';const label=`${i+1} ${z0.name}${on?' ●':''}`;ctx.lineWidth=3;ctx.strokeStyle=roles.background;ctx.strokeText(label,lp[0],lp[1]);ctx.fillStyle=colour;ctx.fillText(label,lp[0],lp[1]);ctx.textAlign='start';ctx.textBaseline='alphabetic';}
+      ctx.restore();drawn++;
+      if(edit&&camera.view==='plan'&&!mouseLocked()){
+        const sc=outline.map(q=>project([q[0],q[1],hi],camera,width,height));
+        zoneHits.push({id:z0.id,screen:sc});
+        if(selected){
+          ctx.save();ctx.fillStyle=colour;ctx.strokeStyle=roles.background;ctx.lineWidth=1.5;
+          sc.forEach((q,k)=>{ctx.beginPath();ctx.rect(q[0]-4.5,q[1]-4.5,9,9);ctx.fill();ctx.stroke();zoneHandleHits.push({id:z0.id,kind:'vertex',index:k,screen:q});});
+          sc.forEach((q,k)=>{const r=sc[(k+1)%sc.length],m=[(q[0]+r[0])/2,(q[1]+r[1])/2];ctx.beginPath();ctx.arc(m[0],m[1],3.5,0,7);ctx.fill();ctx.stroke();zoneHandleHits.push({id:z0.id,kind:'edge',index:k,screen:m,a:q,b:r});});
+          ctx.restore();
+        }
+      }
+    });
+    ctx.globalAlpha=1;root.dataset.zonesDrawn=String(drawn);root.dataset.zonesLit=lit.join(',');
+  }
+  function zoneHandleAt(p){
+    const sel=store.view.zoneEdit??null;if(sel===null)return null;
+    const v=zoneHandleHits.find(h=>h.kind==='vertex'&&Math.hypot(p[0]-h.screen[0],p[1]-h.screen[1])<=8);if(v)return v;
+    const m=zoneHandleHits.find(h=>h.kind==='edge'&&Math.hypot(p[0]-h.screen[0],p[1]-h.screen[1])<=7);if(m)return m;
+    const e=zoneHandleHits.find(h=>h.kind==='edge'&&segmentDistance(p,h.a,h.b)<5);if(e)return e;
+    const body=zoneHits.find(h=>h.id===sel&&inside(p,h.screen));return body?{id:sel,kind:'move'}:null;
+  }
+  function zoneBodyAt(p){for(let i=zoneHits.length-1;i>=0;i--)if(inside(p,zoneHits[i].screen))return zoneHits[i].id;return null;}
+  function startZoneDrag(h,p,e){
+    const z=zoneList(store.state).find(q=>q.id===h.id);if(!z)return false;
+    const world=pointOnTargetPlane(p,camera,width,height);
+    drag={type:'zone',zoneId:z.id,mode:h.kind,index:h.index??-1,start:p,startWorld:[world[0],world[1]],startPoints:z.points.map(q=>q.slice()),kind:z.kind,livePoints:null,camera,lastSent:0,sentKey:JSON.stringify(z.points),began:false,txId:`zone-${Date.now()}-${Math.random().toString(36).slice(2,6)}`};
+    return true;
+  }
+  function zoneDragPoints(d,p,e){
+    const w=pointOnTargetPlane(p,d.camera,width,height),step=snapStep(),free=e.altKey||!(step>0);
+    const sn=v=>free?v:Math.round(v/step)*step;
+    if(d.mode==='vertex'){
+      const q=drawingPoint(p,e).world;
+      if(d.kind==='box'){const o=zoneOutline({kind:'box',points:d.startPoints});const opp=o[(d.index+2)%4];return [opp.slice(),q.slice()];}
+      return d.startPoints.map((r,k)=>k===d.index?q.slice():r.slice());
+    }
+    const dx=sn(w[0]-d.startWorld[0]),dy=sn(w[1]-d.startWorld[1]);
+    if(d.mode==='move')return d.startPoints.map(r=>[r[0]+dx,r[1]+dy]);
+    if(d.kind==='box'){
+      const o=zoneOutline({kind:'box',points:d.startPoints});let [x0,y0]=o[0],[x1,y1]=o[2];
+      if(d.index===0)y0+=dy;else if(d.index===1)x1+=dx;else if(d.index===2)y1+=dy;else x0+=dx;
+      return [[x0,y0],[x1,y1]];
+    }
+    const n=d.startPoints.length,a=d.index,b=(d.index+1)%n;
+    return d.startPoints.map((r,k)=>k===a||k===b?[r[0]+dx,r[1]+dy]:r.slice());
+  }
+  function updateZoneDrag(d,p,e,final=false){
+    if(!d.moved&&Math.hypot(p[0]-d.start[0],p[1]-d.start[1])<3)return;
+    d.moved=true;
+    const pts=zoneDragPoints(d,p,e).map(q=>q.map(v=>Number(v.toFixed(4))));
+    const z=zoneList(store.state).find(q=>q.id===d.zoneId);if(!z)return;
+    const problem=zoneProblem({...z,points:pts});
+    if(problem){hover.textContent=problem;return;}  // keep the last valid outline
+    hover.textContent='';d.livePoints=pts;
+    const key=JSON.stringify(pts);if(key===d.sentKey&&!final)return;
+    if(!final&&performance.now()-d.lastSent<33)return;
+    if(!d.began){d.began=true;d.tx=d.txId;store.command({op:'transaction.begin',label:d.mode==='vertex'?'Move zone vertex':d.mode==='edge'?'Move zone edge':'Move zone'},d.tx);}
+    d.sentKey=key;d.lastSent=performance.now();store.command({op:'zone.set',id:d.zoneId,points:pts},d.tx);
+  }
   function endDraft(){chainGroup=null;draft=[];draftCursor=null;drawingReadout.hidden=true;schedule();}
   // Undo while a chain is being drawn takes back the LAST CLICK only: the wall that click created (history) and its draft point, so the
   // next click continues from the previous point; a lone first point is just dropped. Returns true when it consumed the shortcut.
   function undoDraft(){
-    if(!isDrawing()||store.view.tool==='room'||!draft.length)return false;
+    if(!isDrawing()||['room','zoneBox'].includes(store.view.tool)||!draft.length)return false;
     if(store.view.tool==='wall'&&draft.length>=2)store.command({op:'history.undo'});
     draft.pop();draftCursor=null;if(!draft.length)endDraft();else schedule();return true;
   }
   function closeShape(){
+    if(store.view.tool==='zonePoly'){
+      if(draft.length<3){hover.textContent='A polygon zone needs at least 3 vertices';return;}
+      if(!polygonSimple(draft)){hover.textContent='The zone outline crosses itself; move or undo the last vertex (Ctrl+Z)';return;}
+      createZone({kind:'polygon',points:draft.map(q=>q.slice())});endDraft();return;
+    }
     if(store.view.tool==='wall'){
       if(draft.length>=3)store.command(wallCommand(draft.at(-1),draft[0]));
     }else if(draft.length>=3)store.command({op:'surface.create',kind:store.view.tool==='plate'?'floorZone':store.view.tool,vertices:draft,heightM:store.view.tool==='plate'?1:null});
@@ -777,15 +890,112 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     else if (d.index >= 0 && d.index < pts.length) pts[d.index] = d.livePoint.slice();
     return { ...p, points: pts };
   }
+  // V04d: Link to path (rig). Per follower: its offset curve as a ghost of the target's path, a dashed link from the target's
+  // live marker to the follower's live marker and a small link glyph. Hidden with the Paths toggle unless the follower or its target is selected.
+  function drawRigLinks(paths,showPaths,activeObj,roles){
+    const ns=authorStore.state.document.sources?.length??0,f=sizeFactor();
+    const zTop=Math.max(0.5,Math.min(30,Number(authorStore.state.document.scene?.heightM)||30));
+    if (!paths.some(isFollower)) {
+      delete root.dataset.rigLinks;
+      return;
+    }
+    const vals=withPathPoses(authorStore.state).parameters.values;
+    const status = authorStore.telemetry?.['status.load'];
+    const livePositions = new Map((status?.rigPoses || []).map(({source, xyz}) => [source, xyz]));
+    const transport = status?.transport ?? authorStore.state.load?.transport;
+    const storedPosition = source => ['x', 'y', 'z'].map(axis => vals[`s${source + 1}${axis}`] ?? 0);
+    const rig=[];
+    paths.forEach((p,o)=>{
+      if(o>=ns||!isFollower(p))return;
+      const t=p.follow.target;
+      if(t<0||t>=ns||p.enabled===false||!paths[t]?.enabled)return;
+      const focus=activeObj===o||activeObj===t;
+      if(!showPaths&&!focus)return;
+      const col=sourceMarkerColour(authorStore.state.document.sources?.[o],roles);
+      const curve=followerCurve(paths,o,96,zTop);
+      ctx.save();
+      if(curve.length>=2){
+        const sp=curve.map(q=>project(q.map(x=>x*f),camera,width,height));
+        ctx.strokeStyle=col;ctx.globalAlpha=focus?0.75:0.35;ctx.lineWidth=focus?1.6:1.1;ctx.setLineDash([6,4]);
+        ctx.beginPath();sp.forEach((v,i)=>{i?ctx.lineTo(v[0],v[1]):ctx.moveTo(v[0],v[1]);});
+        
+        ctx.stroke();
+      }
+      let targetPosition = livePositions.get(t) ?? storedPosition(t);
+      let followerPosition = livePositions.get(o) ?? storedPosition(o);
+      const targetPath = paths[t];
+      if (!livePositions.has(o) && targetPath.closed && targetPath.endless && transport?.playing) {
+        const u = vals[pathId(pathGroupDriver(paths, t))] ?? 0;
+        const phase = endlessTransportPhase(transport.samplePos, transport.sampleRate ?? 48000, targetPath.endlessPeriodS ?? 8);
+        targetPosition = evaluateEndlessPath(targetPath, u, phase);
+        followerPosition = followerPose(paths, o, u, phase, zTop, authorStore.state.document.scene)?.pos ?? followerPosition;
+      }
+      const a=project(targetPosition.map(coord => coord*f),camera,width,height);
+      const b=project(followerPosition.map(coord => coord*f),camera,width,height);
+      const visible=camera.view!=='3d'||(a[2]>0&&b[2]>0);
+      if(visible){
+        ctx.setLineDash([2,3]);ctx.globalAlpha=focus?0.9:0.5;ctx.lineWidth=1.2;ctx.strokeStyle=col;
+        ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha=focus?0.95:0.65;
+        ctx.fillStyle=col;
+        ctx.beginPath();ctx.arc(b[0],b[1],4,0,2*Math.PI);ctx.fill();
+        const mx=(a[0]+b[0])/2,my=(a[1]+b[1])/2;
+        ctx.globalAlpha=focus?1:0.7;ctx.fillStyle=roles.background||'#0b1512';ctx.strokeStyle=col;ctx.lineWidth=1.2;
+        ctx.beginPath();ctx.moveTo(mx,my-4);ctx.lineTo(mx+4,my);ctx.lineTo(mx,my+4);ctx.lineTo(mx-4,my);ctx.closePath();ctx.fill();ctx.stroke();
+      }
+      ctx.restore();
+      rig.push({follower:o,target:t,curve:curve.length,link:visible?[Math.round(a[0]),Math.round(a[1]),Math.round(b[0]),Math.round(b[1])]:null});
+    });
+    if(rig.length)root.dataset.rigLinks=JSON.stringify(rig);
+    else delete root.dataset.rigLinks;
+  }
   function drawMovementPaths(roles) {
     pathHits=[]; pathSegHits=[]; draftNodeHits=[];
     const paths=authorStore.state.document.paths||[];
     const selObj=store.view.selection.find(r=>r.kind==='source'||r.kind==='listener');
     const activeObj=store.view.pathDrawing??store.view.pathEditing??(selObj?(selObj.kind==='listener'?32:selObj.index):null);
+    let endlessMarkerInfo = null;
+    const evalArcFraction = (table, p, frac) => {
+      const { points, lengths, length } = table;
+      if (!points.length) return [0, 0, 0];
+      let u = Number.isFinite(frac) ? frac : 0;
+      if (p.closed) {
+        u -= Math.floor(u);
+        if (u < 0) u += 1;
+        if (u === 0) return points[0].slice();
+      } else {
+        u = Math.max(0, Math.min(1, u));
+      }
+      const d = u * length;
+      let lo = 1, hi = points.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (lengths[mid] <= d) lo = mid + 1;
+        else hi = mid;
+      }
+      const span = lengths[lo] - lengths[lo - 1];
+      const t = span > 1e-12 ? (d - lengths[lo - 1]) / span : 0;
+      const a = points[lo - 1], b = points[lo];
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+    };
+    // While a shape preview is pending, the CURRENT path of that object is the "old" one: it is drawn dimmed (ghost style)
+    // so it cannot be confused with the bright preview. Once live edits make the stored path equal to the preview, it is the new one.
+    let previewDimmedObject=null;
+    const pathMatchesShapePreview=(raw,o)=>{
+      const sp=store.view.pathShapePreview;
+      if(!sp||sp.object!==o||!sp.params?.kind)return false;
+      try{
+        const g=generatePathShapeForRoom(sp.params,authorStore.state.document.scene,true).path.points,a=raw?.points||[];
+        return g.length===a.length&&g.every((q,i)=>q.every((v,k)=>Math.abs(v-a[i][k])<2e-3));
+      }catch{return false;}
+    };
     const drawPath=(raw,o,isDraft=false)=>{
       const p=isDraft?raw:effectivePathForDraw(raw,o);
       if(!p?.points?.length || (!isDraft && p.points.length<2))return;
-      const isOldRedraw=!isDraft && store.view.pathDrawing===o;
+      const dimByPreview=!isDraft && store.view.pathShapePreview?.object===o && !!store.view.pathShapePreview?.params?.kind && !pathMatchesShapePreview(raw,o);
+      if(dimByPreview)previewDimmedObject=o;
+      const isOldRedraw=!isDraft && (store.view.pathDrawing===o || dimByPreview);
       const isActive=isDraft || (!isOldRedraw && (o===activeObj || o===store.view.pathEditing));
       const table=compilePath(p),f=sizeFactor();
       const lineCol=isActive?(roles.pathLine||(o===32?roles.listener:roles.source)):(roles.pathDimmed||roles.grid);
@@ -793,6 +1003,65 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       const arrowCol=isActive?(roles.pathArrow||lineCol):(roles.pathDimmed||lineCol);
       const markerCol=isOldRedraw?(roles.pathDimmed||lineCol):(roles.pathMarker||roles.selection);
       const screenPts=table.points.map(q=>project(q.map(x=>x*f),camera,width,height));
+      if(!isDraft && !isOldRedraw && p.wander?.enabled && table.points.length>=2){
+        const ampH=Math.max(0,Number(p.wander.ampHorizM)||0);
+        const ampV=p.wander.horizOnly?0:Math.max(0,Number(p.wander.ampVertM)||0);
+        if(ampH>0 || ampV>0){
+          const creativeMode=(authorStore.state.parameters?.values?.mode??0)>=0.5;
+          const stride=Math.max(1,Math.floor(table.points.length/180));
+          const idxs=[];
+          for(let i=0;i<table.points.length;i+=stride)idxs.push(i);
+          if(idxs.at(-1)!==table.points.length-1)idxs.push(table.points.length-1);
+          const leftPts=[],rightPts=[],topPts=[],botPts=[];
+          for(let k=0;k<idxs.length;k++){
+            const idx=idxs[k],q=table.points[idx];
+            const prevIdx=idx>0?idxs[Math.max(0,k-1)]:(p.closed?idxs[Math.max(0,idxs.length-2)]:0);
+            const nextIdx=idx<table.points.length-1?idxs[Math.min(idxs.length-1,k+1)]:(p.closed?idxs[Math.min(1,idxs.length-1)]:table.points.length-1);
+            const a=table.points[prevIdx],b=table.points[nextIdx];
+            let dx=b[0]-a[0],dy=b[1]-a[1];
+            const len=Math.hypot(dx,dy);
+            if(len>1e-9){dx/=len;dy/=len;}else{dx=1;dy=0;}
+            const nx=-dy,ny=dx;
+            const u=table.length>0?table.lengths[idx]/table.length:idx/Math.max(1,table.points.length-1);
+            const env=wanderEndEnvelope(u,!!p.closed,p.wander.pinEnds!==false);
+            const ah=ampH*env*f,av=ampV*env*f;
+            leftPts.push(project([q[0]*f+nx*ah,q[1]*f+ny*ah,q[2]*f],camera,width,height));
+            rightPts.push(project([q[0]*f-nx*ah,q[1]*f-ny*ah,q[2]*f],camera,width,height));
+            if(camera.view!=='plan'){
+              topPts.push(project([q[0]*f,q[1]*f,q[2]*f+av],camera,width,height));
+              botPts.push(project([q[0]*f,q[1]*f,q[2]*f-av],camera,width,height));
+            }
+          }
+          ctx.save();
+          const tubeCol='#34d399';
+          if(creativeMode){
+            ctx.fillStyle=tubeCol;
+            ctx.globalAlpha=isActive?0.15:0.07;
+            if(ampH>0&&leftPts.length>=2){
+              ctx.beginPath();
+              leftPts.forEach((v,i)=>{i?ctx.lineTo(v[0],v[1]):ctx.moveTo(v[0],v[1]);});
+              if(p.closed){ctx.closePath();for(let i=rightPts.length-1;i>=0;i--){const v=rightPts[i];i===rightPts.length-1?ctx.moveTo(v[0],v[1]):ctx.lineTo(v[0],v[1]);}ctx.closePath();ctx.fill('evenodd');}
+              else{for(let i=rightPts.length-1;i>=0;i--)ctx.lineTo(rightPts[i][0],rightPts[i][1]);ctx.closePath();ctx.fill();}
+            }
+            if(camera.view!=='plan'&&ampV>0&&topPts.length>=2){
+              ctx.globalAlpha=isActive?0.11:0.05;
+              ctx.beginPath();
+              topPts.forEach((v,i)=>{i?ctx.lineTo(v[0],v[1]):ctx.moveTo(v[0],v[1]);});
+              for(let i=botPts.length-1;i>=0;i--)ctx.lineTo(botPts[i][0],botPts[i][1]);
+              ctx.closePath();ctx.fill();
+            }
+          }
+          ctx.strokeStyle=tubeCol;
+          ctx.globalAlpha=creativeMode?(isActive?0.45:0.20):0.09;
+          ctx.lineWidth=1.0;
+          ctx.setLineDash([4,3]);
+          const strokeEdge=arr=>{if(arr.length<2)return;ctx.beginPath();arr.forEach((v,i)=>{i?ctx.lineTo(v[0],v[1]):ctx.moveTo(v[0],v[1]);});ctx.stroke();};
+          if(ampH>0){strokeEdge(leftPts);strokeEdge(rightPts);}
+          if(camera.view!=='plan'&&ampV>0){strokeEdge(topPts);strokeEdge(botPts);}
+          ctx.setLineDash([]);
+          ctx.restore();
+        }
+      }
       ctx.save();
       ctx.strokeStyle=ctx.fillStyle=lineCol;
       ctx.globalAlpha=isActive?0.95:(isOldRedraw?0.5:0.45);
@@ -822,13 +1091,91 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         }
       }
       if(!isDraft && p.enabled && p.points.length>=2){
-        const u=authorStore.state.parameters.values[o===32?'lpath':`s${o+1}path`]??0;
-        const curWorld=evaluatePath(p,u).map(x=>x*f),cm=project(curWorld,camera,width,height);
+        const driver = pathGroupDriver(paths, o);
+        const uBase = Math.max(0, Math.min(1, Number(authorStore.state.parameters.values[pathId(driver)] ?? 0)));
+        const isEndless = !!(p.closed && p.endless);
+        const tr = authorStore.telemetry?.['status.load']?.transport || authorStore.state?.load?.transport || null;
+        const sr = Number.isFinite(tr?.sampleRate) && tr.sampleRate > 0 ? tr.sampleRate : (authorStore.state?.host?.sampleRate || 48000);
+        const periodS = Number.isFinite(p.endlessPeriodS) && p.endlessPeriodS >= 0.25 ? p.endlessPeriodS : 8;
+        const isPlaying = tr ? !!tr.playing : (bridge.mode === 'mock' && isEndless);
+        const samplePos = tr && Number.isFinite(tr.samplePos) ? tr.samplePos : (isPlaying ? 48000 : 0);
+        const phase = isEndless && isPlaying ? endlessTransportPhase(samplePos, sr, periodS) : 0;
+        let uEff;
+        if (isEndless) {
+          uEff = endlessEffectiveU(p, uBase, phase);
+        } else {
+          const tMap = evaluateTimeMap(p, uBase);
+          if (p.closed) {
+            const laps = Math.max(1, Math.min(64, Math.round(p.laps ?? 1)));
+            const rawLap = tMap * laps;
+            uEff = rawLap - Math.floor(rawLap);
+          } else {
+            uEff = tMap;
+          }
+        }
+        const curWorldUnscaled = evalArcFraction(table, p, uEff);
+        const curWorld = curWorldUnscaled.map(x => x * f);
+        const cm = project(curWorld, camera, width, height);
+        const showTrailAndArrow = isEndless || (p.closed ? uEff > 0 : uEff > 0.005);
+        let trailCount = 0;
+        let drewArrow = false;
+        if (showTrailAndArrow && table.length > 1e-6) {
+          const trailSteps = 12;
+          const trailSpan = p.closed ? 0.14 : Math.min(0.14, uEff);
+          if (trailSpan > 1e-4) {
+            const trailScreen = [];
+            for (let k = trailSteps; k >= 0; k--) {
+              const uStep = uEff - (trailSpan * k / trailSteps);
+              const q = evalArcFraction(table, p, uStep).map(x => x * f);
+              const sp = project(q, camera, width, height);
+              if (camera.view !== '3d' || sp[2] > 0) trailScreen.push(sp);
+            }
+            trailCount = trailScreen.length;
+            if (trailScreen.length >= 2) {
+              ctx.save();
+              ctx.strokeStyle = markerCol;
+              ctx.lineCap = 'round';
+              for (let k = 1; k < trailScreen.length; k++) {
+                const prog = k / (trailScreen.length - 1);
+                ctx.globalAlpha = (isActive ? 0.68 : 0.35) * (prog * prog);
+                ctx.lineWidth = 1.2 + 2.0 * prog;
+                ctx.beginPath();
+                ctx.moveTo(trailScreen[k - 1][0], trailScreen[k - 1][1]);
+                ctx.lineTo(trailScreen[k][0], trailScreen[k][1]);
+                ctx.stroke();
+              }
+              ctx.restore();
+            }
+          }
+          const uAhead = p.closed ? (uEff + 0.022) : Math.min(1, uEff + 0.022);
+          const uBehind = p.closed ? (uEff - 0.018) : Math.max(0, uEff - 0.018);
+          const aheadScreen = project(evalArcFraction(table, p, uAhead).map(x => x * f), camera, width, height);
+          const behindScreen = project(evalArcFraction(table, p, uBehind).map(x => x * f), camera, width, height);
+          if (camera.view !== '3d' || (aheadScreen[2] > 0 && behindScreen[2] > 0)) {
+            ctx.save();
+            ctx.fillStyle = markerCol;
+            ctx.globalAlpha = isActive ? 0.92 : 0.45;
+            drawArrowHead(aheadScreen, behindScreen, isActive ? 11 : 8);
+            ctx.restore();
+            drewArrow = true;
+          }
+        }
         if(camera.view!=='3d'||cm[2]>0){
           ctx.save();ctx.strokeStyle=markerCol;ctx.fillStyle=markerCol;ctx.globalAlpha=isActive?0.95:0.45;ctx.lineWidth=1.6;
           ctx.beginPath();ctx.moveTo(cm[0],cm[1]-6);ctx.lineTo(cm[0]+6,cm[1]);ctx.lineTo(cm[0],cm[1]+6);ctx.lineTo(cm[0]-6,cm[1]);ctx.closePath();ctx.stroke();
           ctx.beginPath();ctx.arc(cm[0],cm[1],2.4,0,Math.PI*2);ctx.fill();
           ctx.restore();
+        }
+        if (isEndless && (o === activeObj || !endlessMarkerInfo)) {
+          endlessMarkerInfo = {
+            object: o,
+            u: Number(uEff.toFixed(4)),
+            phase: Number(phase.toFixed(4)),
+            pos: curWorldUnscaled.map(v => Number(v.toFixed(4))),
+            trailPoints: trailCount,
+            hasArrow: drewArrow,
+            playing: isPlaying
+          };
         }
       }
       p.points.forEach((q,index)=>{
@@ -851,11 +1198,99 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     };
     // Paths toggle (viewport toolbar): hidden paths are neither drawn nor hit-testable; the path being drawn or edited always stays visible.
     const showPaths=authorStore.state.preferences?.showPaths!==false;
+    const oldGhost = store.view.pathOldGhost;
+    if (oldGhost && oldGhost.object != null && oldGhost.points?.length >= 2 && (showPaths || oldGhost.object === activeObj)) {
+      const f = sizeFactor();
+      const ghostTable = compilePath(oldGhost);
+      const ghostScreen = ghostTable.points.map(q => project(q.map(x => x * f), camera, width, height));
+      const ghostCol = roles.pathDimmed || '#8fa3b0';
+      ctx.save();
+      ctx.strokeStyle = ctx.fillStyle = ghostCol;
+      ctx.globalAlpha = 0.38;
+      ctx.lineWidth = 1.4;
+      ctx.setLineDash([3, 5]);
+      ctx.beginPath();
+      ghostScreen.forEach((v, i) => { i ? ctx.lineTo(v[0], v[1]) : ctx.moveTo(v[0], v[1]); });
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (ghostScreen.length >= 2) {
+        const segSamples = Math.max(1, ghostTable.steps || 1);
+        const midIdx = Math.min(ghostScreen.length - 1, Math.max(1, Math.floor(segSamples * 0.5)));
+        let prevIdx = midIdx - 1;
+        while (prevIdx > 0 && Math.hypot(ghostScreen[midIdx][0] - ghostScreen[prevIdx][0], ghostScreen[midIdx][1] - ghostScreen[prevIdx][1]) < 3) prevIdx--;
+        drawArrowHead(ghostScreen[midIdx], ghostScreen[prevIdx], 10);
+      }
+      oldGhost.points.forEach(q => {
+        const v = project(q.map(x => x * f), camera, width, height);
+        if (camera.view === '3d' && v[2] <= 0) return;
+        ctx.beginPath();
+        ctx.arc(v[0], v[1], 2.2, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      ctx.restore();
+      root.dataset.oldShapeGhost = 'visible';
+      root.dataset.oldShapeGhostPoints = String(oldGhost.points.length);
+    } else {
+      delete root.dataset.oldShapeGhost;
+      delete root.dataset.oldShapeGhostPoints;
+    }
     paths.forEach((p,o)=>{ if(showPaths || o===store.view.pathDrawing || o===store.view.pathEditing) drawPath(p,o); });
+    drawRigLinks(paths,showPaths,activeObj,roles);
+    if (previewDimmedObject!=null) root.dataset.oldPathDimmed=String(previewDimmedObject);
+    else delete root.dataset.oldPathDimmed;
+    if (endlessMarkerInfo) root.dataset.endlessMarker = JSON.stringify(endlessMarkerInfo);
+    else delete root.dataset.endlessMarker;
     if(store.view.pathDrawing!=null){
       const o=store.view.pathDrawing,prefix=o===32?'l':`s${o+1}`,v=withPathPoses(authorStore.state).parameters.values;
       const pts=store.view.pathDraft?.length?store.view.pathDraft:[['x','y','z'].map(k=>v[prefix+k])];
       drawPath({points:pts},o,true);
+    }
+    const shapePreview=store.view.pathShapePreview;
+    if(shapePreview&&shapePreview.object!=null&&shapePreview.params?.kind){
+      const o=shapePreview.object,f=sizeFactor();
+      const fit=generatePathShapeForRoom(shapePreview.params,authorStore.state.document.scene,false);
+      const drawGhost=(ghostPath,strokeCol,dash,alpha,lw)=>{
+        if(!ghostPath?.points||ghostPath.points.length<2)return;
+        const table=compilePath(ghostPath);
+        const screenPts=table.points.map(q=>project(q.map(x=>x*f),camera,width,height));
+        ctx.save();
+        ctx.strokeStyle=ctx.fillStyle=strokeCol;
+        ctx.globalAlpha=alpha;
+        ctx.lineWidth=lw;
+        ctx.setLineDash(dash);
+        ctx.beginPath();screenPts.forEach((v,i)=>{i?ctx.lineTo(v[0],v[1]):ctx.moveTo(v[0],v[1]);});ctx.stroke();
+        ctx.setLineDash([]);
+        if(screenPts.length>=2){
+          const segSamples=Math.max(1,table.steps||1);
+          const midIdx=Math.min(screenPts.length-1,Math.max(1,Math.floor(segSamples*0.5)));
+          let prevIdx=midIdx-1;
+          while(prevIdx>0&&Math.hypot(screenPts[midIdx][0]-screenPts[prevIdx][0],screenPts[midIdx][1]-screenPts[prevIdx][1])<3)prevIdx--;
+          drawArrowHead(screenPts[midIdx],screenPts[prevIdx],14);
+        }
+        ghostPath.points.forEach((q,idx)=>{
+          const v=project(q.map(x=>x*f),camera,width,height);
+          if(camera.view==='3d'&&v[2]<=0)return;
+          ctx.beginPath();ctx.arc(v[0],v[1],idx===0?4.5:3,0,Math.PI*2);
+          if(idx===0)ctx.fill();else ctx.stroke();
+        });
+        ctx.restore();
+      };
+      const baseCol=roles.selection||roles.pathLine||(o===32?roles.listener:roles.source);
+      if(fit.outsideRoom){
+        drawGhost(fit.rawPath,'#e07a5f',[6,4],0.65,1.6);
+        drawGhost(fit.fittedPath,baseCol,[4,3],0.92,2.2);
+      }else{
+        drawGhost(fit.path,baseCol,[6,4],0.9,2.0);
+      }
+      const cWorld=[shapePreview.params.cx*f,shapePreview.params.cy*f,shapePreview.params.z*f];
+      const cScreen=project(cWorld,camera,width,height);
+      if(camera.view!=='3d'||cScreen[2]>0){
+        ctx.save();ctx.strokeStyle=baseCol;ctx.globalAlpha=0.85;ctx.lineWidth=1.4;
+        ctx.beginPath();
+        ctx.moveTo(cScreen[0]-5,cScreen[1]);ctx.lineTo(cScreen[0]+5,cScreen[1]);
+        ctx.moveTo(cScreen[0],cScreen[1]-5);ctx.lineTo(cScreen[0],cScreen[1]+5);
+        ctx.stroke();ctx.restore();
+      }
     }
   }
   function finishPath(cancel=false){
@@ -950,6 +1385,15 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     }
     if (!store.ready) return; if (drag) finish(true); canvas.focus(); e.preventDefault();
     hover.textContent = '';
+    if (store.view.page === 'edit' && camera.view === 'plan' && e.button === 0 && !isDrawing() && !e.shiftKey && store.view.tool !== 'box' && !mouseLocked()) {
+      const zh = zoneHandleAt(p);
+      if (zh && startZoneDrag(zh, p, e)) { if (!tryCapture(e)) finish(true); schedule(); return; }
+      const nearPath = store.view.pathEditing != null || pathHits.some(h => Math.hypot(p[0] - h.screen[0], p[1] - h.screen[1]) < 9);
+      const under = pick(p, false), weak = !nearPath && (!under || (!['source','listener','wall'].includes(under.kind) && under.vertex === undefined));
+      const zb = weak ? zoneBodyAt(p) : null;
+      if (zb !== null) { store.setView({ zoneEdit: zb, selection: [] }); if (startZoneDrag({ id: zb, kind: 'move' }, p, e) && !tryCapture(e)) finish(true); schedule(); return; }
+      if (store.view.zoneEdit != null) store.setView({ zoneEdit: null }, false);
+    }
     const ref = pick(p, true);
     const objMarkerHit = ref && ['source', 'listener'].includes(ref.kind) ? ref : null;
     if (!objMarkerHit) {
@@ -1009,11 +1453,11 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
     else if (e.button === 1 || e.shiftKey && e.button === 0 && store.view.tool!=='box' && !(store.view.page==='edit'&&ref&&!isDrawing())) {
       if (store.state.document.editorFlags.navLocked) return;
       drag = { type: 'pan', camera, start: p,labels:new Map(labelVisibility) };
-    } else if (store.view.page === 'edit' && store.view.tool === 'room' && e.button === 0) {
+    } else if (store.view.page === 'edit' && ['room','zoneBox'].includes(store.view.tool) && e.button === 0) {
       if (camera.view !== 'plan') { hover.textContent = 'Draw surfaces in Plan view'; return; }
       draftCursor=drawingPoint(p,e);if(!draft.length)draft=[draftCursor.world];
       drag = {type:'room',start:p,last:p,camera};schedule();
-    } else if (store.view.page === 'edit' && ['wall', 'floorZone', 'ceilingZone','plate'].includes(store.view.tool) && e.button === 0) {
+    } else if (store.view.page === 'edit' && ['wall', 'floorZone', 'ceilingZone','plate','zonePoly'].includes(store.view.tool) && e.button === 0) {
       if (camera.view !== 'plan') { hover.textContent = 'Draw surfaces in Plan view'; return; }
       if(e.detail>1)return;
       draftCursor=drawingPoint(p,e);const world=draftCursor.world;
@@ -1061,10 +1505,10 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       }
     } else if (store.view.pathEditing != null && e.button === 0 && !mouseLocked()) {
       drag = { type: 'pathAppendOrOrbit', object: store.view.pathEditing, start: p, camera, labels: new Map(labelVisibility), moved: false };
-    } else if (camera.view === '3d' && e.button === 0) { drag = { type: 'orbit', start: p, camera,labels:new Map(labelVisibility) };store.setView({ selection: [] }, false); }
+    } else if (camera.view === '3d' && e.button === 0) { drag = { type: 'orbit', start: p, camera,labels:new Map(labelVisibility) };store.setView({ selection: [], pathOldGhost: null }, false); }
     else {
       // Rays are display-only (owner's decision): they are never picked, so they cannot steal clicks.
-      store.setView({ selection: [] }); return;
+      store.setView({ selection: [], pathOldGhost: null }); return;
     }
     if (drag && !tryCapture(e)) { finish(true); return; }
     if (drag && ['pan', 'orbit'].includes(drag.type)) autoFrame = false;
@@ -1102,6 +1546,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       }
       store.view.camera=camera;schedule();return;
     }
+    if(drag?.type==='zone'){updateZoneDrag(drag,p,e);schedule();return;}
     if(isDrawing()&&camera.view==='plan'){draftCursor=drawingPoint(p,e);schedule();if(!drag)return;}
     if (!drag) {
       const ref=pick(p);canvas.title=ref?.kind==='source'?store.state.document.sources[ref.index]?.name:ref?.kind==='listener'?'Listener':'';
@@ -1168,6 +1613,12 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
         }
       }
     }
+    if (drag?.type === 'zone') { if (drag.moved) updateZoneDrag(drag, screen(e), e, true); finish(); return; }
+    if (drag?.type === 'room' && store.view.tool === 'zoneBox') {
+      const a=draft[0],b=drawingPoint(screen(e),e).world;
+      if(a&&Math.abs(a[0]-b[0])>.01&&Math.abs(a[1]-b[1])>.01)createZone({kind:'box',points:[a.slice(),b.slice()]});
+      endDraft();finish();return;
+    }
     if (drag?.type === 'room') {
       const a=draft[0],b=drawingPoint(screen(e),e).world;
       if(Math.abs(a[0]-b[0])>.01&&Math.abs(a[1]-b[1])>.01) {
@@ -1200,7 +1651,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   }, { passive: false });
   onCanvas('dblclick', e => {
     if(store.view.pathDrawing!=null){finishPath();return;}
-    if(isDrawing()){if(store.view.tool!=='room')closeShape();return;}
+    if(isDrawing()){if(!['room','zoneBox'].includes(store.view.tool))closeShape();return;}
     const ref = pick(screen(e)); if (ref) { const points = pointsFor(ref); if (points.length) { autoFrame = false; const b = boundsOf(points); camera = { ...camera, target: b.min.map((v, i) => (v + b.max[i]) / 2) }; } } else fit();
     store.view.camera = camera; schedule(); persistCamera();
   });
@@ -1232,7 +1683,8 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
 
     if (e.key.toLowerCase() === 'f') { e.preventDefault(); fit(e.shiftKey); persistCamera(); }
     if (e.key === 'Home') { camera = createCamera(store.view.projection); fit(); persistCamera(); }
-    if (e.key === 'Escape') { e.preventDefault();finish(true); endDraft(); store.setView({ selection: [], pathEditing: null, pathPoint: null }); }
+    if (e.key === 'Escape' && drag?.type === 'zone') { e.preventDefault(); e.stopPropagation(); finish(true); hover.textContent = 'Zone edit cancelled'; return; }
+    if (e.key === 'Escape') { e.preventDefault();finish(true); endDraft(); store.setView({ selection: [], pathEditing: null, pathPoint: null, zoneEdit: null }); }
     if (e.key === 'Enter' && draft.length)closeShape();
     if (modKey(e) && ['z','y'].includes(e.key.toLowerCase())) {
       e.preventDefault();
@@ -1259,6 +1711,14 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   let geometry = null, poseKey = '', viewKey = '';
   const off = store.subscribe(({ reason }) => {
     if (reason === 'resync' || reason === 'transactionfailed') finish(true);
+    if (reason === 'status.load' && store.state?.document?.paths?.some(p => p?.enabled && p?.closed && p?.endless && p?.points?.length >= 2)) {
+      schedule();
+      return;
+    }
+    if (reason === 'status.load' && store.state?.document?.zones?.length) {
+      const k = JSON.stringify(store.telemetry['status.load']?.zones || null);
+      if (k !== zoneOccKey) { zoneOccKey = k; schedule(); }
+    }
     if (!viewportEvent(reason) || !store.state) return;
     const state = store.state, v = state.parameters.values;
     updateHint();
@@ -1280,7 +1740,7 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
       if(store.view.pathEditing!=null && !(authorStore.state.document.paths?.[store.view.pathEditing]?.points?.length>=2)) store.view.pathEditing = null;
     }
     const nextPose = JSON.stringify([state.document.sources.map((s,i)=>[s, ...['x','y','z','az'].map(k=>v[`s${i+1}${k}`])]),v.lx,v.ly,v.lz,v.laz,state.document.output,state.parameters.effective.zM,state.document.paths]);
-    const nextView = JSON.stringify([store.view.page,store.view.projection,store.view.selection,store.view.energy,store.view.rays,store.view.rayOrder,store.view.raysOccluded,store.view.analysis,store.view.showMic,store.view.camera,store.view.pathDrawing,store.view.pathDraft,store.view.pathEditing,store.view.pathPoint,state.preferences,state.document.editorFlags]);
+    const nextView = JSON.stringify([store.view.page,store.view.projection,store.view.selection,store.view.energy,store.view.rays,store.view.rayOrder,store.view.raysOccluded,store.view.analysis,store.view.showMic,store.view.camera,store.view.pathDrawing,store.view.pathDraft,store.view.pathShapePreview,store.view.pathOldGhost,store.view.pathEditing,store.view.pathPoint,state.preferences,state.document.editorFlags,state.document.zones,store.view.zoneEdit,store.view.tool]);
     const geometryChanged = geometry !== state.document.scene || poseKey !== nextPose;
     // T11 item 1: preset / room / file loads (including asynchronous JUCE load completion and same-preset reload)
     // always frame the whole scene in the current view; ordinary edits within the same room keep manual zoom.
@@ -1310,6 +1770,8 @@ export function createViewport(authorStore, bridge, {preview=false,draftProvider
   });
   updateHint();
   root.cancelGesture=()=>{resetPointer(false);endDraft();};root.undoDraft=undoDraft;
+  root.zoneHandleScreens=()=>zoneHandleHits.map(h=>({id:h.id,kind:h.kind,index:h.index,screen:h.screen.slice()}));  // V04c: read-only, for tests
+  root.zoneScreens=()=>zoneHits.map(h=>({id:h.id,screen:h.screen.map(q=>q.slice(0,2))}));
   root.redraw=()=>{if(preview){const yaw=camera.yaw,pitch=camera.pitch;fit();camera={...camera,yaw,pitch};}schedule();};
   root.frameStats = () => ({ ...screenExtent(allPoints(), camera, width, height), width, height, autoFrame, view: camera.view });
   root.frameAll = () => { fit(); persistCamera(); }; root.frameSelection = () => { fit(true); persistCamera(); };

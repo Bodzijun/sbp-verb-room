@@ -1,7 +1,7 @@
 import { pathPositionLocked, hasActiveAzimuthKeys } from '../viewport/movement-path.js';
 import { element } from './dom.js';
 import { range, canonical, toNormalised, fromNormalised, toText, fromText, displayText } from '../bridge/parameters.js';
-import { effectiveValue } from '../state/selectors.js';
+import { effectiveValue, motionStatusText } from '../state/selectors.js';
 import { valueField } from './value-field.js';
 // One gesture implementation shared by rotary and slider controls.
 export function parameterControl(store, bridge, id, { knob = false, label } = {}) {
@@ -34,13 +34,16 @@ export function parameterControl(store, bridge, id, { knob = false, label } = {}
     const isAz = /^(s\d+|l)az$/.test(id);
     const azObj = isAz ? (id === 'laz' ? 32 : Number(id.slice(1, -2)) - 1) : -1;
     const lockedByAzKeys = locked && isAz && hasActiveAzimuthKeys(store.state.document.paths?.[azObj]);
+    const isPathPos = /^(s\d+|l)path$/.test(id);
+    const pathObj = isPathPos ? (id === 'lpath' ? 32 : Number(id.slice(1, -4)) - 1) : -1;
+    const lockedByEndless = locked && isPathPos && !!(store.state.document.paths?.[pathObj]?.closed && store.state.document.paths?.[pathObj]?.endless);
     const effective = effectiveValue(store.state, id);
     const displayVal = lockedByAzKeys ? effective : value;
-    return { value, locked, isAz, lockedByAzKeys, effective, displayVal };
+    return { value, locked, isAz, lockedByAzKeys, lockedByEndless, effective, displayVal };
   }
   function update() {
     const d = desc();
-    const { value, locked, isAz, lockedByAzKeys, effective, displayVal } = displayedState();
+    const { value, locked, isAz, lockedByAzKeys, lockedByEndless, effective, displayVal } = displayedState();
     const normal = toNormalised(d, displayVal);
     root.classList.toggle('locked', locked); input.disabled = locked; control.setAttribute('aria-disabled', String(locked));
     const [lo, hi] = range(d); control.setAttribute('aria-valuemin', lo); control.setAttribute('aria-valuemax', hi); control.setAttribute('aria-valuenow', displayVal); control.setAttribute('aria-valuetext', text(displayVal));
@@ -50,16 +53,24 @@ export function parameterControl(store, bridge, id, { knob = false, label } = {}
     root.style.setProperty('--effective-angle',`${-135+270*toNormalised(d,effective)}deg`);
     root.classList.toggle('has-effective',Math.abs(effective-value)>0.0005);
     const absorption = store.state.parameters.effective.absorption;
-    eff.textContent = id === 'absorption' ? `applied ${Number.isFinite(absorption.applied) ? displayText(d, absorption.applied) : 'pending'} · ${absorption.tailCurrent ? 'tail current' : 'transition'}` : lockedByAzKeys ? `keys ${displayText(d, effective)}` : (locked || Math.abs(effective - value) > 0.0005) ? `effective ${displayText(d, effective)}` : '';
-    if(id==='size')eff.textContent=store.state.load.tailCurrent?`Size ${effective} %`:`applied ${effective} % · Rebuilding…`;
+    eff.textContent = id === 'absorption' ? `applied ${Number.isFinite(absorption.applied) ? displayText(d, absorption.applied) : 'pending'} · ${absorption.tailCurrent ? 'tail current' : 'transition'}` : lockedByEndless ? 'Endless: position is driven by transport' : lockedByAzKeys ? `keys ${displayText(d, effective)}` : (locked || Math.abs(effective - value) > 0.0005) ? `effective ${displayText(d, effective)}` : '';
+    if (id === 'size') {
+      const load = store.telemetry['status.load'] ?? store.state.load;
+      eff.textContent = load.tailCurrent ? `Size ${effective} %`
+        : `applied ${effective} % · ${motionStatusText(store.state, load) || 'Rebuilding…'}`;
+    }
     if(id==='stereoWidth'&&store.state.parameters.effective.widthAvailable===false)eff.textContent='unavailable · mono output';
-    root.title = lockedByAzKeys
-      ? `${label || d.name} · ${text(effective)} · Locked: driven by Azimuth keys in Path timeline (clear keys or switch Orientation to unlock)`
-      : `${label || d.name} · ${text(value)}${locked && d.modeClass === 'creativeOnly' && store.state.parameters.values.mode===0 ? ' · Locked in Physical: switch to Creative; stored value is preserved' : ''}${eff.textContent ? ` · ${eff.textContent}` : ''}`;
+    root.title = lockedByEndless
+      ? 'Endless: position is driven by transport'
+      : lockedByAzKeys
+        ? `${label || d.name} · ${text(effective)} · Locked: driven by Azimuth keys in Path timeline (clear keys or switch Orientation to unlock)`
+        : `${label || d.name} · ${text(value)}${locked && d.modeClass === 'creativeOnly' && store.state.parameters.values.mode===0 ? ' · Locked in Physical: switch to Creative; stored value is preserved' : ''}${eff.textContent ? ` · ${eff.textContent}` : ''}`;
     if(id==='size')root.title+=' · Debounced room rebuild; Edit room uses unscaled geometry';
     if(id==='stereoWidth'&&store.state.parameters.effective.widthAvailable===false)root.title+=' · Unavailable for mono output';
     control.title = root.title;
-    if (lockedByAzKeys) input.title = root.title;
+    if (lockedByAzKeys || lockedByEndless) input.title = root.title;
+    else input.title = `${label || d.name} value · drag vertically · Shift fine · double-click to type`;
+    name.title = lockedByEndless ? root.title : '';
     if (id === 'mix' && store.state.parameters.effective.mixEffective.ignored) eff.textContent = 'ignored · Solo';
     else if (id === 'mix' && store.state.parameters.values.spatialDry) eff.textContent = 'positioned dry';
     if (/^s\d+g$/.test(id) && value <= -60) eff.textContent = '−∞ / silence';

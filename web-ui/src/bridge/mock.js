@@ -1,10 +1,11 @@
 import { clone, loadContract } from './contract.js';
 import { canonical } from './parameters.js';
 import { applyMutation, validateModel, updateEffective, updateHost, reject, isDefaultAutomationRange, syncDescriptorsWithRange, expandRangeWithPoint, sanitiseAutomationRange } from './mock-model.js';
-import { computeModulationTelemetry } from '../components/modulation-model.js';
+import { computeModulationTelemetry, resolveModulatedPoseState, simulateMidiOut } from '../components/modulation-model.js';
+import { computeZoneOccupancy } from '../state/trigger-zones.js';
 import { makeSyntheticEnergy } from '../viewport/energy-layer.js';
 import { mockClutterEvent, mockClutterSignature } from './mock-clutter.js';
-export const FIXTURES = ['default-physical', 'legacy-creative', 'small-room', 'large-hall', 'energy-result', 'error-resync'];
+export const FIXTURES = ['default-physical', 'legacy-creative', 'small-room', 'large-hall', 'energy-result', 'error-resync', 'zones-creative', 'zones-midi-creative', 'rig-walk'];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export async function createMockBridge(options = {}) {
   const read = options.read || (async name => {
@@ -15,14 +16,19 @@ export async function createMockBridge(options = {}) {
   const data = new Map(await Promise.all(['parameters.default', ...FIXTURES.map(n => n.startsWith('energy') || n.startsWith('error') ? n : `snapshot.${n}`)].map(async n => [n, await read(n)])));
   data.forEach((value, key) => validator.assert(value, key === 'parameters.default' ? 'fixture-parameters' : 'fixture'));
   const descriptors = data.get('parameters.default').descriptors, listeners = new Set(), parameterListeners = new Set();
-  const audit = [], resources = new Map(), history = [], seen = new Map(), timers = new Set(), gestures = new Set();
+  const audit = [], resources = new Map(), history = [], motionRedo = [], seen = new Map(), timers = new Set(), gestures = new Set();
   let state, selected = 'default-physical', sessionId = 'editor-mock', generation = 0, job = null, tx = null, closed = false, seq = 0, meterToken = 0, targetToken = 0, tailSubscribed = false, tailTimer = null;
   const latency = options.delayMs ?? 35;
   const emptyBake=()=>({state:'notBaked',object:-1,name:'',percent:0,reason:'',done:0,total:0,workers:0,paths:[]});
   const enabledPaths=doc=>(doc.paths||[]).map((path,object)=>({path,object})).filter(x=>x.path?.enabled&&x.path.points.length>=2);
   const pathGroupDriver=(paths,object)=>{const p=paths?.[object],g=p?.group??-1;if(g<0||!p?.enabled||(p.points?.length??0)<2)return object;for(let o=0;o<32;o++)if(paths[o]?.enabled&&paths[o].points?.length>=2&&(paths[o].group??-1)===g)return o;return object;};
   let bakeStatus=emptyBake(),bakeToken=0,bakeOrigin='none';
+  let motionToken = 0;
   let modTickTimer = null, modEpochMs = Date.now(), lastModSig = '';
+  const mockMidiMemory = [];  // V04e: per-route state of the emulated MIDI out indicator
+  let mockTransport = { playing: true, samplePos: 48000, timeSec: 1.0, sampleRate: 48000 };
+  const hasAnyEndlessPath = () => (state?.document?.paths || []).some(p => p?.enabled && p?.closed && p?.endless && (p.points?.length ?? 0) >= 2);
+  const transportFields = () => hasAnyEndlessPath() ? { transport: { ...mockTransport } } : {};
   function bakeInput() {
     const enabled=enabledPaths(state.document);
     const paths=state.document.paths || [];
@@ -63,21 +69,54 @@ export async function createMockBridge(options = {}) {
     if (!routes?.length) return {};
     const elapsed = (Date.now() - modEpochMs) / 1000;
     const t = computeModulationTelemetry(state, elapsed);
+    // V04e: emulated MIDI out indicator (count + last message), same rules as the processor's generator.
+    if (routes.some(r => r?.midi && r.midi.mode !== 'off')) {
+      const playing = transportFields()?.transport?.playing !== false;
+      const midi = simulateMidiOut(routes, t.routes.map((w, i) => ({ ...w, active: w.active && playing, norm: t.previews[i]?.norm ?? 0 })), mockMidiMemory);
+      return { modulation: { routes: t.routes.map((w, i) => midi[i] ? { ...w, midi: midi[i] } : w) } };
+    }
     return { modulation: { routes: t.routes } };
   };
+  // V04c: zone occupancy from the current (mock) poses; stateless (no hysteresis / sweep, which only the processor has).
+  const zoneFields = () => {
+    const zones = state?.document?.zones;
+    if (!zones?.length) return {};
+    const pose = resolveModulatedPoseState(state, (Date.now() - modEpochMs) / 1000, { includeLfo: true });
+    return { zones: { occupancy: computeZoneOccupancy(zones, pose.values, state.document.sources.length) } };
+  };
   function bakeEvent(overrides = {}) {
-    event({event:'status.load',state:state.load.state,status:state.load.status,sceneSerial:state.sceneSerial||'0',loadSerial:state.loadSerial||'0',tailCurrent:state.load.tailCurrent,rebuilding:false,pathBake:{...bakeStatus,...bakeFields(bakeInput()),...overrides},...modFields()});
+    statusEvent({ pathBake: { ...bakeStatus, ...bakeFields(bakeInput()), ...overrides } });
+  }
+  function statusEvent(extra = {}) {
+    event({ event: 'status.load', ...state.load, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0',
+      rebuilding: false, pathBake: { ...bakeStatus, ...bakeFields(bakeInput()) }, ...transportFields(), ...modFields(), ...zoneFields(), ...extra });
+  }
+  function prepareMotion(next) {
+    const token = ++motionToken;
+    if (!next.document.motionTail) {
+      delete next.load.motionTail;
+      next.load.tailCurrent = true;
+      return;
+    }
+    next.load.motionTail = 'preparing';
+    next.load.tailCurrent = false;
+    later(() => {
+      if (token !== motionToken) return;
+      state.load.motionTail = 'ready';
+      state.load.tailCurrent = true;
+      statusEvent();
+    }, 750);
   }
   function emitModIfChanged(force = false) {
-    const mf = modFields();
-    const sig = mf.modulation ? JSON.stringify(mf.modulation) : '';
+    const mf = modFields(), zf = zoneFields();
+    const sig = (mf.modulation ? JSON.stringify(mf.modulation) : '') + (zf.zones ? JSON.stringify(zf.zones) : '');
     if (!force && sig === lastModSig) return;
     lastModSig = sig;
     if (!closed && state) bakeEvent();
   }
   function scheduleModTick() {
     if (modTickTimer) { clearTimeout(modTickTimer); timers.delete(modTickTimer); modTickTimer = null; }
-    if (closed || !state?.document?.modulation?.routes?.length || !hasActiveModLfo()) return;
+    if (closed || !(state?.document?.modulation?.routes?.length || state?.document?.zones?.length) || !hasActiveModLfo()) return;
     const gen = generation;
     const id = setTimeout(() => {
       timers.delete(id);
@@ -106,18 +145,19 @@ export async function createMockBridge(options = {}) {
     tailTimer = id; timers.add(id);
   }
   function stopJobs() { timers.forEach(clearTimeout); timers.clear(); tailTimer = null; modTickTimer = null; modEpochMs = Date.now(); lastModSig = ''; job = null; meterToken++; }
-  function historyEvent() { event({event:'history.changed',canUndo:history.length>0,undoDepth:history.length,canRedo:false,undoLabel:history.length ? (history.at(-1).undoLabel || 'Scene edit') : '',redoLabel:''}); }
+  function historyEvent() { event({event:'history.changed',canUndo:history.length>0,undoDepth:history.length,canRedo:motionRedo.length>0,undoLabel:history.length ? (history.at(-1).undoLabel || 'Scene edit') : '',redoLabel:motionRedo.length?'Toggle Motion':''}); }
   let clutterSignature = null;
   function clutterEvent(force = false) { const signature = mockClutterSignature(state); if (force || signature !== clutterSignature) { clutterSignature = signature; event(mockClutterEvent(state)); } }
   function snapshot() { const mf = modFields(); lastModSig = mf.modulation ? JSON.stringify(mf.modulation) : ''; const result = emit('snapshot', state); historyEvent(); clutterEvent(); bakeEvent(); scheduleModTick(); return result; }
   function fresh(name, keepPreferences = false) {
-    const old = state; generation++; stopJobs(); bakeToken++;bakeStatus=emptyBake();bakeOrigin='none';tx = null; gestures.clear(); history.length = 0; seen.clear(); resources.clear(); selected = name;
+    const old = state; generation++; stopJobs(); bakeToken++;bakeStatus=emptyBake();bakeOrigin='none';tx = null; gestures.clear(); history.length = 0; motionRedo.length = 0; seen.clear(); resources.clear(); selected = name;
     clutterSignature = null;
     const fixture = data.get(name === 'error-resync' ? name : `snapshot.${name === 'energy-result' ? 'default-physical' : name}`);
     state = clone(fixture.messages.find(m => m.kind === 'snapshot').payload); state.parameters.descriptors = clone(descriptors);for(const d of descriptors.parameters)state.parameters.values[d.id] ??= d.default;syncDescriptorsWithRange(state);
     state.capabilities = state.capabilities || {};
     state.capabilities.features = state.capabilities.features || {};
     state.capabilities.features['colours.source'] = { available: true, status: 'available' };
+    state.capabilities.features['tail.motion'] = { available: true, status: 'available' };
     if (keepPreferences && old) state.preferences = clone(old.preferences || {});
     if (name === 'error-resync') state.revision = '43';
     validateModel(state, validator);
@@ -125,16 +165,26 @@ export async function createMockBridge(options = {}) {
   function change(next, requestId, paths = ['document', 'host', 'parameters', 'preferences'], editedPathObject = null) {
     // Compare the acoustic document without the format choices. This also keeps
     // a bake current when output-only changes are undone.
-    const acousticDocument = ({ output, scene, modulation, paths, ...document }) => {
+    const acousticDocument = ({ output, scene, modulation, paths, motionTail, ...document }) => {
       const { ambisonicsNormalization, ambisonicsLevelDb, ...receivers } = output;
       const { automationRange, ...sceneRest } = scene || {};
       const acousticPaths = Array.isArray(paths)
-        ? paths.map(p => { if (!p || typeof p !== 'object' || !('lfo' in p)) return p; const { lfo, ...rest } = p; return rest; })
+        ? paths.map(p => { if (!p || typeof p !== 'object' || (!('lfo' in p) && !('wander' in p))) return p; const { lfo, wander, ...rest } = p; return rest; })
         : paths;
       return { ...document, scene: sceneRest, output: receivers, ...(acousticPaths !== undefined ? { paths: acousticPaths } : {}) };
     };
     const posMoved = ['s', 'l'].some(p => Object.keys(next.parameters?.values || {}).some(k => /^(?:s\d+|l)[xyz]$/.test(k) && next.parameters.values[k] !== state.parameters.values[k]));
     const acousticChange = posMoved || JSON.stringify(acousticDocument(next.document)) !== JSON.stringify(acousticDocument(state.document));
+    const motionChanged = next.document.motionTail !== state.document.motionTail;
+    const motionPrepare = motionChanged || (next.document.motionTail &&
+      JSON.stringify([next.document.scene, next.document.tail]) !== JSON.stringify([state.document.scene, state.document.tail]));
+    if (motionPrepare) {
+      prepareMotion(next);
+      if (motionChanged && next.document.motionTail && bakeStatus.state === 'baking') {
+        bakeToken++;
+        bakeStatus = { ...bakeStatus, state: 'cancelled', percent: 0, reason: 'Cancelled' };
+      }
+    }
     const bakeInvalid=acousticChange&&(['baking','baked','approximate'].includes(bakeStatus.state)||(Array.isArray(bakeStatus.paths)&&bakeStatus.paths.some(x=>['baking','baked','approximate'].includes(x.state))));
     const oldPaths=state.document?.paths;
     const fromRevision = state.revision; next.revision = (BigInt(fromRevision) + 1n).toString();
@@ -155,7 +205,7 @@ export async function createMockBridge(options = {}) {
       }
       bakeStatus={...bakeStatus,state:'outdated',percent:0,reason:msg,paths:updatedPaths};
     }
-    if(bakeInvalid||JSON.stringify(oldPaths)!==JSON.stringify(next.document?.paths)) bakeEvent();
+    if(motionPrepare||bakeInvalid||JSON.stringify(oldPaths)!==JSON.stringify(next.document?.paths)) bakeEvent();
     else emitModIfChanged();
     scheduleModTick();
     return state.revision;
@@ -181,7 +231,7 @@ export async function createMockBridge(options = {}) {
       if (!gestures.has(id)) throw new Error(`Change outside gesture: ${id}`);
       if (canonical(d, value) !== value) throw new Error(`Noncanonical parameter value: ${id}`);
       state.parameters.values[id] = value; updateEffective(state); relay();
-      if (state.document?.modulation?.routes?.length && (/^(?:s\d+|l)(?:x|y|z|az|path)$/.test(id) || id === 'mode')) { emitModIfChanged(); scheduleModTick(); }
+      if ((state.document?.modulation?.routes?.length || state.document?.zones?.length) && (/^(?:s\d+|l)(?:x|y|z|az|path)$/.test(id) || id === 'mode')) { emitModIfChanged(); scheduleModTick(); }
       if (job?.resultId) event({ event: 'analysis.stale', resultId: job.resultId, stale: true });
       if (['size', 'absorption', 'decayLow', 'decayMid', 'decayHigh', 'mode'].includes(id)) scheduleTail(15);
     }
@@ -198,7 +248,8 @@ export async function createMockBridge(options = {}) {
       validator.assert(message); audit.push({ direction: 'out', message: clone(message) });
       if (closed) throw new Error('Bridge disposed');
       sessionId = message.sessionId; const gen = generation;
-      await delay(latency);
+      if (!(message.transactionId && message.payload?.op === 'path.set')) await delay(latency);
+      else await delay(0);
       if (gen !== generation) return null;
       if (message.kind === 'hello') { if (!state) fresh(selected); const result = snapshot(); if (selected === 'energy-result') replayEnergy(); return result; }
       if (message.kind !== 'command') throw new Error('Only hello / command messages may be sent');
@@ -228,6 +279,7 @@ export async function createMockBridge(options = {}) {
           bakeToken++;bakeOrigin='none';bakeStatus={...emptyBake(),passState:bakeStatus.passState??0,passSamples:bakeStatus.passSamples??0};bakeEvent();result=ack();
         }
         else if(op==='path.bake'||op==='path.bakeCancel'){
+          if (op === 'path.bake' && state.document.motionTail) reject('notReady', 'Turn off Motion to bake the path');
           const token=++bakeToken;
           const keepPass={passState:bakeStatus.passState??0,passSamples:bakeStatus.passSamples??0};
           if(op==='path.bakeCancel'){bakeStatus={...bakeStatus,...keepPass,state:'cancelled',percent:0,reason:'Cancelled',paths:(bakeStatus.paths||[]).map(x=>x.state==='baking'?{...x,state:'cancelled',percent:0,reason:'Cancelled'}:x)};bakeEvent();}
@@ -315,6 +367,10 @@ export async function createMockBridge(options = {}) {
           const old = clone(state), name = FIXTURES[Number(p.id)]; fresh(name, true);
           delete state.preferences.sessionViewState;
           state.host = old.host;
+          if (old.document.motionTail) {
+            state.document.motionTail = true;
+            prepareMotion(state);
+          }
           if (old.document.editorFlags.keepRouting) {
             state.document.sources = old.document.sources; state.document.output = old.document.output;
             const localN = old.document.sources.length;
@@ -360,17 +416,38 @@ export async function createMockBridge(options = {}) {
           }
         }
         else if (['preset.list', 'preset.save', 'ir.export', 'source.loadDirectivityFile'].includes(op)) reject('ioError', 'Mock only: native library / dialogs / file export are not connected');
-        else if (op === 'history.redo' || op.startsWith('comparison.')) reject('unsupported', 'Capability unavailable in frozen v1');
+        else if (op.startsWith('comparison.')) reject('unsupported', 'Capability unavailable in frozen v1');
+        else if (op === 'history.redo') {
+          if (!motionRedo.length) reject('unsupported', 'No Motion edit to redo');
+          const next = clone(state);
+          const enabled = motionRedo.pop();
+          history.push({ motionBefore: !!state.document.motionTail, undoLabel: 'Toggle Motion' });
+          applyMutation(next, { op: 'tail.setMotion', enabled });
+          change(next, message.requestId);
+          result = ack();
+        }
         else if (op === 'history.undo') {
           if (!history.length) result = ack({ status: 'noChange' });
-          else { const next = clone(state); const previous=history.pop(); if('makeupBefore' in previous) next.parameters.values.makeup=previous.makeupBefore; else if('pathObject' in previous) {next.document.paths[previous.pathObject]=previous.pathBefore;} else if(previous.transactionDocument) { next.document=previous.transactionDocument; if(previous.transactionParams) next.parameters.values=previous.transactionParams; syncDescriptorsWithRange(next); } else next.document.scene=previous; change(next, message.requestId); event({ event: 'resync.required', reason: 'undo', currentRevision: state.revision }); snapshot(); scheduleTail(35); result = ack(); }
+          else if ('motionBefore' in history.at(-1)) {
+            const next = clone(state);
+            motionRedo.push(!!state.document.motionTail);
+            applyMutation(next, { op: 'tail.setMotion', enabled: history.pop().motionBefore });
+            change(next, message.requestId);
+            result = ack();
+          }
+          else { motionRedo.length = 0; const next = clone(state); const previous=history.pop(); if('makeupBefore' in previous) next.parameters.values.makeup=previous.makeupBefore; else if('pathObject' in previous) {next.document.paths[previous.pathObject]=previous.pathBefore;} else if(previous.transactionDocument) { next.document=previous.transactionDocument; if(previous.transactionParams) next.parameters.values=previous.transactionParams; syncDescriptorsWithRange(next); } else next.document.scene=previous; change(next, message.requestId); event({ event: 'resync.required', reason: 'undo', currentRevision: state.revision }); snapshot(); scheduleTail(35); result = ack(); }
         } else {
           if (message.transactionId && tx?.id !== message.transactionId) reject('invalid', 'Unknown transaction');
           const next = clone(state), materials = [...data.values()].flatMap(f => f.messages?.find(m => m.kind === 'snapshot')?.payload.document.scene.materials || []);
           const commands = tx && message.transactionId ? [...tx.commands] : null;
           let details;
-          const slot = commands && op === 'surface.translate' ? commands.findIndex(command =>
-            command.op === op && JSON.stringify(command.refs) === JSON.stringify(p.refs)) : -1;
+          const slot = commands ? (
+            op === 'surface.translate'
+              ? commands.findIndex(command => command.op === op && JSON.stringify(command.refs) === JSON.stringify(p.refs))
+              : op === 'path.set'
+                ? commands.findIndex(command => command.op === op && command.object === p.object)
+                : -1
+          ) : -1;
           if (slot >= 0) {
             // Match native keyRefs coalescing even if Alt or autoLink changes during the drag.
             commands[slot] = p;
@@ -383,24 +460,30 @@ export async function createMockBridge(options = {}) {
           }
           validateModel(next, validator);
           if (commands) tx.commands = commands;
-          const extra = op === 'scene.joinCorners' ? { details } : {};
+          const extra = op === 'scene.joinCorners' || (op === 'zone.create' && details) ? { details } : {};
           if (JSON.stringify(next) === JSON.stringify(state)) result = ack({ status: 'noChange', ...extra });
           else {
-            if(!tx&&op.startsWith('path.'))history.push({pathObject:p.object,pathBefore:clone(state.document.paths?.[p.object]||{points:[],enabled:true,closed:false,smooth:false,orient:false,laps:1})});
+            motionRedo.length = 0;
+            if (!tx && op === 'tail.setMotion') history.push({ motionBefore: !!state.document.motionTail, undoLabel: 'Toggle Motion' });
+            const rigOp=op==='path.link'||op==='path.setFollow'||op==='path.unlink'||(op==='path.clear'&&(state.document.paths||[]).some((q,i)=>i!==p.object&&q?.follow?.target===p.object));  // V04d: several paths change -> one document undo step
+            if(!tx&&rigOp)history.push({transactionDocument:clone(state.document),transactionParams:clone(state.parameters.values),undoLabel:op==='path.link'?(Array.isArray(p.objects)&&p.objects.length>1?`Link ${p.objects.length} sources to path`:'Link to path'):op==='path.setFollow'?('offset'in p?'Edit link offset':'target'in p?'Change link target':'Follow wander'):op==='path.unlink'?'Unlink path':'Clear path'});
+            else if(!tx&&op.startsWith('path.'))history.push({pathObject:p.object,pathBefore:clone(state.document.paths?.[p.object]||{points:[],enabled:true,closed:false,smooth:false,orient:false,laps:1})});
             if (!tx && op === 'output.autoMakeup') history.push({makeupBefore:state.parameters.values.makeup});
             if (!tx && op === 'output.set') history.push({ transactionDocument: clone(state.document), undoLabel: 'Output settings' });
             if (!tx && op === 'source.setConfig') history.push({ transactionDocument: clone(state.document), undoLabel: 'color' in p ? 'Source colour' : 'Edit source' });
-            if (!tx && (op === 'room.scale' || op === 'room.fitAutomationRange' || op === 'room.setAutomationRange' || op === 'source.setDirectivity' || op === 'source.setInstrument' || op === 'source.remove' || op.startsWith('modulation.'))) history.push({ transactionDocument: clone(state.document), transactionParams: clone(state.parameters.values), undoLabel: op === 'room.fitAutomationRange' ? 'Fit automation range' : op === 'room.setAutomationRange' ? (p.reset ? 'Reset automation range' : 'Set automation range') : op.startsWith('modulation.') ? 'Edit modulation' : undefined });
+            if (!tx && (op === 'room.scale' || op === 'room.fitAutomationRange' || op === 'room.setAutomationRange' || op === 'source.setDirectivity' || op === 'source.setInstrument' || op === 'source.remove' || op.startsWith('modulation.') || op.startsWith('zone.'))) history.push({ transactionDocument: clone(state.document), transactionParams: clone(state.parameters.values), undoLabel: op === 'room.fitAutomationRange' ? 'Fit automation range' : op === 'room.setAutomationRange' ? (p.reset ? 'Reset automation range' : 'Set automation range') : op.startsWith('modulation.') ? 'Edit modulation' : op === 'zone.create' ? 'Add zone' : op === 'zone.delete' ? 'Delete zone' : op === 'zone.move' ? 'Reorder zones' : op === 'zone.set' ? ('points' in p && !('name' in p) ? 'Edit zone shape' : 'Edit zone') : undefined });
             else if (!tx && (op.startsWith('surface.') || ['room.setHeight', 'room.setOpening', 'room.clear', 'scene.joinCorners'].includes(op))) history.push(clone(state.document.scene));
             history.splice(0, Math.max(0, history.length - 60)); if (tx) tx.changed = true;
-            change(next, message.requestId, undefined, op.startsWith('path.') ? p.object : null);
+            change(next, message.requestId, undefined, op.startsWith('path.') ? (p.object ?? p.objects?.[0] ?? null) : null);
             if (job?.resultId) event({ event: 'analysis.stale', resultId: job.resultId, stale: true });
             if (['surface.delete', 'surface.create', 'source.add', 'source.remove'].includes(op)) { event({ event: 'resync.required', reason: 'structuralChange', currentRevision: state.revision }); snapshot(); }
             if (/^(surface|room|scene|tail)\./.test(op) || op === 'source.setDirectivity' || op === 'source.setInstrument') scheduleTail(35);
+            if (op.startsWith('modulation.') && !tx) later(() => emitModIfChanged(), 0);  // V04e: refresh live route telemetry (MIDI indicator) after an edit
             result = ack(extra);
           }
         }
-        if ((/^(history|surface|room|scene|transaction|path|modulation)\./.test(op)&&!['path.bake','path.bakeCancel','path.bakeClear','path.recordPass','path.recordStop','path.recordClear'].includes(op)) || op === 'output.autoMakeup' || (op === 'output.set' && !tx) || op === 'source.setDirectivity' || op === 'source.setInstrument' || op === 'source.remove' || (op === 'source.setConfig' && !tx)) historyEvent();
+        if ((/^(history|surface|room|scene|transaction|path|modulation|zone)\./.test(op)&&!['path.bake','path.bakeCancel','path.bakeClear','path.recordPass','path.recordStop','path.recordClear'].includes(op)) || op === 'tail.setMotion' || op === 'output.autoMakeup' || (op === 'output.set' && !tx) || op === 'source.setDirectivity' || op === 'source.setInstrument' || op === 'source.remove' || (op === 'source.setConfig' && !tx)) historyEvent();
+        if (/^(zone|history|transaction)\./.test(op) && (state.document?.zones?.length || lastModSig.includes('occupancy'))) emitModIfChanged();
         seen.set(message.requestId, result); if (seen.size > 512) seen.delete(seen.keys().next().value); return result;
       } catch (error) {
         const result = emit('error', { requestId: message.requestId, code: error.code || 'invalid', message: error.message, currentRevision: state.revision, ...(error.code === 'staleRevision' ? { resync: true } : {}) }, message.requestId);
@@ -416,7 +499,7 @@ export async function createMockBridge(options = {}) {
       const error = clone(data.get('error-resync').messages.find(m => m.kind === 'error').payload); error.currentRevision = state.revision;
       emit('error', error, error.requestId); event({ event: 'resync.required', reason: 'staleRevision', currentRevision: state.revision }); snapshot();
     },
-    automate(id, value) { const d = paramDesc(id); state.parameters.values[id] = canonical(d, value); updateEffective(state); relay(); if (state.document?.modulation?.routes?.length && (/^(?:s\d+|l)(?:x|y|z|az|path)$/.test(id) || id === 'mode')) { emitModIfChanged(); scheduleModTick(); } if (['size', 'absorption', 'decayLow', 'decayMid', 'decayHigh', 'mode'].includes(id)) scheduleTail(15); },
+    automate(id, value) { const d = paramDesc(id); state.parameters.values[id] = canonical(d, value); updateEffective(state); relay(); if ((state.document?.modulation?.routes?.length || state.document?.zones?.length) && (/^(?:s\d+|l)(?:x|y|z|az|path)$/.test(id) || id === 'mode')) { emitModIfChanged(); scheduleModTick(); } if (['size', 'absorption', 'decayLow', 'decayMid', 'decayHigh', 'mode'].includes(id)) scheduleTail(15); },
     emitSyntheticTail() {
       const multipliers = state.parameters.effective.decay;
       const baseCurve = [2.8, 2.6, 2.2, 1.9, 1.6, 1.2, 0.9];
@@ -436,10 +519,18 @@ export async function createMockBridge(options = {}) {
         raysUsed: state.document.tail.baseRays, rayLimit: state.document.tail.baseRays * 4, baseRays: state.document.tail.baseRays, shared: state.document.sources.length > 8, adaptive: state.document.tail.adaptive, needsMoreRays: false });
     },
     setCpuStatus(cpu) {
-      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: false, pathBake:{...bakeStatus,...bakeFields(bakeInput())},...(cpu ? { cpu } : {}),...modFields() });
+      statusEvent(cpu ? { cpu } : {});
     },
     setRebuilding(rebuilding) {
-      event({ event: 'status.load', state: state.load.state, status: state.load.status, sceneSerial: state.sceneSerial || '0', loadSerial: state.loadSerial || '0', tailCurrent: state.load.tailCurrent, rebuilding: !!rebuilding, pathBake:{...bakeStatus,...bakeFields(bakeInput())},...modFields() });
+      statusEvent({ rebuilding: !!rebuilding && !state.document.motionTail });
+    },
+    setTransport(patch) {
+      const sr = Number.isFinite(patch?.sampleRate) && patch.sampleRate > 0 ? patch.sampleRate : (state?.host?.sampleRate || mockTransport.sampleRate || 48000);
+      const playing = typeof patch?.playing === 'boolean' ? patch.playing : mockTransport.playing;
+      const samplePos = Number.isFinite(patch?.samplePos) ? Math.round(patch.samplePos) : (Number.isFinite(patch?.timeSec) ? Math.round(patch.timeSec * sr) : mockTransport.samplePos);
+      const timeSec = Number.isFinite(patch?.timeSec) ? patch.timeSec : samplePos / sr;
+      mockTransport = { playing, samplePos, timeSec, sampleRate: sr };
+      statusEvent({ transport: { ...mockTransport } });
     },
     setBakeStatus(value){
       const {bakeSource,bakeSourceGroup,recordingNote,...status}=value;

@@ -1669,6 +1669,401 @@ static void testG4ModulationCommands(Rig& r) {
     r.reset("G4 end");
 }
 
+static void testMotionCommand(Rig& r) {
+    const auto serial = r.p.getSceneSerial();
+    check(r.send(R"({"op":"tail.setMotion","enabled":true})").ok && r.p.motionTailEnabled(),
+          "MO3b Motion command enables the document switch");
+    r.p.setTailSettings({16000, true});
+    check(r.session().undo().ok && !r.p.motionTailEnabled()
+          && r.p.getTailSettings().rays == 16000 && r.p.getSceneSerial() == serial + 1,
+          "MO3b scoped Motion undo preserves an independent tail quality edit");
+    check(r.session().redo().ok && r.p.motionTailEnabled(), "MO3b Motion redo restores On");
+    r.validateCommands = false;
+    check(!r.send(R"({"op":"tail.setMotion","enabled":1})").ok && r.p.motionTailEnabled(),
+          "MO3b Motion rejects non-boolean input");
+    r.validateCommands = true;
+    r.session().undo();
+}
+
+static void testV04aPathEndlessAndShapes(Rig& r) {
+    std::printf("V04a: path.set / path.setFlags endless & endlessPeriodS commands, validation, and 1-step shape undo/redo\n");
+    r.reset("V04a start");
+    r.validateCommands = false;
+    check(!r.send(R"({"op":"path.setFlags","object":0,"endless":true})").ok,
+          "V04a rejects endless=true on empty path");
+    check(!r.send(R"({"op":"path.setFlags","object":0,"endlessPeriodS":5.0})").ok,
+          "V04a rejects non-default endlessPeriodS on empty path");
+    r.validateCommands = true;
+
+    // Generate a 16-node circle via path.set in one undoable command
+    check(r.send(R"({"op":"path.set","object":0,"points":[[5,4,1.5],[4.8478,4.7654,1.5],[4.4142,5.4142,1.5],[3.7654,5.8478,1.5],[3,6,1.5],[2.2346,5.8478,1.5],[1.5858,5.4142,1.5],[1.1522,4.7654,1.5],[1,4,1.5],[1.1522,3.2346,1.5],[1.5858,2.5858,1.5],[2.2346,2.1522,1.5],[3,2,1.5],[3.7654,2.1522,1.5],[4.4142,2.5858,1.5],[4.8478,3.2346,1.5]],"enabled":true,"closed":true,"smooth":true,"endless":true,"endlessPeriodS":6.0})").ok,
+          "V04a path.set applies closed circle shape with endless=true and endlessPeriodS=6.0 in one command");
+    {
+        const auto p0 = r.p.getMovementPath(0);
+        check(p0.points.size() == 16 && p0.closed && p0.smooth && p0.endless && std::abs(p0.endlessPeriodS - 6.0) < 1e-9,
+              "V04a processor stores 16-point closed smooth shape with endless=true and endlessPeriodS=6.0");
+    }
+
+    // Re-applying another shape (4-point Square) replaces the shape in ONE undoable step while preserving endless
+    check(r.send(R"({"op":"path.set","object":0,"points":[[4.5,5.5,1.5],[1.5,5.5,1.5],[1.5,2.5,1.5],[4.5,2.5,1.5]],"enabled":true,"closed":true,"smooth":false})").ok,
+          "V04a re-applying Square replaces shape in one command");
+    {
+        const auto pSq = r.p.getMovementPath(0);
+        check(pSq.points.size() == 4 && pSq.closed && !pSq.smooth && pSq.endless && std::abs(pSq.endlessPeriodS - 6.0) < 1e-9,
+              "V04a replaced Square has 4 points, smooth=false, and preserves endless=true");
+    }
+    check(r.session().undo().ok && r.p.getMovementPath(0).points.size() == 16 && r.p.getMovementPath(0).smooth,
+          "V04a single undo restores previous 16-point Circle shape");
+    check(r.session().redo().ok && r.p.getMovementPath(0).points.size() == 4 && !r.p.getMovementPath(0).smooth,
+          "V04a single redo restores 4-point Square shape");
+
+    // Toggle endless and endlessPeriodS via path.setFlags
+    check(r.send(R"({"op":"path.setFlags","object":0,"endless":false,"endlessPeriodS":12.5})").ok,
+          "V04a path.setFlags updates endless=false and endlessPeriodS=12.5");
+    check(!r.p.getMovementPath(0).endless && std::abs(r.p.getMovementPath(0).endlessPeriodS - 12.5) < 1e-9,
+          "V04a processor reflects endless=false and endlessPeriodS=12.5");
+
+    r.validateCommands = false;
+    check(!r.send(R"({"op":"path.setFlags","object":0,"endlessPeriodS":0.1})").ok,
+          "V04a path.setFlags rejects endlessPeriodS < 0.25");
+    check(!r.send(R"({"op":"path.setFlags","object":0,"endlessPeriodS":4000})").ok,
+          "V04a path.setFlags rejects endlessPeriodS > 3600");
+    check(!r.send(R"({"op":"path.setFlags","object":0,"endless":"yes"})").ok,
+          "V04a path.setFlags rejects non-boolean endless");
+    r.validateCommands = true;
+
+    check(r.send(R"({"op":"path.clear","object":0})").ok
+          && !r.p.getMovementPath(0).endless
+          && r.p.getMovementPath(0).endlessPeriodS == verbp::kDefaultEndlessPeriodS,
+          "V04a path.clear resets endless and endlessPeriodS to defaults");
+    while (r.session().canUndo()) r.session().undo();
+    r.reset("V04a end");
+}
+
+static void testV04bPathWanderCommands(Rig& r) {
+    std::printf("  [V04b: path.setWander, path.set/setFlags wander, coalescing, undo/redo, validation]\n");
+    r.reset("V04b start");
+    r.validateCommands = true;
+
+    // 1. Apply path.set with wander object in one undoable command
+    check(r.send(R"({"op":"path.set","object":0,"points":[[1.5,2,1.5],[4.5,2,1.5],[4.5,6,1.5],[1.5,6,1.5]],"enabled":true,"closed":true,"smooth":true,"wander":{"enabled":true,"ampHorizM":0.6,"ampVertM":0.3,"rateHz":1.2,"smoothness":0.75,"pinEnds":false,"horizOnly":false,"seed":101}})").ok,
+          "V04b path.set applies closed path with wander in one command");
+    {
+        const auto w = r.p.getMovementPath(0).wander;
+        check(w.enabled && std::abs(w.ampHorizM - 0.6) < 1e-9 && std::abs(w.ampVertM - 0.3) < 1e-9
+              && std::abs(w.rateHz - 1.2) < 1e-9 && std::abs(w.smoothness - 0.75) < 1e-9
+              && !w.pinEnds && !w.horizOnly && w.seed == 101,
+              "V04b processor stores PathWander from path.set");
+    }
+
+    // 2. path.setWander updates wander and coalesces inside a transaction (one undo step per gesture)
+    const int depthBeforeTx = r.session().undoDepth();
+    check(r.send(R"({"op":"transaction.begin","label":"Edit path wander horizontal amplitude"})", nullptr, "tx-v04b").ok, "V04b begin wander slider transaction");
+    check(r.send(R"({"op":"path.setWander","object":0,"wander":{"enabled":true,"ampHorizM":0.8,"ampVertM":0.3,"rateHz":1.2,"smoothness":0.75,"pinEnds":false,"horizOnly":false,"seed":101}})", nullptr, "tx-v04b").ok,
+          "V04b path.setWander step 1");
+    check(r.send(R"({"op":"path.setWander","object":0,"wander":{"enabled":true,"ampHorizM":1.25,"ampVertM":0.4,"rateHz":1.5,"smoothness":0.9,"pinEnds":true,"horizOnly":true,"seed":202}})", nullptr, "tx-v04b").ok,
+          "V04b path.setWander step 2");
+    check(r.send(R"({"op":"transaction.commit"})", nullptr, "tx-v04b").ok, "V04b end wander slider transaction");
+    check(r.session().undoDepth() == depthBeforeTx + 1, "V04b wander gesture records a single undo step");
+    {
+        const auto w = r.p.getMovementPath(0).wander;
+        check(w.enabled && std::abs(w.ampHorizM - 1.25) < 1e-9 && std::abs(w.ampVertM - 0.4) < 1e-9
+              && std::abs(w.rateHz - 1.5) < 1e-9 && std::abs(w.smoothness - 0.9) < 1e-9
+              && w.pinEnds && w.horizOnly && w.seed == 202,
+              "V04b processor reflects committed path.setWander values");
+    }
+    check(r.session().undo().ok && std::abs(r.p.getMovementPath(0).wander.ampHorizM - 0.6) < 1e-9 && r.p.getMovementPath(0).wander.seed == 101,
+          "V04b single undo reverts path.setWander gesture");
+    check(r.session().redo().ok && std::abs(r.p.getMovementPath(0).wander.ampHorizM - 1.25) < 1e-9 && r.p.getMovementPath(0).wander.seed == 202,
+          "V04b single redo reapplies path.setWander gesture");
+
+    // 3. path.setFlags with optional wander updates wander alongside flags
+    check(r.send(R"({"op":"path.setFlags","object":0,"closed":false,"wander":{"enabled":true,"ampHorizM":0.45,"ampVertM":0.2,"rateHz":0.5,"smoothness":0.8,"pinEnds":true,"horizOnly":false,"seed":333}})").ok,
+          "V04b path.setFlags accepts wander");
+    check(!r.p.getMovementPath(0).closed && std::abs(r.p.getMovementPath(0).wander.ampHorizM - 0.45) < 1e-9 && r.p.getMovementPath(0).wander.seed == 333,
+          "V04b processor reflects path.setFlags wander update");
+
+    // 4. Rejections for out-of-range or invalid wander fields and empty path
+    r.validateCommands = false;
+    check(!r.send(R"({"op":"path.setWander","object":0,"wander":{"ampHorizM":-0.1}})").ok,
+          "V04b path.setWander rejects negative ampHorizM");
+    check(!r.send(R"({"op":"path.setWander","object":0,"wander":{"ampHorizM":25.0}})").ok,
+          "V04b path.setWander rejects ampHorizM > 20");
+    check(!r.send(R"({"op":"path.setWander","object":0,"wander":{"ampVertM":12.0}})").ok,
+          "V04b path.setWander rejects ampVertM > 10");
+    check(!r.send(R"({"op":"path.setWander","object":0,"wander":{"rateHz":0.01}})").ok,
+          "V04b path.setWander rejects rateHz < 0.05");
+    check(!r.send(R"({"op":"path.setWander","object":0,"wander":{"rateHz":9.0}})").ok,
+          "V04b path.setWander rejects rateHz > 8");
+    check(!r.send(R"({"op":"path.setWander","object":0,"wander":{"smoothness":1.5}})").ok,
+          "V04b path.setWander rejects smoothness > 1");
+    check(!r.send(R"({"op":"path.setWander","object":0,"wander":{"seed":0}})").ok,
+          "V04b path.setWander rejects seed < 1");
+    check(!r.send(R"({"op":"path.setWander","object":0,"wander":{"seed":1000000}})").ok,
+          "V04b path.setWander rejects seed > 999999");
+    check(!r.send(R"({"op":"path.setWander","object":32,"wander":{"enabled":true,"ampHorizM":0.5}})").ok,
+          "V04b path.setWander rejects non-default wander on object with fewer than 2 path points");
+    r.validateCommands = true;
+
+    check(r.send(R"({"op":"path.clear","object":0})").ok && r.p.getMovementPath(0).wander.isDefault(),
+          "V04b path.clear resets wander to defaults");
+    while (r.session().canUndo()) r.session().undo();
+    r.reset("V04b end");
+}
+
+static void testV04cZoneCommands(Rig& r) {
+    std::printf("  [V04c: zone.create / zone.set / zone.delete / zone.move, ids, room clamp, validation, gesture = 1 undo step, routes with zoneId]\n");
+    r.reset("V04c start");
+    r.validateCommands = true;
+    const int d0 = r.session().undoDepth();
+    check(r.send(R"({"op":"zone.create","kind":"box","points":[[1,1],[2.5,3]]})").ok && r.p.getTriggerZones().size() == 1,
+          "V04c zone.create box");
+    {
+        const auto z = r.p.getTriggerZones()[0];
+        const double ceil = r.p.getDisplayScene().height;
+        check(z.id == 1 && z.name == "Zone 1" && !z.polygon && z.zMin == 0.0 && std::abs(z.zMax - ceil) < 1e-9 && std::abs(z.hysteresis - 0.05) < 1e-12 && z.edge == 0.0 && z.enabled && z.visible,
+              "V04c new zone: id 1, name, floor..ceiling, hysteresis 0.05 m, hard edge");
+        check(r.session().undoLabel() == "Add zone" && r.session().undoDepth() == d0 + 1, "V04c zone.create is one undo step labelled 'Add zone'");
+    }
+    check(r.send(R"({"op":"zone.create","kind":"polygon","name":"Tile","points":[[3,1],[5,1],[5,3],[4,2],[3,3]],"edge":0.4,"hysteresis":0.1,"colour":"#22C55E","zMax":99})").ok,
+          "V04c zone.create concave polygon with soft edge and colour");
+    {
+        const auto zs = r.p.getTriggerZones();
+        const double ceil = r.p.getDisplayScene().height;
+        check(zs.size() == 2 && zs[1].id == 2 && zs[1].polygon && zs[1].points.size() == 5 && zs[1].colour == "#22c55e" && std::abs(zs[1].zMax - ceil) < 1e-9 && std::abs(zs[1].edge - 0.4) < 1e-12,
+              "V04c polygon zone stored with id 2, colour normalised, zMax clamped to the ceiling");
+    }
+    check(r.send(R"({"op":"zone.create","kind":"box","points":[[-50,-50],[1,1]]})").ok, "V04c zone.create box partly outside the room");
+    {
+        const auto z = r.p.getTriggerZones().back();
+        check(z.id == 3 && z.points[0].first >= -1e-9 && z.points[0].second >= -1e-9, "V04c zone points are clamped to the room bounds");
+    }
+    r.validateCommands = false;
+    const auto selfX = r.send(R"({"op":"zone.create","kind":"polygon","points":[[0.5,0.5],[2,2],[2,0.5],[0.5,2]]})");
+    check(!selfX.ok && selfX.message.find("crosses itself") != std::string::npos,
+          "V04c self-intersecting polygon rejected with a clear message");
+    check(!r.send(R"({"op":"zone.create","kind":"box","points":[[1,1],[1,3]]})").ok, "V04c degenerate box rejected");
+    check(!r.send(R"({"op":"zone.create","kind":"polygon","points":[[1,1],[2,1]]})").ok, "V04c polygon with 2 vertices rejected");
+    check(!r.send(R"({"op":"zone.set","id":99,"name":"x"})").ok, "V04c zone.set on a missing id rejected");
+    check(!r.send(R"({"op":"zone.set","id":1,"edge":11})").ok && !r.send(R"({"op":"zone.set","id":1,"hysteresis":-1})").ok && !r.send(R"({"op":"zone.set","id":1,"colour":"red"})").ok,
+          "V04c out-of-range edge / hysteresis / colour rejected");
+    r.validateCommands = true;
+    // Drag gesture: 40 zone.set steps inside a transaction -> 1 undo step; Esc (cancel) -> 0 steps, geometry restored.
+    const auto before = r.p.getTriggerZones();
+    const int dBefore = r.session().undoDepth();
+    check(r.send(R"({"op":"transaction.begin","label":"Move zone vertex"})", nullptr, "tx-v04c").ok, "V04c begin vertex drag");
+    bool allOk = true;
+    for (int k = 1; k <= 40; ++k) {
+        const std::string x = juce::String(2.5 + 0.02 * k, 3).toStdString();
+        allOk &= r.send(R"({"op":"zone.set","id":1,"points":[[1,1],[)" + x + R"(,3]]})", nullptr, "tx-v04c").ok;
+        allOk &= std::abs(r.p.getTriggerZones()[0].points[1].first - (2.5 + 0.02 * k)) < 1e-6;
+    }
+    check(allOk, "V04c 40 live zone.set steps apply immediately inside the gesture (live preview)");
+    check(r.send(R"({"op":"transaction.commit"})", nullptr, "tx-v04c").ok && r.session().undoDepth() == dBefore + 1 && r.session().undoLabel() == "Move zone vertex",
+          "V04c zone vertex drag = 1 undo step with the gesture label");
+    check(r.session().undo().ok && r.p.getTriggerZones() == before, "V04c one undo restores the zone before the drag");
+    check(r.session().redo().ok && std::abs(r.p.getTriggerZones()[0].points[1].first - 3.3) < 1e-6, "V04c redo re-applies the drag");
+    const auto mid = r.p.getTriggerZones();
+    const int dMid = r.session().undoDepth();
+    check(r.send(R"({"op":"transaction.begin","label":"Move zone"})", nullptr, "tx-v04c2").ok
+          && r.send(R"({"op":"zone.set","id":2,"points":[[3.5,1.5],[5.5,1.5],[5.5,3.5],[4.5,2.5],[3.5,3.5]]})", nullptr, "tx-v04c2").ok
+          && r.send(R"({"op":"transaction.cancel"})", nullptr, "tx-v04c2").ok,
+          "V04c zone move gesture cancelled (Esc)");
+    check(r.p.getTriggerZones() == mid && r.session().undoDepth() == dMid, "V04c cancelled gesture restores the zone and adds no undo step");
+    // A single zone.set outside a gesture gets the descriptor label.
+    check(r.send(R"({"op":"zone.set","id":1,"points":[[1,1],[3,3]]})").ok && r.session().undoLabel() == "Edit zone shape", "V04c zone.set points -> 'Edit zone shape'");
+    // Routes referencing a zone; zoneId required for In zone / Distance to zone.
+    check(r.send(R"({"op":"modulation.addRoute","route":{"enabled":true,"object":0,"driver":"inZone","zoneId":2,"curve":{"inputRange":[0,1],"outputRange":[0,1],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"targetObject":-1,"target":"none","hostOut":1,"attackMs":0,"releaseMs":0}})").ok
+          && r.p.getModulationRoutes().back().zoneId == 2 && r.p.getModulationRoutes().back().driver == verbp::ModDriver::InZone,
+          "V04c modulation route with driver inZone + zoneId");
+    check(r.send(R"({"op":"modulation.addRoute","route":{"enabled":true,"object":32,"driver":"zoneIndex","curve":{"inputRange":[0,3],"outputRange":[0,1],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"targetObject":-1,"target":"none","hostOut":2}})").ok,
+          "V04c listener route with driver zoneIndex");
+    check(r.send(R"({"op":"modulation.addRoute","route":{"enabled":true,"object":0,"driver":"distanceToZone","zoneId":1,"curve":{"inputRange":[-1,3],"outputRange":[1,0],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"targetObject":-1,"target":"none","hostOut":3}})").ok,
+          "V04c route with driver distanceToZone");
+    r.validateCommands = false;
+    check(!r.send(R"({"op":"modulation.addRoute","route":{"enabled":true,"object":0,"driver":"inZone","curve":{"inputRange":[0,1],"outputRange":[0,1],"nodes":[{"x":0,"y":0},{"x":1,"y":1}]},"targetObject":-1,"target":"none","hostOut":1}})").ok,
+          "V04c inZone route without zoneId rejected");
+    r.validateCommands = true;
+    check(r.send(R"({"op":"zone.move","id":3,"index":0})").ok && r.p.getTriggerZones()[0].id == 3 && r.session().undoLabel() == "Reorder zones", "V04c zone.move reorders the list");
+    check(r.send(R"({"op":"zone.set","id":2,"name":"Tile floor","enabled":false,"visible":false})").ok && !r.p.getTriggerZones()[2].enabled && r.p.getTriggerZones()[2].name == "Tile floor" && r.session().undoLabel() == "Edit zone",
+          "V04c zone.set name / enabled / visible ('Edit zone')");
+    check(r.send(R"({"op":"zone.delete","id":2})").ok && r.p.getTriggerZones().size() == 2 && r.p.getModulationRoutes().size() == 3 && r.session().undoLabel() == "Delete zone",
+          "V04c zone.delete keeps the routes (they read 'outside' until re-pointed)");
+    check(r.session().undo().ok && r.p.getTriggerZones().size() == 3 && r.p.getTriggerZones()[2].id == 2, "V04c undo of delete restores the zone with its id and position");
+    check(r.send(R"({"op":"zone.create","kind":"box","points":[[2,2],[3,2.5]]})").ok && r.p.getTriggerZones().back().id == 4, "V04c ids are stable (max + 1)");
+    r.validateCommands = false;
+    int created = (int)r.p.getTriggerZones().size();
+    while (created < 16) { r.send(R"({"op":"zone.create","kind":"box","points":[[0.5,0.5],[1.5,1.5]]})"); ++created; }
+    const auto over = r.send(R"({"op":"zone.create","kind":"box","points":[[0.5,0.5],[1.5,1.5]]})");
+    check(r.p.getTriggerZones().size() == 16 && !over.ok && over.code == "budgetExceeded", "V04c at most 16 zones (budgetExceeded)");
+    r.validateCommands = true;
+    while (r.session().canUndo()) r.session().undo();
+    check(r.p.getTriggerZones().empty() && r.p.getModulationRoutes().empty(), "V04c undo everything returns to no zones and no routes");
+    r.reset("V04c end");
+}
+
+static void testV04a2LiveShapeAndSpiralAndFigure8(Rig& r) {
+    std::printf("  [V04a-2: 64-step live shape parameter transaction coalescing, Esc cancel, Spiral start/end Z, Figure-8 default centre]\n");
+    r.reset("V04a-2 start");
+    r.validateCommands = true;
+    const auto sc = r.p.getDisplayScene();
+
+    // 1. Set an initial 4-point Square path on source 0
+    verbp::PathShapeParams sq;
+    sq.kind = verbp::PathShapeKind::Square;
+    sq.cx = 2.5; sq.cy = 2.0; sq.z = 1.5; sq.radiusX = 1.0;
+    const auto sqPath = verbp::generatePathShapeForRoom(sq, &sc, true).path;
+    auto sendShape = [&](const verbp::MovementPath& mp, const char* txId = nullptr) {
+        juce::String ptsJson = "[";
+        for (size_t i = 0; i < mp.points.size(); ++i) {
+            if (i > 0) ptsJson += ",";
+            ptsJson += "[" + juce::String(mp.points[i][0], 4) + ","
+                           + juce::String(mp.points[i][1], 4) + ","
+                           + juce::String(mp.points[i][2], 4) + "]";
+        }
+        ptsJson += "]";
+        juce::String cmd = R"({"op":"path.set","object":0,"points":)" + ptsJson
+            + R"(,"enabled":true,"closed":true,"smooth":)" + (mp.smooth ? "true" : "false") + "}";
+        return r.send(cmd.toStdString(), nullptr, txId);
+    };
+    check(sendShape(sqPath).ok && r.p.getMovementPath(0).points.size() == 4,
+          "V04a-2 initial Square shape applied (1 undo step)");
+    const auto initialPts = r.p.getMovementPath(0).points;
+    const int depthBeforeLiveDrag = r.session().undoDepth();
+
+    // 2. Simulate a 64-step live parameter drag (Circle radius from 0.6 m to 1.8 m) inside one transaction
+    check(r.send(R"({"op":"transaction.begin","label":"Edit shape radius, m"})", nullptr, "tx-v04a2-live").ok,
+          "V04a-2 begin 64-step live shape parameter transaction");
+    bool allStepsUpdatedLive = true;
+    verbp::MovementPath lastStepPath;
+    for (int step = 0; step < 64; ++step) {
+        verbp::PathShapeParams sp;
+        sp.kind = verbp::PathShapeKind::Circle;
+        sp.cx = 2.5; sp.cy = 2.0; sp.z = 1.5;
+        sp.radiusX = 0.6 + (1.2 * (double)step / 63.0);
+        sp.nodes = 16;
+        lastStepPath = verbp::generatePathShapeForRoom(sp, &sc, true).path;
+        const auto prevStepPts = r.p.getMovementPath(0).points;
+        const auto res = sendShape(lastStepPath, "tx-v04a2-live");
+        const auto curStepPts = r.p.getMovementPath(0).points;
+        if (!res.ok || curStepPts.size() != 16 || curStepPts == prevStepPts) {
+            allStepsUpdatedLive = false;
+            break;
+        }
+    }
+    check(allStepsUpdatedLive, "V04a-2 path points update live on every one of the 64 intermediate parameter steps before confirm");
+    check(r.send(R"({"op":"transaction.commit"})", nullptr, "tx-v04a2-live").ok,
+          "V04a-2 commit 64-step live shape parameter transaction");
+    check(r.session().undoDepth() == depthBeforeLiveDrag + 1,
+          "V04a-2 64-step live parameter drag produces exactly 1 undo step");
+
+    // Verify final points are bit-exact equal to a single confirmed update at radius = 1.8 m
+    const auto committedPts = r.p.getMovementPath(0).points;
+    check(r.session().undo().ok && r.p.getMovementPath(0).points == initialPts,
+          "V04a-2 single undo after 64-step drag restores original Square path");
+    check(r.session().redo().ok && r.p.getMovementPath(0).points == committedPts,
+          "V04a-2 single redo after 64-step drag restores final Circle path");
+
+    // Compare against single-shot confirmed update
+    r.session().undo();
+    check(sendShape(lastStepPath).ok && r.p.getMovementPath(0).points == committedPts,
+          "V04a-2 final points after 64-step live drag are bit-exact equal to a single confirmed update");
+
+    // 3. Simulate a 60-step live parameter drag cancelled by Escape (transaction.cancel)
+    const auto beforeCancelPts = r.p.getMovementPath(0).points;
+    const int depthBeforeCancel = r.session().undoDepth();
+    check(r.send(R"({"op":"transaction.begin","label":"Edit shape radius, m"})", nullptr, "tx-v04a2-esc").ok,
+          "V04a-2 begin live drag to cancel with Escape");
+    for (int step = 0; step < 60; ++step) {
+        verbp::PathShapeParams sp;
+        sp.kind = verbp::PathShapeKind::Star;
+        sp.cx = 2.5; sp.cy = 2.0; sp.z = 1.5;
+        sp.radiusX = 0.7 + (1.0 * (double)step / 59.0);
+        sp.radiusY = 0.35 * sp.radiusX;
+        sendShape(verbp::generatePathShapeForRoom(sp, &sc, true).path, "tx-v04a2-esc");
+    }
+    check(r.p.getMovementPath(0).points.size() == 10 && r.p.getMovementPath(0).points != beforeCancelPts,
+          "V04a-2 live drag modified path to 10-point Star before Escape");
+    check(r.send(R"({"op":"transaction.cancel"})", nullptr, "tx-v04a2-esc").ok,
+          "V04a-2 Escape cancels live shape parameter transaction");
+    check(r.p.getMovementPath(0).points == beforeCancelPts && r.session().undoDepth() == depthBeforeCancel,
+          "V04a-2 Escape restores original path bit-identically and adds 0 undo steps");
+
+    while (r.session().canUndo()) r.session().undo();
+    r.reset("V04a-2 end");
+}
+
+static void testV04dLinkCommands(Rig& r) {
+    std::printf("  [V04d: path.link / path.setFollow / path.unlink, rig of 1 target + 3 followers, no chains, policies, gesture = 1 undo step, schema]\n");
+    r.reset("V04d start");
+    r.validateCommands = true;
+    while ((int)r.p.getSources().size() < 4) check(r.send(R"({"op":"source.add"})").ok, "V04d add a source for the rig");
+    check(r.send(R"({"op":"path.set","object":0,"points":[[1.5,2,1.2],[4.5,2,1.2],[4.5,6,1.2],[1.5,6,1.2]],"enabled":true,"closed":true,"smooth":true})").ok, "V04d target path (closed, 4 points)");
+    const int d0 = r.session().undoDepth();
+    check(r.send(R"({"op":"path.link","objects":[1,2,3],"target":0})").ok && r.session().undoDepth() == d0 + 1 && r.session().undoLabel() == "Link 3 sources to path",
+          "V04d multi-select path.link = one undo step 'Link 3 sources to path'");
+    bool linked = true;
+    for (int o = 1; o <= 3; ++o) { const auto& fp = r.p.getMovementPath(o); linked &= fp.follow.target == 0 && fp.points.empty() && fp.follow.followWander; }
+    check(linked, "V04d three followers: target 0, no own points, Follow wander ON by default");
+    check(r.send(R"({"op":"path.setFollow","object":1,"offset":[0,0,0.45]})").ok && r.session().undoLabel() == "Edit link offset"
+          && std::abs(r.p.getMovementPath(1).follow.offset[2] - 0.45) < 1e-9, "V04d path.setFollow offset ('Edit link offset')");
+    // Drag gesture: 30 live offset steps = 1 undo step; Esc restores.
+    const int d1 = r.session().undoDepth();
+    bool live = r.send(R"({"op":"transaction.begin","label":"Edit link offset"})", nullptr, "tx-v04d").ok;
+    for (int k = 1; k <= 30; ++k) {
+        const std::string v = juce::String(0.01 * k, 2).toStdString();
+        live &= r.send(R"({"op":"path.setFollow","object":2,"offset":[0,)" + v + R"(,0.9]})", nullptr, "tx-v04d").ok;
+        live &= std::abs(r.p.getMovementPath(2).follow.offset[1] - 0.01 * k) < 1e-9;
+    }
+    check(live, "V04d 30 live offset steps apply immediately inside the gesture");
+    check(r.send(R"({"op":"transaction.commit"})", nullptr, "tx-v04d").ok && r.session().undoDepth() == d1 + 1 && r.session().undoLabel() == "Edit link offset",
+          "V04d offset drag = 1 undo step");
+    const auto mid = r.p.getMovementPath(3);
+    const int d2 = r.session().undoDepth();
+    check(r.send(R"({"op":"transaction.begin","label":"Edit link offset"})", nullptr, "tx-v04d2").ok
+          && r.send(R"({"op":"path.setFollow","object":3,"offset":[0.3,-0.2,-0.9]})", nullptr, "tx-v04d2").ok
+          && r.send(R"({"op":"transaction.cancel"})", nullptr, "tx-v04d2").ok, "V04d offset gesture cancelled (Esc)");
+    check(r.p.getMovementPath(3) == mid && r.session().undoDepth() == d2, "V04d cancelled gesture restores the offset and adds no undo step");
+    check(r.send(R"({"op":"path.setFollow","object":3,"followWander":false})").ok && !r.p.getMovementPath(3).follow.followWander && r.session().undoLabel() == "Follow wander",
+          "V04d path.setFollow followWander ('Follow wander')");
+    // No chains / cycles / self links; locked controls on a follower.
+    r.validateCommands = false;
+    const auto chain = r.send(R"({"op":"path.link","object":0,"target":1})");
+    check(!chain.ok && chain.message.find("no chains") != std::string::npos, "V04d a follower cannot be a target (no chains)");
+    const auto targetFollows = r.send(R"({"op":"path.link","object":0,"target":0})");
+    check(!targetFollows.ok, "V04d self link rejected");
+    check(!r.send(R"({"op":"path.setFollow","object":1,"offset":[0,0,60]})").ok, "V04d offset beyond +/-50 m rejected");
+    check(!r.send(R"({"op":"path.setFollow","object":0,"offset":[0,0,1]})").ok, "V04d path.setFollow on a non-follower rejected");
+    const auto locked = r.send(R"({"op":"path.setFlags","object":1,"laps":3})");
+    check(!locked.ok && locked.message.find("unlink first") != std::string::npos, "V04d Laps locked on a follower (message names the target)");
+    check(!r.send(R"({"op":"path.setFlags","object":1,"endless":true})").ok, "V04d Endless locked on a follower");
+    { const auto g = r.send(R"({"op":"path.setFlags","object":1,"group":0})"); check(!g.ok && g.message.find("Coupling") != std::string::npos && r.p.getMovementPath(1).group == -1, "V04d Coupling refused on a follower"); }
+    r.validateCommands = true;
+    check(r.send(R"({"op":"path.setFlags","object":1,"orient":true})").ok && r.p.getMovementPath(1).orient, "V04d orientation stays editable on a follower");
+    // Bridge document carries the follow record (schema-validated by the snapshot test in WebBridgeTest).
+    // Unlink keeps the motion as an own path.
+    check(r.send(R"({"op":"path.unlink","object":2})").ok && r.session().undoLabel() == "Unlink path"
+          && !r.p.getMovementPath(2).follow.active() && r.p.getMovementPath(2).points.size() == 64,
+          "V04d path.unlink: own path of 64 points ('Unlink path')");
+    check(r.session().undo().ok && r.p.getMovementPath(2).follow.target == 0, "V04d undo of unlink restores the link");
+    // Delete-target policy: clearing the target detaches all followers in the same undo step.
+    const int d3 = r.session().undoDepth();
+    check(r.send(R"({"op":"path.clear","object":0})").ok && r.session().undoDepth() == d3 + 1, "V04d path.clear of the target is one undo step");
+    bool detached = true;
+    for (int o = 1; o <= 3; ++o) detached &= !r.p.getMovementPath(o).follow.active() && r.p.getMovementPath(o).points.size() == 64;
+    check(detached, "V04d clearing the target converts its followers to own paths");
+    check(r.session().undo().ok && r.p.getMovementPath(1).follow.target == 0 && r.p.getMovementPath(3).follow.target == 0 && r.p.getMovementPath(0).points.size() == 4,
+          "V04d one undo restores the target and all links");
+    // Removing a source before the rig remaps the target index.
+    check(r.send(R"({"op":"source.remove","index":0})").ok, "V04d remove the target source");
+    bool afterRemove = true;
+    for (int o = 0; o <= 2; ++o) afterRemove &= !r.p.getMovementPath(o).follow.active() && r.p.getMovementPath(o).points.size() == 64;
+    check(afterRemove, "V04d source.remove of the target: followers keep their motion as own paths");
+    check(r.session().undo().ok && r.p.getMovementPath(1).follow.target == 0, "V04d undo of source.remove restores the rig");
+    while (r.session().canUndo()) r.session().undo();
+    r.reset("V04d end");
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     juce::ScopedJuceInitialiser_GUI init;
@@ -1715,6 +2110,12 @@ int main() {
         timed("G1 azimuth keys", testG1AzimuthKeys);
         timed("G3 automation range", testG3AutomationRange);
         timed("G4 modulation core", testG4ModulationCommands);
+        timed("MO3b Motion", testMotionCommand);
+        timed("V04a path shapes & endless", testV04aPathEndlessAndShapes);
+        timed("V04b path wander", testV04bPathWanderCommands);
+        timed("V04a-2 live shape & spiral & figure8", testV04a2LiveShapeAndSpiralAndFigure8);
+        timed("V04c zones", testV04cZoneCommands);
+        timed("V04d link to path", testV04dLinkCommands);
     } catch (const std::exception& e) { std::printf("  [FAIL] unexpected exception: %s\n", e.what()); ++fails; }
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("\neditor_commands: %d PASS, %d FAIL, %.1f s\n", passes, fails, sec);

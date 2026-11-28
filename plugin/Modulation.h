@@ -8,6 +8,9 @@
 #include <string_view>
 #include <vector>
 
+#include "TriggerZones.h"
+#include "ModMidiOut.h"
+
 namespace verbp {
 
 inline constexpr int kModMaxSources = 32;
@@ -17,6 +20,9 @@ inline constexpr int kMaxModRoutes = 64;
 inline constexpr int kMinCurveNodes = 2;
 inline constexpr int kMaxCurveNodes = 8;
 inline constexpr int kMaxWallSnapshotSegs = 128;
+inline constexpr int kMaxZoneSnapshotPolys = 32;
+inline constexpr int kMaxZoneSnapshotVerts = 64;
+inline constexpr int kMaxPlanSnapshotPolys = 16;
 inline constexpr int kMaxModHostOuts = 16;
 inline constexpr double kModHostOutNeutral = 0.5;
 inline constexpr float kHostOutEpsilon = 1e-4f;
@@ -33,8 +39,14 @@ enum class ModDriver : uint8_t {
     Speed = 7,
     RadialSpeed = 8,
     PathPosition = 9,
-    DistanceToNearestWall = 10
+    DistanceToNearestWall = 10,
+    InZone = 11,          // V04c: 0..1 (hard with hysteresis, or soft edge) for route.zoneId
+    ZoneIndex = 12,       // V04c: 0 = outside every zone, 1..N = first zone (list order) containing the object
+    DistanceToZone = 13   // V04c: signed distance (m) to route.zoneId: negative inside, positive outside
 };
+inline constexpr ModDriver kLastModDriver = ModDriver::DistanceToZone;
+inline bool modDriverUsesZone(ModDriver d) noexcept { return d == ModDriver::InZone || d == ModDriver::DistanceToZone; }
+inline bool modDriverIsZone(ModDriver d) noexcept { return d == ModDriver::InZone || d == ModDriver::ZoneIndex || d == ModDriver::DistanceToZone; }
 
 enum class ModTarget : uint8_t {
     SourceGain = 0,
@@ -61,6 +73,9 @@ inline const char* modDriverName(ModDriver d) noexcept {
     case ModDriver::RadialSpeed: return "radialSpeed";
     case ModDriver::PathPosition: return "pathPosition";
     case ModDriver::DistanceToNearestWall: return "distanceToNearestWall";
+    case ModDriver::InZone: return "inZone";
+    case ModDriver::ZoneIndex: return "zoneIndex";
+    case ModDriver::DistanceToZone: return "distanceToZone";
     default: return "distanceToListener";
     }
 }
@@ -77,6 +92,9 @@ inline bool parseModDriver(std::string_view s, ModDriver& out) noexcept {
     if (s == "radialSpeed") { out = ModDriver::RadialSpeed; return true; }
     if (s == "pathPosition") { out = ModDriver::PathPosition; return true; }
     if (s == "distanceToNearestWall") { out = ModDriver::DistanceToNearestWall; return true; }
+    if (s == "inZone") { out = ModDriver::InZone; return true; }
+    if (s == "zoneIndex") { out = ModDriver::ZoneIndex; return true; }
+    if (s == "distanceToZone") { out = ModDriver::DistanceToZone; return true; }
     return false;
 }
 
@@ -241,12 +259,14 @@ struct ModulationRoute {
     int hostOut = 0; // 0 = off, 1..16 = Mod Out 1..16
     double attackMs = 15.0;
     double releaseMs = 80.0;
+    int zoneId = 0;  // V04c: zone referenced by InZone / DistanceToZone (0 = none)
+    ModMidiOut midi{}; // V04e: optional MIDI out (mode Off = absent; never part of APVTS)
 
     bool operator==(const ModulationRoute& b) const noexcept {
         return enabled == b.enabled && object == b.object && driver == b.driver &&
                pointX == b.pointX && pointY == b.pointY && pointZ == b.pointZ &&
                curve == b.curve && targetObject == b.targetObject && target == b.target &&
-               hostOut == b.hostOut && attackMs == b.attackMs && releaseMs == b.releaseMs;
+               hostOut == b.hostOut && attackMs == b.attackMs && releaseMs == b.releaseMs && zoneId == b.zoneId && midi == b.midi;
     }
 };
 
@@ -269,9 +289,11 @@ inline bool validModCurve(const ModCurve& c) noexcept {
 
 inline bool validModRoute(const ModulationRoute& r) noexcept {
     if (r.object < 0 || r.object > kModListenerObject) return false;
-    if ((uint8_t)r.driver > (uint8_t)ModDriver::DistanceToNearestWall) return false;
+    if ((uint8_t)r.driver > (uint8_t)kLastModDriver) return false;
+    if (r.zoneId < 0 || r.zoneId > kMaxTriggerZoneId) return false;
     if ((uint8_t)r.target > (uint8_t)ModTarget::None) return false;
     if (r.hostOut < 0 || r.hostOut > kMaxModHostOuts) return false;
+    if (!validModMidiOut(r.midi)) return false;
     if (!std::isfinite(r.pointX) || !std::isfinite(r.pointY) || !std::isfinite(r.pointZ)) return false;
     if (r.pointX < -200.0 || r.pointX > 200.0 || r.pointY < -200.0 || r.pointY > 200.0 ||
         r.pointZ < 0.0 || r.pointZ > 30.0)
@@ -289,9 +311,11 @@ inline bool validModRoute(const ModulationRoute& r) noexcept {
 
 inline void sanitizeModRoute(ModulationRoute& r) noexcept {
     r.object = std::clamp(r.object, 0, kModListenerObject);
-    if ((uint8_t)r.driver > (uint8_t)ModDriver::DistanceToNearestWall) r.driver = ModDriver::DistanceToListener;
+    if ((uint8_t)r.driver > (uint8_t)kLastModDriver) r.driver = ModDriver::DistanceToListener;
+    r.zoneId = std::clamp(r.zoneId, 0, kMaxTriggerZoneId);
     if ((uint8_t)r.target > (uint8_t)ModTarget::None) r.target = ModTarget::SourceGain;
     r.hostOut = std::clamp(r.hostOut, 0, kMaxModHostOuts);
+    sanitizeModMidiOut(r.midi);
     r.pointX = std::clamp(std::isfinite(r.pointX) ? r.pointX : 0.0, -200.0, 200.0);
     r.pointY = std::clamp(std::isfinite(r.pointY) ? r.pointY : 0.0, -200.0, 200.0);
     r.pointZ = std::clamp(std::isfinite(r.pointZ) ? r.pointZ : 0.0, 0.0, 30.0);
@@ -356,9 +380,23 @@ struct WallSeg {
     double z0 = 0.0, z1 = 1e9;
 };
 
+struct ZoneSnapshotPoly {
+    std::array<double, kMaxZoneSnapshotVerts> vx{};
+    std::array<double, kMaxZoneSnapshotVerts> vy{};
+    int vertCount = 0;
+    double z = -1.0;
+};
+
 struct WallSnapshot {
     std::array<WallSeg, kMaxWallSnapshotSegs> segs{};
     int count = 0;
+    double zTop = 30.0;
+    std::array<ZoneSnapshotPoly, kMaxZoneSnapshotPolys> floorZones{};
+    int floorZoneCount = 0;
+    std::array<ZoneSnapshotPoly, kMaxZoneSnapshotPolys> ceilZones{};
+    int ceilZoneCount = 0;
+    std::array<ZoneSnapshotPoly, kMaxPlanSnapshotPolys> planPolys{};
+    int planPolyCount = 0;
 };
 
 class WallSnapshotMailbox {
@@ -376,6 +414,145 @@ public:
         return slots[(size_t)front];
     }
 };
+
+inline bool pointInZoneSnapshot(const ZoneSnapshotPoly& poly, double x, double y) noexcept {
+    if (poly.vertCount < 3) return false;
+    bool in = false;
+    for (int i = 0, j = poly.vertCount - 1; i < poly.vertCount; j = i++) {
+        const double ax = poly.vx[(size_t)i], ay = poly.vy[(size_t)i];
+        const double bx = poly.vx[(size_t)j], by = poly.vy[(size_t)j];
+        if ((ay > y) != (by > y) && x < (bx - ax) * (y - ay) / (by - ay) + ax) in = !in;
+    }
+    if (in) return true;
+    for (int i = 0, j = poly.vertCount - 1; i < poly.vertCount; j = i++) {
+        const double ax = poly.vx[(size_t)j], ay = poly.vy[(size_t)j];
+        const double bx = poly.vx[(size_t)i], by = poly.vy[(size_t)i];
+        const double dx = bx - ax, dy = by - ay, l = dx * dx + dy * dy;
+        const double t = l > 1e-12 ? std::clamp(((x - ax) * dx + (y - ay) * dy) / l, 0.0, 1.0) : 0.0;
+        if (std::hypot(x - ax - t * dx, y - ay - t * dy) < 1e-7) return true;
+    }
+    return false;
+}
+
+inline void wallSnapshotVerticalBoundsAt(const WallSnapshot& ws, double x, double y, double& zFloor, double& zCeil) noexcept {
+    zFloor = 0.0;
+    for (int i = 0; i < ws.floorZoneCount && i < kMaxZoneSnapshotPolys; ++i) {
+        const auto& fz = ws.floorZones[(size_t)i];
+        if (fz.z >= 0.0 && fz.vertCount >= 3 && pointInZoneSnapshot(fz, x, y))
+            zFloor = std::max(zFloor, fz.z);
+    }
+    zCeil = std::clamp(ws.zTop, 1.0, 30.0);
+    for (int i = 0; i < ws.ceilZoneCount && i < kMaxZoneSnapshotPolys; ++i) {
+        const auto& cz = ws.ceilZones[(size_t)i];
+        if (cz.z > 0.0 && cz.vertCount >= 3 && pointInZoneSnapshot(cz, x, y))
+            zCeil = std::min(zCeil, cz.z);
+    }
+}
+
+inline bool segmentsIntersectSnapshot2D(double ax, double ay, double bx, double by,
+                                        double cx, double cy, double dx, double dy) noexcept {
+    if (std::max(ax, bx) < std::min(cx, dx) - 1e-9 || std::max(cx, dx) < std::min(ax, bx) - 1e-9 ||
+        std::max(ay, by) < std::min(cy, dy) - 1e-9 || std::max(cy, dy) < std::min(ay, by) - 1e-9)
+        return false;
+    auto cross = [](double p1x, double p1y, double p2x, double p2y, double p3x, double p3y) noexcept {
+        return (p2x - p1x) * (p3y - p1y) - (p2y - p1y) * (p3x - p1x);
+    };
+    const double d1 = cross(ax, ay, bx, by, cx, cy);
+    const double d2 = cross(ax, ay, bx, by, dx, dy);
+    const double d3 = cross(cx, cy, dx, dy, ax, ay);
+    const double d4 = cross(cx, cy, dx, dy, bx, by);
+    return ((d1 <= 0.0 && d2 >= 0.0) || (d1 >= 0.0 && d2 <= 0.0)) &&
+           ((d3 <= 0.0 && d4 >= 0.0) || (d3 >= 0.0 && d4 <= 0.0));
+}
+
+inline bool isPointInsideWallSnapshot(const WallSnapshot& ws, double x, double y, double z,
+                                      double clearanceXY = 0.08, double clearanceZ = 0.05) noexcept {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
+    if (x < -200.0 + clearanceXY || x > 200.0 - clearanceXY ||
+        y < -200.0 + clearanceXY || y > 200.0 - clearanceXY)
+        return false;
+    double zFloor = 0.0, zCeil = 30.0;
+    wallSnapshotVerticalBoundsAt(ws, x, y, zFloor, zCeil);
+    if (zCeil - zFloor <= 2.0 * clearanceZ) {
+        const double mid = 0.5 * (zFloor + zCeil);
+        if (std::abs(z - mid) > clearanceZ) return false;
+    } else if (z < zFloor + clearanceZ || z > zCeil - clearanceZ) {
+        return false;
+    }
+    if (ws.planPolyCount > 0) {
+        bool inPlan = false;
+        for (int i = 0; i < ws.planPolyCount && i < kMaxPlanSnapshotPolys; ++i) {
+            if (pointInZoneSnapshot(ws.planPolys[(size_t)i], x, y)) { inPlan = true; break; }
+        }
+        if (!inPlan) return false;
+    }
+    for (int i = 0; i < ws.count && i < kMaxWallSnapshotSegs; ++i) {
+        const auto& w = ws.segs[(size_t)i];
+        if (z < w.z0 - clearanceZ || z > w.z1 + clearanceZ) continue;
+        const double vx = w.bx - w.ax, vy = w.by - w.ay;
+        const double len2 = vx * vx + vy * vy;
+        const double t = len2 > 1e-12 ? std::clamp(((x - w.ax) * vx + (y - w.ay) * vy) / len2, 0.0, 1.0) : 0.0;
+        if (std::hypot(x - (w.ax + t * vx), y - (w.ay + t * vy)) < clearanceXY) return false;
+    }
+    return true;
+}
+
+inline bool segmentCrossesWallSnapshot(const WallSnapshot& ws, double ax, double ay, double bx, double by,
+                                       double zMid, double clearanceZ = 0.05) noexcept {
+    for (int i = 0; i < ws.count && i < kMaxWallSnapshotSegs; ++i) {
+        const auto& w = ws.segs[(size_t)i];
+        if (zMid < w.z0 - clearanceZ || zMid > w.z1 + clearanceZ) continue;
+        if (segmentsIntersectSnapshot2D(ax, ay, bx, by, w.ax, w.ay, w.bx, w.by)) return true;
+    }
+    return false;
+}
+
+inline void clampWanderPoseToRoom(const WallSnapshot& ws, double bx, double by, double bz,
+                                    double& qx, double& qy, double& qz,
+                                    double clearanceXY = 0.08, double clearanceZ = 0.05) noexcept {
+    auto clampZAt = [&](double x, double y, double zVal) noexcept -> double {
+        double zFloor = 0.0, zCeil = 30.0;
+        wallSnapshotVerticalBoundsAt(ws, x, y, zFloor, zCeil);
+        if (zCeil - zFloor <= 2.0 * clearanceZ) return 0.5 * (zFloor + zCeil);
+        return std::clamp(zVal, zFloor + clearanceZ, zCeil - clearanceZ);
+    };
+    const double bzSafe = clampZAt(bx, by, bz);
+    qx = std::clamp(std::isfinite(qx) ? qx : bx, -200.0 + clearanceXY, 200.0 - clearanceXY);
+    qy = std::clamp(std::isfinite(qy) ? qy : by, -200.0 + clearanceXY, 200.0 - clearanceXY);
+    qz = clampZAt(qx, qy, std::isfinite(qz) ? qz : bzSafe);
+    if (isPointInsideWallSnapshot(ws, bx, by, bzSafe, clearanceXY, clearanceZ)) {
+        auto validCand = [&](double cx, double cy, double cz) noexcept -> bool {
+            return isPointInsideWallSnapshot(ws, cx, cy, cz, clearanceXY, clearanceZ)
+                && !segmentCrossesWallSnapshot(ws, bx, by, cx, cy, 0.5 * (bzSafe + cz), clearanceZ);
+        };
+        if (validCand(qx, qy, qz)) return;
+        const double dx = qx - bx, dy = qy - by, dz = qz - bzSafe;
+        double lo = 0.0, hi = 1.0;
+        for (int it = 0; it < 16; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            const double tx = bx + mid * dx, ty = by + mid * dy;
+            const double tz = clampZAt(tx, ty, bzSafe + mid * dz);
+            if (validCand(tx, ty, tz)) lo = mid;
+            else hi = mid;
+        }
+        qx = bx + lo * dx;
+        qy = by + lo * dy;
+        qz = clampZAt(qx, qy, bzSafe + lo * dz);
+    } else if (segmentCrossesWallSnapshot(ws, bx, by, qx, qy, 0.5 * (bzSafe + qz), clearanceZ)) {
+        const double dx = qx - bx, dy = qy - by, dz = qz - bzSafe;
+        double lo = 0.0, hi = 1.0;
+        for (int it = 0; it < 16; ++it) {
+            const double mid = 0.5 * (lo + hi);
+            const double tx = bx + mid * dx, ty = by + mid * dy;
+            const double tz = clampZAt(tx, ty, bzSafe + mid * dz);
+            if (!segmentCrossesWallSnapshot(ws, bx, by, tx, ty, 0.5 * (bzSafe + tz), clearanceZ)) lo = mid;
+            else hi = mid;
+        }
+        qx = bx + lo * dx;
+        qy = by + lo * dy;
+        qz = clampZAt(qx, qy, bzSafe + lo * dz);
+    }
+}
 
 inline double distanceToWallSnapshot(const WallSnapshot& ws, double px, double py, double pz) noexcept {
     if (ws.count <= 0) return 0.0;
@@ -671,7 +848,8 @@ public:
         float* outRawDrivers = nullptr,
         float* outTargetValues = nullptr,
         uint8_t* outActive = nullptr,
-        double* outHostSlotNorm = nullptr) noexcept
+        double* outHostSlotNorm = nullptr,
+        const TriggerZoneTracker* zones = nullptr) noexcept
     {
         for (int s = 0; s < kModMaxSources; ++s) outSources[(size_t)s] = SourceModState{};
         outGlobal = GlobalModState{};
@@ -742,6 +920,9 @@ public:
             case ModDriver::RadialSpeed: return (o == kModListenerObject) ? 0.0 : smoothedRadialSpeed[(size_t)o];
             case ModDriver::PathPosition: return std::clamp(uPath ? uPath[o] : 0.0, 0.0, 1.0);
             case ModDriver::DistanceToNearestWall: return distanceToWallSnapshot(walls, ox, oy, oz);
+            case ModDriver::InZone: return zones ? zones->inZone(o, r.zoneId) : 0.0;
+            case ModDriver::ZoneIndex: return zones ? (double)zones->zoneIndex(o) : 0.0;
+            case ModDriver::DistanceToZone: return zones ? zones->distanceTo(o, r.zoneId) : kTriggerZoneFar;
             default: return 0.0;
             }
         };

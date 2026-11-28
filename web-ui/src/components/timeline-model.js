@@ -26,6 +26,7 @@ export const axisToTime = (start, end, v) => end - start > 0 ? (v - start) / (en
 
 // Invert the time map: axis positions where a closed path completes lap 1..laps-1 (the map applies BEFORE laps wrap).
 export function lapBoundaries(p) {
+  if (p?.endless) return [];
   const laps = Math.max(1, Math.min(64, Math.round(p?.laps ?? 1)));
   if (!p?.closed || laps < 2 || !isMovingPath(p)) return [];
   const out = [];
@@ -79,7 +80,9 @@ export function pathRow(state, o) {
     if (evaluated !== null) azCurrent = evaluated;
   }
   return {
-    object: o, label: objectLabel(state, o), colour: objectColour(o, state), enabled: !!p.enabled, closed: !!p.closed, laps: p.closed ? Math.max(1, Math.round(p.laps ?? 1)) : 1,
+    object: o, label: objectLabel(state, o), colour: objectColour(o, state), enabled: !!p.enabled, closed: !!p.closed,
+    endless: !!(p.closed && p.endless), endlessPeriodS: Number.isFinite(p.endlessPeriodS) ? p.endlessPeriodS : 8,
+    laps: p.closed ? Math.max(1, Math.round(p.laps ?? 1)) : 1,
     start, end, group: Number.isInteger(p.group) ? p.group : -1, driver, position,
     keys, autos, holds, lapMarks: lapBoundaries(p), points: n,
     azMode, azActive, azKeys, azCurrent: r4(azCurrent)

@@ -4,7 +4,16 @@ import { layoutOffset } from '../viewport/transducers.js';
 import { normalizeSourceColor } from '../viewport/colour.js';
 import { cornerXY, movedVertexCorners, sameCorner } from '../viewport/corner-snap.js';
 import { joinCorners } from '../state/join-corners.js';
+import { isFollower, followersOf, canBeFollowTarget, followerToOwnPath, MAX_FOLLOW_OFFSET_M, pathGroupDriver, pathId } from '../viewport/movement-path.js';
+import { ZONE_MAX, ZONE_DEFAULT_HYSTERESIS, ZONE_MAX_EDGE, ZONE_MAX_HYSTERESIS, zoneProblem, nextZoneId } from '../state/trigger-zones.js';
 export function reject(code, message) { throw Object.assign(new Error(message), { code }); }
+function detachFollower(state, source, zTop) {
+  const { paths } = state.document;
+  const driver = pathGroupDriver(paths, paths[source].follow.target);
+  state.parameters.values[pathId(source)] = state.parameters.values[pathId(driver)] ?? 0;
+  paths[source] = followerToOwnPath(paths, source, zTop);
+}
+
 export const tag = () => ({ name: '', group: '', hidden: false, locked: false });
 
 export function defaultAutomationRange() {
@@ -314,6 +323,7 @@ export function applyMutation(state, command, original = state, presetMaterials 
       if (!isDefaultAutomationRange(sceneAutomationRange(s))) clampPositionValuesToRange(state, sceneAutomationRange(s));
       if (Array.isArray(state.document.paths)) {
         for (const path of state.document.paths) {
+          if (isFollower(path)) path.follow.offset = path.follow.offset.map(v => Math.max(-MAX_FOLLOW_OFFSET_M, Math.min(MAX_FOLLOW_OFFSET_M, v * command.factor)));
           if (path?.points?.length) {
             path.points = path.points.map(pt => [
               Math.max(-200, Math.min(200, pt[0] * command.factor)),
@@ -358,8 +368,14 @@ export function applyMutation(state, command, original = state, presetMaterials 
     d.sources.splice(command.index, 1);
     for (let i = command.index + 1; i <= d.sources.length; i++) for (const k of ['x', 'y', 'z', 'az', 'g', 'mute', 'solo']) state.parameters.values[`s${i}${k}`] = state.parameters.values[`s${i + 1}${k}`];
     if (Array.isArray(d.paths)) {
-      for (let i = command.index; i < d.sources.length; i++) d.paths[i] = clone(d.paths[i + 1]);
+      const zTop = Math.max(0.5, Math.min(30, Number(d.scene?.heightM) || 30));
+      for (const fo of followersOf(d.paths, command.index)) detachFollower(state, fo, zTop);
+      for (let i = command.index; i < d.sources.length; i++) {
+        d.paths[i] = clone(d.paths[i + 1]);
+        state.parameters.values[pathId(i)] = state.parameters.values[pathId(i + 1)] ?? 0;
+      }
       d.paths[d.sources.length] = { points: [], enabled: true, closed: false, smooth: false, orient: false, laps: 1 };
+      for (const lp of d.paths) if (isFollower(lp) && lp.follow.target > command.index) lp.follow.target -= 1;
       for (const lp of d.paths) {
         if (!lp || !('lookTarget' in lp) || !Number.isInteger(lp.lookTarget) || lp.lookTarget >= 32) continue;
         if (lp.lookTarget === command.index) delete lp.lookTarget;
@@ -477,6 +493,21 @@ export function applyMutation(state, command, original = state, presetMaterials 
       if('seed'in item){if(!Number.isInteger(item.seed)||item.seed<1||item.seed>999999)reject('invalid','lfo.seed out of range [1, 999999]');out.seed=item.seed;}
       return out;
     };
+    const defaultWander=()=>({enabled:false,ampHorizM:0.5,ampVertM:0.25,rateHz:0.5,smoothness:0.8,pinEnds:true,horizOnly:false,seed:1});
+    const isDefaultWander=w=>!w||(w.enabled===false&&w.ampHorizM===0.5&&w.ampVertM===0.25&&w.rateHz===0.5&&w.smoothness===0.8&&w.pinEnds===true&&w.horizOnly===false&&w.seed===1);
+    const parseWander=(item,base=defaultWander())=>{
+      if(!item||typeof item!=='object'||Array.isArray(item))reject('invalid','Expected wander object');
+      const out={...base};
+      if('enabled'in item){if(typeof item.enabled!=='boolean')reject('invalid','wander.enabled must be boolean');out.enabled=item.enabled;}
+      if('ampHorizM'in item){if(!Number.isFinite(item.ampHorizM)||item.ampHorizM<0||item.ampHorizM>20)reject('invalid','wander.ampHorizM out of range [0, 20]');out.ampHorizM=item.ampHorizM;}
+      if('ampVertM'in item){if(!Number.isFinite(item.ampVertM)||item.ampVertM<0||item.ampVertM>10)reject('invalid','wander.ampVertM out of range [0, 10]');out.ampVertM=item.ampVertM;}
+      if('rateHz'in item){if(!Number.isFinite(item.rateHz)||item.rateHz<0.05||item.rateHz>8)reject('invalid','wander.rateHz out of range [0.05, 8]');out.rateHz=item.rateHz;}
+      if('smoothness'in item){if(!Number.isFinite(item.smoothness)||item.smoothness<0||item.smoothness>1)reject('invalid','wander.smoothness out of range [0, 1]');out.smoothness=item.smoothness;}
+      if('pinEnds'in item){if(typeof item.pinEnds!=='boolean')reject('invalid','wander.pinEnds must be boolean');out.pinEnds=item.pinEnds;}
+      if('horizOnly'in item){if(typeof item.horizOnly!=='boolean')reject('invalid','wander.horizOnly must be boolean');out.horizOnly=item.horizOnly;}
+      if('seed'in item){if(!Number.isInteger(item.seed)||item.seed<1||item.seed>999999)reject('invalid','wander.seed out of range [1, 999999]');out.seed=item.seed;}
+      return out;
+    };
     const parseAzKey=item=>{
       if(!item||typeof item!=='object'||Array.isArray(item))reject('invalid','Expected azimuth key object');
       const t=item.t,az=item.az,easing='easing'in item?item.easing:'linear';
@@ -563,12 +594,59 @@ export function applyMutation(state, command, original = state, presetMaterials 
     d.paths ||= Array.from({length:33},emptyPath);
     if(command.object<0||command.object>32||(command.object<32&&!d.sources[command.object]))reject('invalid','Path object does not exist');
     let p=d.paths[command.object]||(d.paths[command.object]=emptyPath());
-    if(op==='path.clear'){const keep=d.paths[command.object]||{};d.paths[command.object]=emptyPath();for(const k of ['lookAt','lookTarget','lookPos','orientOffset'])if(k in keep)d.paths[command.object][k]=keep[k];p=d.paths[command.object];}
+    // V04d: Link to path (rig)
+    const zTopF=Math.max(0.5,Math.min(30,Number(d.scene?.heightM)||30));
+    const objName=o=>d.sources[o]?.name||`Source ${o+1}`;
+    const parseOffset=v=>{if(!Array.isArray(v)||v.length!==3||v.some(x=>!Number.isFinite(x)||Math.abs(x)>MAX_FOLLOW_OFFSET_M))reject('invalid','offset must be [forward, left, up] in metres within +/-50');return v.slice();};
+    const checkTarget=(o,t)=>{
+      if(!Number.isInteger(t)||t<0||t>=d.sources.length)reject('invalid','Target source does not exist');
+      if(t===o)reject('invalid','A source cannot follow its own path');
+      if(isFollower(d.paths[t]))reject('invalid',`${objName(t)} is linked to ${objName(d.paths[t].follow.target)}: link to that path instead (no chains)`);
+      if(!canBeFollowTarget(d.paths[t]))reject('invalid',`${objName(t)} has no usable path (draw at least two points)`);
+    };
+    if(op==='path.link'||op==='path.setFollow'||op==='path.unlink'){
+      const objs=op==='path.link'&&Array.isArray(command.objects)?[...new Set(command.objects)]:[command.object];
+      for(const o of objs)if(!Number.isInteger(o)||o<0||o>=d.sources.length)reject('invalid',o===32?'Only sources can be linked to a path':'Source does not exist');
+      if(op==='path.unlink'){
+        const o=objs[0];if(!isFollower(d.paths[o]))reject('invalid','This source is not linked to a path');
+        detachFollower(state,o,zTopF);
+      }else if(op==='path.setFollow'){
+        const o=objs[0],next=clone(d.paths[o]);
+        if(!isFollower(next))reject('invalid','This source is not linked to a path');
+        if(!('offset'in command)&&!('followWander'in command)&&!('target'in command))reject('invalid','Expected offset, followWander and/or target');
+        if('target'in command){checkTarget(o,command.target);next.follow.target=command.target;}
+        if('offset'in command)next.follow.offset=parseOffset(command.offset);
+        if('followWander'in command){if(typeof command.followWander!=='boolean')reject('invalid','followWander must be a boolean');next.follow.followWander=command.followWander;}
+        d.paths[o]=next;
+      }else{
+        const t=command.target,off='offset'in command?parseOffset(command.offset):[0,0,0];
+        for(const o of objs){
+          checkTarget(o,t);
+          const n=followersOf(d.paths,o).length;
+          if(n)reject('invalid',`${objName(o)} is followed by ${n} ${n===1?'source':'sources'}: unlink them first (no chains)`);
+        }
+        for(const o of objs){
+          const own=d.paths[o]||emptyPath(),next={points:[],enabled:true,closed:false,smooth:false,orient:!!own.orient,laps:1};
+          for(const k of ['lookAt','lookTarget','lookPos','orientOffset','azKeys'])if(k in own)next[k]=clone(own[k]);
+          next.follow={target:t,offset:off.slice(),followWander:'followWander'in command?!!command.followWander:true,frame:'path'};
+          d.paths[o]=next;
+        }
+      }
+      p=d.paths[command.object??objs[0]];
+    }
+    else if(isFollower(p)&&op!=='path.clear'&&op!=='path.set'&&!['path.setAzimuthKey','path.removeAzimuthKey','path.setAzimuthKeys'].includes(op)
+      &&!(op==='path.setFlags'&&Object.keys(command).every(k=>['op','object','enabled','orient','orientMode','lookTarget','lookPos','orientOffset'].includes(k)))){
+      reject('invalid',`Linked to ${objName(p.follow.target)}: this control comes from the target's path - unlink first`);
+    }
+    else if(op==='path.clear'){
+      for(const fo of followersOf(d.paths,command.object))detachFollower(state,fo,zTopF);
+      const keep=d.paths[command.object]||{};d.paths[command.object]=emptyPath();for(const k of ['lookAt','lookTarget','lookPos','orientOffset'])if(k in keep)d.paths[command.object][k]=keep[k];p=d.paths[command.object];}
     else{
       const next=clone(p);
       if(op==='path.set'){
         next.points=command.points.map(q=>q.slice());
-        delete next.start;delete next.end;delete next.times;delete next.easings;delete next.lfo;
+        delete next.follow;  // V04d: path.set replaces a link with an own path
+        delete next.start;delete next.end;delete next.times;delete next.easings;delete next.lfo;delete next.wander;
         if('times'in command)next.times=command.times.map(t=>t??null);
         if('easings'in command)next.easings=command.easings.slice();
         if('azKeys'in command){
@@ -577,6 +655,7 @@ export function applyMutation(state, command, original = state, presetMaterials 
           normalizeAzKeys(next);
         }
         if('lfo'in command){const l=parseLfo(command.lfo);if(!isDefaultLfo(l))next.lfo=l;}
+        if('wander'in command){const w=parseWander(command.wander);if(!isDefaultWander(w))next.wander=w;}
       }
       if(op==='path.addPoint'){
         if(next.points.length>=64)reject('invalid','Path exceeds 64 points');
@@ -662,12 +741,35 @@ export function applyMutation(state, command, original = state, presetMaterials 
         if((next.points?.length??0)<2&&!isDefaultLfo(l))reject('invalid','Path has fewer than two points');
         if(isDefaultLfo(l))delete next.lfo;else next.lfo=l;
       }
+      if(op==='path.setWander'){
+        if(!('wander'in command))reject('invalid','wander is required');
+        const w=parseWander(command.wander,next.wander||defaultWander());
+        if((next.points?.length??0)<2&&!isDefaultWander(w))reject('invalid','Path has fewer than two points');
+        if(isDefaultWander(w))delete next.wander;else next.wander=w;
+      }
       if(op==='path.set'||op==='path.setFlags'){
         for(const k of ['enabled','closed','smooth','orient','laps','start','end'])if(k in command)next[k]=command[k];
+        if('endless'in command){
+          if(typeof command.endless!=='boolean')reject('invalid','endless must be a boolean');
+          if((next.points?.length??0)<2&&command.endless)reject('invalid','Path has fewer than two points');
+          if(command.endless)next.endless=true;else delete next.endless;
+        }
+        if('endlessPeriodS'in command){
+          if(!Number.isFinite(command.endlessPeriodS)||command.endlessPeriodS<0.25||command.endlessPeriodS>3600)reject('invalid','endlessPeriodS out of range [0.25, 3600]');
+          if((next.points?.length??0)<2&&command.endlessPeriodS!==8)reject('invalid','Path has fewer than two points');
+          next.endlessPeriodS=command.endlessPeriodS;
+        }
+        if(next.endless&&!('endlessPeriodS'in next))next.endlessPeriodS=8;
+        if(!next.endless&&next.endlessPeriodS===8)delete next.endlessPeriodS;
         if(op==='path.setFlags'&&'lfo'in command){
           const l=parseLfo(command.lfo,next.lfo||defaultLfo());
           if((next.points?.length??0)<2&&!isDefaultLfo(l))reject('invalid','Path has fewer than two points');
           if(isDefaultLfo(l))delete next.lfo;else next.lfo=l;
+        }
+        if(op==='path.setFlags'&&'wander'in command){
+          const w=parseWander(command.wander,next.wander||defaultWander());
+          if((next.points?.length??0)<2&&!isDefaultWander(w))reject('invalid','Path has fewer than two points');
+          if(isDefaultWander(w))delete next.wander;else next.wander=w;
         }
         if(command.orient===true)delete next.lookAt;
         if('orientMode'in command){
@@ -694,7 +796,7 @@ export function applyMutation(state, command, original = state, presetMaterials 
     }
   } else if (op.startsWith('modulation.')) {
     const kMaxModRoutes = 64;
-    const validDrivers = new Set(['distanceToListener', 'distanceToPoint', 'azimuthToListener', 'elevation', 'x', 'y', 'z', 'speed', 'radialSpeed', 'pathPosition', 'distanceToNearestWall']);
+    const validDrivers = new Set(['distanceToListener', 'distanceToPoint', 'azimuthToListener', 'elevation', 'x', 'y', 'z', 'speed', 'radialSpeed', 'pathPosition', 'distanceToNearestWall', 'inZone', 'zoneIndex', 'distanceToZone']);
     const validTargets = new Set(['sourceGain', 'sourceLowPass', 'sourceHighPass', 'sourceLowShelf', 'sourceHighShelf', 'earlyLevel', 'tailLevel', 'mix', 'none']);
     const globalTargets = new Set(['earlyLevel', 'tailLevel', 'mix', 'none']);
     const targetBounds = {
@@ -758,8 +860,27 @@ export function applyMutation(state, command, original = state, presetMaterials 
         Math.max(tgtLo, Math.min(tgtHi, cv.outputRange[1]))
       ];
       const out = { enabled, object: item.object, driver: item.driver, curve: { inputRange: cv.inputRange.slice(), outputRange: clampedOutRange, invert, clamp, nodes }, targetObject, target: item.target, ...(hostOut > 0 ? { hostOut } : {}), attackMs, releaseMs };
+      if (item.driver === 'inZone' || item.driver === 'distanceToZone') {
+        if (!Number.isInteger(item.zoneId) || item.zoneId < 1 || item.zoneId > 9999) reject('invalid', 'zoneId (1..9999) is required for the In zone / Distance to zone drivers');
+        out.zoneId = item.zoneId;
+      } else if ('zoneId' in item && (!Number.isInteger(item.zoneId) || item.zoneId < 0 || item.zoneId > 9999)) reject('invalid', 'zoneId out of range');
       if (point && item.driver === 'distanceToPoint') out.point = point;
       else if (item.driver === 'distanceToPoint') out.point = [0, 0, 0];
+      // V04e: optional MIDI out block (same validation as the processor).
+      if ('midi' in item) {
+        const m = item.midi;
+        if (!m || typeof m !== 'object' || Array.isArray(m)) reject('invalid', 'midi must be an object');
+        if (!['off', 'gate', 'trigger', 'cc', 'index'].includes(m.mode)) reject('invalid', 'midi.mode must be off, gate, trigger, cc or index');
+        const intIn = (k, lo, hi) => { if (k in m && (!Number.isInteger(m[k]) || m[k] < lo || m[k] > hi)) reject('invalid', `midi.${k} must be an integer in [${lo}, ${hi}]`); };
+        const numIn = (k, lo, hi) => { if (k in m && (!Number.isFinite(m[k]) || m[k] < lo || m[k] > hi)) reject('invalid', `midi.${k} out of range`); };
+        const boolIn = k => { if (k in m && typeof m[k] !== 'boolean') reject('invalid', `midi.${k} must be a boolean`); };
+        intIn('channel', 1, 16); intIn('number', 0, 127); intIn('velocity', 1, 127); intIn('ccLo', 0, 127); intIn('ccHi', 0, 127);
+        numIn('threshold', 0, 1); numIn('hysteresis', 0, 0.5); numIn('lengthMs', 1, 5000); boolIn('velocityFromValue'); boolIn('program');
+        if (m.mode !== 'off') out.midi = {
+          mode: m.mode, channel: m.channel ?? 1, number: m.number ?? 60, velocity: m.velocity ?? 100, velocityFromValue: m.velocityFromValue ?? false,
+          threshold: m.threshold ?? 0.5, hysteresis: m.hysteresis ?? 0.05, lengthMs: m.lengthMs ?? 100, ccLo: m.ccLo ?? 0, ccHi: m.ccHi ?? 127, program: m.program ?? false
+        };
+      }
       return out;
     };
     const routes = Array.isArray(d.modulation?.routes) ? d.modulation.routes.map(clone) : [];
@@ -782,6 +903,54 @@ export function applyMutation(state, command, original = state, presetMaterials 
       if (nextRoutes.length) d.modulation = { routes: nextRoutes }; else delete d.modulation;
     } else reject('unsupported', `Unknown modulation operation ${op}`);
   }
+  else if (op.startsWith('zone.')) {
+    // V04c trigger zones (document.zones). Same rules and messages as plugin/SceneCommands.cpp.
+    const zones = Array.isArray(d.zones) ? d.zones.map(clone) : [];
+    const xs = s.walls.flatMap(w => [w.a[0], w.b[0]]), ys = s.walls.flatMap(w => [w.a[1], w.b[1]]);
+    const [rx0, rx1, ry0, ry1] = xs.length ? [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)] : [-200, 200, -200, 200];
+    const ceil = s.heightM;
+    const findIndex = id => { const i = zones.findIndex(z => z.id === id); if (i < 0) reject('invalid', 'Zone does not exist'); return i; };
+    const applyFields = (z, src, creating) => {
+      if ('name' in src) { if (typeof src.name !== 'string' || src.name.length > 64) reject('invalid', 'name must be a string of at most 64 characters'); z.name = src.name; }
+      if ('kind' in src) { if (!['box', 'polygon'].includes(src.kind)) reject('invalid', 'kind must be box or polygon'); z.kind = src.kind; } else if (creating) reject('invalid', 'kind is required');
+      if ('points' in src) {
+        if (!Array.isArray(src.points) || src.points.some(q => !Array.isArray(q) || q.length !== 2 || !q.every(Number.isFinite))) reject('invalid', 'points must be an array of [x, y]');
+        z.points = src.points.map(q => [Math.max(rx0, Math.min(rx1, q[0])), Math.max(ry0, Math.min(ry1, q[1]))]);
+      } else if (creating) reject('invalid', 'points are required');
+      const num = (k, lo, hi) => { if (!Number.isFinite(src[k]) || src[k] < lo || src[k] > hi) reject('invalid', `${k} is out of range`); return src[k]; };
+      if ('zMin' in src) z.zMin = num('zMin', -1e3, 1e3); else if (creating) z.zMin = 0;
+      if ('zMax' in src) z.zMax = num('zMax', -1e3, 1e3); else if (creating) z.zMax = ceil;
+      z.zMin = Math.max(0, Math.min(ceil, z.zMin)); z.zMax = Math.max(0, Math.min(ceil, z.zMax));
+      if ('edge' in src) z.edge = num('edge', 0, ZONE_MAX_EDGE);
+      if ('hysteresis' in src) z.hysteresis = num('hysteresis', 0, ZONE_MAX_HYSTERESIS);
+      if ('colour' in src) { if (src.colour === null) delete z.colour; else if (typeof src.colour !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(src.colour)) reject('invalid', 'colour must be #rrggbb or null'); else z.colour = src.colour.toLowerCase(); }
+      for (const k of ['enabled', 'visible']) if (k in src) { if (typeof src[k] !== 'boolean') reject('invalid', `${k} must be a boolean`); z[k] = src[k]; }
+      const problem = zoneProblem(z);
+      if (problem) reject('invalid', problem);
+    };
+    let details;
+    if (op === 'zone.create') {
+      if (zones.length >= ZONE_MAX) reject('budgetExceeded', 'At most 16 zones.');
+      let id = nextZoneId(zones);
+      if ('id' in command) { if (!Number.isInteger(command.id) || command.id < 1 || command.id > 9999 || zones.some(z => z.id === command.id)) reject('invalid', 'id is invalid or already used'); id = command.id; }
+      if (id > 9999) reject('budgetExceeded', 'No free zone id');
+      const z = { id, name: `Zone ${id}`, kind: 'box', points: [], zMin: 0, zMax: ceil, edge: 0, hysteresis: ZONE_DEFAULT_HYSTERESIS, enabled: true, visible: true };
+      applyFields(z, command, true);
+      zones.push(z); details = { zoneId: id };
+    } else if (op === 'zone.set') {
+      const i = findIndex(command.id), z = zones[i];
+      applyFields(z, command, false);
+    } else if (op === 'zone.delete') {
+      zones.splice(findIndex(command.id), 1);
+    } else if (op === 'zone.move') {
+      const i = findIndex(command.id);
+      if (!Number.isInteger(command.index) || command.index < 0 || command.index >= zones.length) reject('invalid', 'index out of range');
+      const [z] = zones.splice(i, 1); zones.splice(command.index, 0, z);
+    } else reject('unsupported', `Unknown zone operation ${op}`);
+    if (zones.length) d.zones = zones; else delete d.zones;
+    updateHost(state); updateEffective(state);
+    return details;
+  }
   else if (op === 'output.autoMakeup') { state.parameters.values.makeup = 12; } // Synthetic mock estimate, never engine evidence.
   else if (op === 'listener.set') {
     const ar = sceneAutomationRange(s);
@@ -795,6 +964,11 @@ export function applyMutation(state, command, original = state, presetMaterials 
   else if (op === 'layers.set') { d.editorFlags.layerModes ||= {walls:0,floors:0,ceilings:0,plates:0}; d.editorFlags.layerModes[['walls','floors','ceilings','plates'][command.layer]] = command.mode; }
   else if (op === 'editor.setFlags') Object.assign(d.editorFlags, command.flags);
   else if (op === 'tail.setQuality') ['baseRays', 'adaptive'].forEach(k => { if (k in command) d.tail[k] = command[k]; });
+  else if (op === 'tail.setMotion') {
+    if (typeof command.enabled !== 'boolean') reject('invalid', 'enabled must be a boolean');
+    if (command.enabled) d.motionTail = true;
+    else delete d.motionTail;
+  }
   else reject('unsupported', `Command ${op} is unavailable in the mock`);
   updateHost(state);
   updateEffective(state);

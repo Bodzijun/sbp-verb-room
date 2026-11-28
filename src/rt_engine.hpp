@@ -24,7 +24,7 @@ struct EngineConfig {
     int tailRays = 20000;     // rays per tail refresh
     bool adaptiveTail = false; // refine sparse traces off-thread, up to 4x tailRays
     int tailRefreshMs = 300;  // minimum time between tail refreshes of one source
-    bool tailThread = true;   // false: tail is computed once at construction only
+    bool tailThread = true;   // false: legacy builds once; Motion needs runWorkerStep() or an offline photo copy
     // Many sources: instead of one late-field convolver per source (memory and CPU grow with sources x outputs),
     // keep ONE convolver per output channel and feed it the sum of all sources, each weighted per band and per
     // channel by its traced late-field energy. Exact for a diffuse late field; the temporal shape of the tail is
@@ -60,6 +60,7 @@ struct EngineConfig {
     // Tests: no worker thread even with tailThread; the caller runs the worker with Engine::runWorkerStep().
     bool manualWorker = false;
     unsigned rebuildWorkers = 0; // internal/test override;0=hardware concurrency-1,1=serial
+    bool motionTail = false; // fixed photo with pose-dependent late-field gains, independent of E4a
 };
 
 // Last complete worker result, unit source excitation, omni listener energy.
@@ -149,6 +150,9 @@ public:
     };
     DiffractionStats diffractionStats() const;
     bool tailIsCurrent() const; // all audio convolvers have consumed the latest geometry/decay/quality revision
+    enum class MotionTailState { Off, Preparing, Ready };
+    void setMotionTail(bool enabled) noexcept;
+    MotionTailState motionTailState() const noexcept;
     // Message/control threads only. Immutable snapshot; never called by process().
     std::shared_ptr<const TailDiagnostics> tailDiagnostics() const;
     // Actual immutable modeled geometry, including the seeded roughness/clutter.

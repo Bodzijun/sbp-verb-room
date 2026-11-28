@@ -69,3 +69,7 @@ export function effectiveValue(state, id) {
   if (/^(s\d+z|lz)$/.test(id)) return e.zM?.[id] ?? Math.min(values[id], state.document.scene.ceilingMaterial === null ? 30 : state.document.scene.heightM);
   return values[id];
 }
+export const motionEnabled = state => state?.document?.motionTail === true;
+export const motionStatusText = (state, loadEvent) => !motionEnabled(state) ? ''
+  : (loadEvent?.motionTail ?? state.load?.motionTail) === 'ready' ? 'Motion: ready' : 'Motion: preparing tail…';
+

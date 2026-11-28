@@ -12,15 +12,15 @@ export const PLUGIN_INFO = {
   license: 'AGPLv3 \u00b7 Built with JUCE',
 };
 
-export const WHATS_NEW_VERSION = '0.3.1';
+export const WHATS_NEW_VERSION = '0.4.0';
 
 export const WHATS_NEW = [
-  'Baked late-tail tables now survive project save and reload when an analytic source pattern is fixed.',
-  'Fixed a worker thread race in tail status tracking (workerJumpSeen).',
-  'Wide host output buses up to 64 channels are now accepted, silencing unused channels beyond the rendered layout.',
-  'Added a permanent Sources rack reminder for M / S / Gain behaviour on host-passed channels.',
-  'Added a non-blocking Mix and Settings warning when Positioned dry is off with Ambisonics or surround outputs.',
-  'Updated the user manual with a signal-flow diagram and multichannel/Ambisonics routing details.',
+  'Motion updates the room response in real time as sources move.',
+  'Draw paths with eight shapes, play them in Endless mode, and add wander.',
+  'Link sources to a path so they follow it with their own offsets.',
+  'Use trigger zones to drive Mod Out.',
+  'Send notes or CC from modulation routes in Creative mode.',
+  'The manual explains how to render stems with Source Solo.',
 ];
 
 export const TIPS = [

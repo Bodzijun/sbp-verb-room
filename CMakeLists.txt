@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(verb VERSION 0.3.1 LANGUAGES C CXX)
+project(verb VERSION 0.4.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -7,7 +7,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 find_package(Threads REQUIRED)
 
-add_library(verbcore STATIC src/render.cpp src/tail.cpp src/rt_engine.cpp src/energy.cpp)
+add_library(verbcore STATIC
+  src/render.cpp src/tail.cpp src/rt_engine.cpp src/energy.cpp
+  src/motion_grid.cpp src/motion_grid.hpp src/motion_worker.inc src/motion_audio.inc)
 set_target_properties(verbcore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(verbcore PUBLIC Threads::Threads)
 target_include_directories(verbcore PUBLIC src)
@@ -45,9 +47,14 @@ target_link_libraries(verbdir_tool PRIVATE verbcore)
 add_executable(rt_test src/rt_test.cpp)
 target_link_libraries(rt_test PRIVATE verbcore)
 
+add_executable(motion_test src/motion_test.cpp)
+target_link_libraries(motion_test PRIVATE verbcore)
+
 add_executable(tail_regression src/tail_regression.cpp)
 target_link_libraries(tail_regression PRIVATE verbcore)
 enable_testing()
+add_test(NAME motion_tail COMMAND motion_test)
+set_tests_properties(motion_tail PROPERTIES TIMEOUT 900)
 add_test(NAME tail_regression COMMAND tail_regression)
 add_test(NAME cathedral_tail COMMAND tail_regression)
 set_tests_properties(cathedral_tail PROPERTIES ENVIRONMENT "VERB_CATHEDRAL_ONLY=1")

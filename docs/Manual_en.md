@@ -1,4 +1,4 @@
-# Verb Room 0.3.1 user manual
+# Verb Room 0.4.0 user manual
 
 [Українська версія](Manual_uk.md)
 
@@ -10,7 +10,7 @@
 4. [Rooms and materials](#rooms)
 5. [Sources, the listener, and outputs](#sources)
 6. [Controls and modes](#controls)
-7. [Movement and paths](#movement) · [Motion modulation](#motion-modulation)
+7. [Movement and paths](#movement) · [Motion modulation](#motion-modulation) · [Trigger zones](#zones) · [Stems workflow](#stems)
 8. [Baking explained](#baking) · [Decision table](#bake-decision) · [Workflows](#bake-workflows) · [Statuses](#bake-status) · [Examples](#bake-examples) · [FAQ](#bake-faq)
 9. [Presets and sharing](#presets)
 10. [Settings and performance](#performance)
@@ -22,7 +22,7 @@
 
 ## 1. What Verb Room is
 
-Verb Room is a VST3 reverb that models sound in a room you draw, with sources and a listener you can move. **Physical** plays the modeled room and **Creative** adds controls for shaping its sound. Version 0.3.1 is a working alpha for Windows x64, macOS Universal (Apple silicon and Intel), and Linux x86_64 (classic interface only). Check the [project download page](https://bodzijun.github.io/sbp-verb-room/) for packages and the [cross-platform build guide](Cross_platform_builds_en.md) for experimental CI builds.
+Verb Room is a VST3 reverb that models sound in a room you draw, with sources and a listener you can move. **Physical** plays the modeled room and **Creative** adds controls for shaping its sound. Version 0.4.0 is a working alpha for Windows x64, macOS Universal (Apple silicon and Intel), and Linux x86_64 (classic interface only). Check the [project download page](https://bodzijun.github.io/sbp-verb-room/) for packages and the [cross-platform build guide](Cross_platform_builds_en.md) for experimental CI builds.
 
 <a name="quick-start"></a>
 
@@ -54,7 +54,7 @@ The steps below use the new interface. Windows needs **WebView2 Runtime** for it
 
 - **Header.** The room preset menu shows the current room. **Save**, **Load file**, and **Export IR** handle preset and impulse-response files. The arrow buttons undo and redo edits. **Physical** and **Creative** change how the sound controls are applied. **Theme** holds editor preferences, **About** (also available in **Edit room**) opens a dialog with the build version, recent highlights, quick tips, voluntary support options, and project links, and **Edit room** opens the geometry editor.
 - **Viewport.** Switch among **Plan**, **Front**, **Side**, and **3D**. Use Plan for horizontal positions and Front or Side to check heights. The navigation menu has **Frame all**, **Frame sel.**, and **Lock pan**. The Main viewport also has its own lock button. If a drag has no effect, check the locks.
-- **Overlays.** **Energy** opens the energy-map controls. Choose a source, slice height, octave band, and Direct/Early/Tail components, then analyze. The map estimates modeled coverage on that slice and leaves the audio unchanged. **Rays** shows direct/reflection paths. **Clutter** shows placed obstacles. **Paths** shows movement curves and nodes. See the [Energy analyzer guide](Energy_analyzer_0.1.14_en.md) for map interpretation.
+- **Overlays.** **Energy** opens the energy-map controls. Choose a source, slice height, octave band, and Direct/Early/Tail components, then analyze. The map estimates modeled coverage on that slice and leaves the audio unchanged. **Rays** shows direct/reflection paths. **Clutter** shows placed obstacles. **Paths** shows movement curves and nodes. **Zones** shows or hides the trigger zones (the zone being edited stays visible; hidden zones cannot be clicked). See the [Energy analyzer guide](Energy_analyzer_0.1.14_en.md) for map interpretation.
 - **Inspector and macro strip.** Select the source or listener to see position, orientation, and movement controls. The strip below the inspector contains **Size**, **Absorption**, **RT60 target**, **Predelay**, **Stereo width**, and **Output**.
 - **Tabs.** **Decay** shows the seven modeled decay curves and the three creative decay controls. **Sources** is the input rack, including channel assignment and meters. **Mix** holds early/tail levels, diffusion, Doppler, wet/dry mix, makeup, and ducking. **Modulation** configures motion-driven modulation routes and shaping curves (Creative mode). **Settings** holds output layout, microphone controls, tail quality, and host-related options.
 
@@ -150,6 +150,10 @@ Use more track channels if the inputs need them. The Ambisonic layout fixes its 
 
 **Absorption** scales the room's absorption in either mode (0.3–3.0). For a time in seconds, set and press **RT60 target**. The assistant adjusts absorption toward the mid-band target (500 Hz–2 kHz). Check the achieved decay in the graph, especially when the requested value is outside what the modeled room can reach.
 
+**Motion (experimental)** sits beside **Physical / Creative** and works with either mode. It prepares a reference late tail and a per-channel energy grid in the background. As sources and the listener move, it updates the direction and decay of the tail in real time without Bake. Existing baked tables are available again when you turn Motion off.
+
+On cold start, direct sound and early reflections play while the late tail prepares (about 0.5–1.6 s in the measured scenes), then the tail fades in over 150 ms. With five or more sources, a soloed source behind a partition can retain the shared decay shape of the room even as its tail direction and level follow the opening. Rapid simultaneous movement of a single source and the listener in a large hall can also reduce accuracy. In the MO5b benchmark with 16 outputs and 128-sample blocks at 48 kHz, the audio thread averaged 365 µs per block with 8 sources and 623 µs with 32 sources (p99 686 and 951 µs respectively).
+
 **Size** scales the room and poses at runtime and is available in both modes in this build. The **Scale room** action in Edit room changes geometry once. **Predelay**, **Stereo width**, **Duck** (**Amount** and **Release**), and **Freeze** are Creative controls. Predelay delays wet sound, Stereo width adjusts spatial width where available, Duck attenuates the reflected sound while input is present, and Freeze holds the tail. Switching into Physical leaves the saved overrides available for the next switch to Creative.
 
 In **Mix**, **Positioned dry** makes the direct sound follow source and listener positions. With Positioned dry on, **Mix** sets the amount of reflected sound while keeping the modeled direct signal. With it off, Mix crossfades raw input and the modeled room. Under **Listen · solo**, use **Direct**, **Early**, and **Tail** to audition components, including combinations. **Output** controls the overall output gain, and **Makeup** adds gain. **Auto** sets Makeup from the last completed model, so stop moving first. Output meters read the final output.
@@ -166,12 +170,19 @@ The FX parameter list exposes **Mode**, **Size**, `absorption`, `decayLow`, `dec
 
 Room drawing, surface materials, source routing and profiles, output layout, tail quality, the **RT60 target** action, **Auto** makeup, and the bake buttons are editor commands. Automate the resulting **Makeup** or `absorption` parameter when you need an envelope for that value. To give DAW X/Y/Z envelopes finer lane resolution inside a specific room, configure **Edit room → Scene → Automation range**.
 
+<a name="stems"></a>
+### Stems workflow
+
+Verb Room renders the scene to one output bus. To deliver separate stems such as dialogue, foley, FX and music, render once per group using its Source **Solo** buttons. Start each pass at the same transport position with the same input signals, room, listener and output gain. Sum the exports at unity gain. In the four-source static regression, the sum reproduces the full mix to floating-point precision in Physical, Creative, Positioned dry and Motion.
+
+**Freeze** can change the decay it captures in each pass. With five or more sources, Motion uses a shared tail and solo passes can differ from the full mix. ST1 also found differences in some non-Motion tests with five or more moving sources. Compare the sum with the full mix when you need a null test. The plug-in's Duck detector listens to all host inputs before Source Solo/Mute. Keep sending the same inputs in every pass so the detector receives the same signal.
+
 <a name="movement"></a>
 
 ## 7. Movement and paths
 
 1. Select one source or the listener. Under **Path**, press **Draw path**. Click at least two points in the viewport and finish with Enter, a double-click, or **Drawing… (Finish)**. Escape cancels the draw. Use **Edit** to drag, insert, append, or remove points. Use **Clear** to remove the path and return to static XYZ.
-2. Turn on **Enabled** to follow the path. **Closed** joins the end back to the start. **Smooth** curves through the points. With a closed path, **Laps** sets the number of circuits across the movement window.
+2. Turn on **Enabled** to follow the path. **Closed** joins the end back to the start. **Smooth** curves through the points. With a closed path, **Laps** sets the number of circuits across the movement window, or turn on **Endless (∞)** to circulate continuously at a constant speed for as long as the transport runs.
 3. Drag **Position** to check the movement. **Start %** and **End %** define the window within the 0–100% control range, with the object held at either end outside that window. Point **Time %** keys set when specific points are reached within the window. Easing shapes travel between points. The **Path timeline** button opens the timeline panel, where you can see windows, keys, and playheads together. Its horizontal axis is Position percent. Put the timing in seconds or beats on the REAPER envelope.
 4. To couple paths, assign each enabled path to the same **Group** under **Coupling**. Each object keeps its own route, time window, and easing, and the group shares one **Position** driver. Read **Drives Group …** or **Driven by …** in the inspector. A follower's own Path position envelope does not drive the group.
 5. Choose **Orientation**. **Manual** follows the source's **Azimuth** or listener's **Yaw**. **Along path** follows path direction, and **Look at** faces a source, the listener, or a fixed **Point…**. In the latter two modes the angle parameter adds an offset. **Profile aim** remains an additional adjustment for the source profile.
@@ -179,6 +190,43 @@ Room drawing, surface materials, source routing and profiles, output layout, tai
 ![Timeline panel with the listener and a source on different windows in Group 1](images/manual/group-timeline.png)
 
 *Browser-harness capture with test paths. Voice (Source 1) drives Group 1, and the listener begins at 25% on the same Position axis.*
+
+### Ready-made closed path shapes & Endless loop
+
+Instead of drawing closed curves by hand, use the **Shape** generator under **Path** to create geometrically exact closed trajectories:
+
+- **8 closed shapes:** **Circle** (true circle within 0.05 % of radius using smooth centripetal spline nodes), **Ellipse**, **Figure-8 (∞)** (lemniscate of Gerono crossing the centre twice per cycle; a newly selected Figure-8 automatically offsets its default centre by at least `1.5 m` from the listener inside the room so the source does not pass through the listener on every lap), **Square**, **Rectangle**, **Triangle**, **Star (5-point)**, and **Spiral** (closed in/out loop with configurable turns and independent **Start Z** / **End Z** heights of the first and last point, rising or falling linearly across the spiral).
+- **Live shape parameters & old-shape ghost:** Adjust **Centre X/Y** (with an **On listener** button to centre explicitly on the listener), **Radius / semi-axes / half-sides**, **Height Z** (or **Start Z** and **End Z** for **Spiral**), **Rotation (°)**, **Start phase (°)**, **Direction** (`CCW ↺` / `CW ↻`), **Turns / Loop** (for **Spiral**), and **Nodes** (where applicable). Dragging any parameter readout or typing a valid number updates **both the dashed preview and the active path live** while coalescing the entire drag or typing gesture into **one Undo step** on release/`Enter`/blur (pressing `Esc` during a drag or edit cancels and restores the previous geometry). When you switch to a new shape on an object that already has a path, the previous shape remains visible in Plan and 3D views as a dim dotted **old-shape ghost** until the next shape change, deselect, clicking empty viewport space, or pressing **`Ghost ×`**.
+- **Room safety & collapsible XYZ point list:** If the shape extends beyond the room walls, floor/platforms, or ceiling, a live warning appears with a **Fit to room** button that scales the shape uniformly inside the room (the live path is always clamped safely inside the room). Below the path controls, the **Points (N)** XYZ coordinate list is a collapsible section—automatically collapsed by default when a path has more than **8 points** (remembered per session in UI state only) to keep compact windows clean.
+- **Endless (∞) circulation, live marker & control lock:** On any **Closed** path, turn on **Endless (∞)** to keep the object circulating at a constant linear speed without a lap count for as long as the DAW transport runs. Set **Period (s)** (`0.25–3600 s` per lap) or **Speed (m/s)** (linked to path length). Circulation starts at the phase defined by **Position** (and any timeline window/time keys) and computes double-precision phase directly from the transport sample position, guaranteeing zero drift over hours and identical offline renders. While **Endless** is active, the viewport displays a live moving position marker with a short fading trail and direction arrow along the trajectory, and the **Position** and **Laps** controls are locked (`Endless: position is driven by transport`, preserving their values and restoring them when **Endless** is switched off). Baked late-tail tables are bypassed while **Endless** is on (use **Motion** mode for continuous moving tails); the classic editor also provides a compact shape selector, radius control, **Apply** button, and **Endless** toggle.
+
+### Link to path (rig)
+
+1. Create four sources named **Body**, **Head**, **Hands**, and **Feet**. Assign each its own input. In **Body → Path → Shape**, create a **Circle** at a height of 1.5 m with enough clearance from walls and other surfaces. Enable the path and turn on **Endless** if the character should keep walking while the transport runs.
+2. Select **Head** and choose **Path → Link to path… → Body**. Select **Hands** and **Feet** under **Link several sources**, then apply. All three begin at Body's position.
+3. Select each follower and set its **Forward / Left / Up** offsets in metres. Drag a value or double-click to type it. Each gesture is one Undo step. Escape restores the value from before the gesture.
+
+| Source | Forward | Left | Up |
+| --- | ---: | ---: | ---: |
+| Head | 0.00 | 0.00 | +0.30 |
+| Hands | +0.10 | +0.35 | −0.35 |
+| Feet | +0.15 | −0.10 | −1.30 |
+
+```text
+Plan                                 Elevation
+                    ↑ Left              Head •
+                    │                        ↑ Up (room Z)
+Path ─────────── Body •──→ Forward      Body •
+                                         Feet •
+```
+
+**Forward** follows the horizontal projection of the travel direction. **Left** turns 90° from it in plan, and **Up** always points along room Z. The frame uses the drawn geometry. It holds the nearest valid direction at an end or on a vertical portion, and stays fixed while the source is stopped. The processor clamps the resulting position to room boundaries.
+
+Each follower uses Body's **Position**, timeline, **Laps**, **Endless**, and **Path LFO**. A follower can still set its own orientation and Azimuth keys. **Follow wander** starts on and shares Body's displacement. Turn it off for a source that should follow the drawn curve without that displacement. Plan and 3D show a pale offset curve, a dashed connection to Body, and the live position under the same visibility rules as other paths.
+
+The target must be a source with an enabled path of at least two points. Chains and cycles are refused. Linking replaces the follower's previous curve and **Coupling** assignment. **Unlink (keep as own path)** samples the offset curve into up to 64 points. Clearing Body's path or removing Body applies that conversion to all followers in one undoable command. The sampled path approximates the original motion and does not retain individual timing keys.
+
+Linked followers always use the live tail, including when **Follow wander** is off. Use **Link to path** with **Motion**, which renders moving tails live. If each object needs a baked tail, draw a separate path for each object. **Bake** processes eligible independent paths. The classic editor loads and saves rigs through the same processor.
 
 ### Azimuth keys
 
@@ -207,7 +255,7 @@ In **Creative** mode (`Mode = Creative`), two additional modulation tools let sc
 
 #### Modulation routes (`Modulation` tab & floating editor)
 
-Each route links a **Source object** (`Source 1..32` or **Listener**) and one of 11 spatial/motion **Drivers** to a per-source or global **Target**, shaped by a transfer curve and attack/release smoothing (up to 64 routes per instance):
+Each route links a **Source object** (`Source 1..32` or **Listener**) and one of 14 spatial/motion **Drivers** to a per-source or global **Target**, shaped by a transfer curve and attack/release smoothing (up to 64 routes per instance):
 
 - **Docked bottom editor & optional detach:** The full **Modulation** editor (toolbar with **+ Add route**, **Add from preset…**, route list on the left, interactive curve, node bar, ranges, and live telemetry on the right) lives right inside the bottom **Modulation** tab; drag the inspector/tabs splitter upward to give it extra room. Click **Detach ↗** (or the **Mod** toggle in the viewport toolbar, available in both **Main** and **Edit room**) to open the optional floating **Modulation editor** over the scene. When detached, the bottom tab displays the compact route list and **Dock ↙**; drag the floating header to move (double-click to reset), resize from the top-right grip, collapse (`−`), or press `Dock ↙` / `Mod` / `×` / `Esc` to dock back. Picking from **Add from preset…** always appends a new route (selecting it, briefly highlighting its row, and confirming `Added route: <Driver → Target>` in the status bar without overwriting the current route), and double-clicking a route selects it directly without popping up extra windows. Each route row clearly lists its full **Driver → Target**, object scope, explicit **Active / Off / Bypassed** status, and live target readout with units.
 
@@ -215,7 +263,7 @@ Each route links a **Source object** (`Source 1..32` or **Listener**) and one of
 
   *Docked **Modulation** tab showing a **Distance to listener → Low-pass** route (`In 1–15 m`, `Out 20000–1400 Hz`), its transfer curve, and live telemetry readout.*
 
-- **11 drivers:** **Distance to listener**, **Distance to point** (with reference **X / Y / Z** fields), **Azimuth to listener** (relative to listener heading, ±180°), **Elevation angle**, world **X**, **Y**, **Z**, smoothed 3D **Speed**, signed **Radial speed** (away positive, toward negative), **Path position** (shown in ranges as **In (path 0–1)** = effective path progress 0..1 including Path LFO), and **Distance to nearest wall**.
+- **14 drivers:** **Distance to listener**, **Distance to point** (with reference **X / Y / Z** fields), **Azimuth to listener** (relative to listener heading, ±180°), **Elevation angle**, world **X**, **Y**, **Z**, smoothed 3D **Speed**, signed **Radial speed** (away positive, toward negative), **Path position** (shown in ranges as **In (path 0–1)** = effective path progress 0..1 including Path LFO), **Distance to nearest wall**, and the zone drivers **In zone**, **Zone index** and **Distance to zone** (see [Trigger zones](#zones)).
 - **8 targets & safe range/curve switching:** Per-source **Source gain Δ** (`-60..+12 dB`), **Source low-pass** (`20..20000 Hz`), **Source high-pass** (`20..20000 Hz`), **Source low shelf** (`-12..+12 dB`), and **Source high shelf** (`-12..+12 dB`), targeting the same or another source via **Apply to**; global **Early level Δ** (`-60..+6 dB`), **Tail level Δ** (`-48..+12 dB`), and **Wet / dry mix Δ** (`-100..+100 %`). Multiple routes on the same target sum in dB / % (or log₂ octaves for LPF/HPF). Output ranges clamp automatically to each target's legal domain; switching **Target** atomically resets output range and resets the curve to linear defaults in one Undo step, while switching **Driver** resets `Input range` to that driver's defaults.
 - **Transfer curve, smoothing, and live readout:** Drag 2–8 nodes on the interactive curve graph (double-click empty plot or press **+ Node** to insert; **Del** or **− Node** removes; one drag gesture records a single undo step). Toggle **Smooth** per segment, edit numeric **Node X / Y**, **In / Out** ranges, **Invert**, **Clamp**, **Atk ms** (0–2000 ms), and **Rel ms** (0–5000 ms). The **Live telemetry** panel and moving crosshair below the curve show the real-time driver and output target values.
 
@@ -235,6 +283,16 @@ Moving paths (`points >= 2`) include **Path LFO** controls in the source or list
 
 *Browser-harness capture in Edit room showing Path LFO controls (Smooth random, rate, depth, phase), live Swing readout, boundary warning, and Keep inside path button.*
 
+#### Path wander
+
+Whereas **Path LFO** shifts an object *along* its drawn trajectory, **Path wander** adds a smooth, deterministic random displacement *across* the path (horizontal perpendicular in plan and vertical along Z) so each lap on a closed loop feels alive and slightly different ("fly around the listener"). Like **Path LFO**, it is **Creative mode only**:
+
+- Toggle **Path wander** beside **Path LFO** in the path inspector and use **Reseed** (`#seed`) to generate a different deterministic trajectory without changing amplitudes or rate.
+- Adjust **Horiz amp** (`0–20 m`, slider `0–10 m`) and **Vert amp** (`0–10 m`, slider `0–5 m`) for target RMS transverse displacement, **Rate** (`0.05–8 Hz`, with live correlation time readout `corr s` / fraction of an Endless lap), and **Smoothness** (`0–100 %`, interpolating from C1 Catmull-Rom to C2 cubic B-spline).
+- **Pin ends** tapers the displacement smoothly to zero at both ends of open paths (closed paths interpolate continuously across the closure seam with zero jump). **Horiz only** suppresses vertical Z displacement while preserving your **Vert amp** value.
+- **Room clamp, orientation, and Bake:** Displaced poses are clamped inside the room walls, floor, and ceiling (never crossing walls). **Along path** keeps facing the undisplaced path tangent (no flipping on transverse wobbles), while **Look at**, **Doppler**, and **Modulation** drivers follow the live displaced pose. In the viewport, a translucent emerald tube displays the wander amplitude envelope along the path. When **Path wander** is active in Creative mode, **Bake path** tables are temporarily bypassed and restored intact when Wander is turned off or switched to Physical (use **Motion** mode for continuous moving late tails).
+- **Classic UI:** Provides compact **Wander**, amplitude slider, and **Reseed** controls for the selected path.
+
 #### Using modulation in other plug-ins
 
 Every modulation route in **Creative** mode includes an optional **Host out** slot (`—` or `1`–`16`), corresponding to the sixteen automatable host parameters **`Mod Out 1`** … **`Mod Out 16`** exposed at the end of Verb Room’s parameter list (listed like any normal parameter so DAWs such as REAPER allow linking to them):
@@ -246,6 +304,93 @@ Every modulation route in **Creative** mode includes an optional **Host out** sl
   1. Insert Verb Room in **Creative** mode and add a route (e.g., **Distance to listener → Host output only**, **Host out** = `1`).
   2. Open another FX before or after Verb Room on the track (or route across track FX in REAPER), click the target parameter’s **Param** button → **Parameter modulation / MIDI link**.
   3. Enable **Link from FX parameter**, pick **Verb Room** → **`Mod Out 1`**, and adjust offset/scale as needed.
+
+<a name="zones"></a>
+
+#### Trigger zones
+
+A **zone** is a named area of the room: a **box** or a **polygon** in plan, between a **Bottom** and a **Top** height. When a source or the listener is inside a zone, modulation routes can react, and through **Host out** another plug-in can react too (for example a footstep sampler that switches from wood to tiles). Zones are part of the scene: they are saved with the project and in `.verbroom` presets, and loading a preset with **Keep I/O** takes the preset's zones like the rest of the room. They change nothing in the acoustics.
+
+![Edit room with four zones: the edited polygon is lit because Source 1 stands inside it](images/manual/zones-edit.png)
+
+*Edit room → Scene → Zones. The edited zone shows its handles; a zone with an object inside is lit (filled, glowing outline, `●` and the object list).*
+
+**Creating zones** (Edit room, Plan view):
+
+- **Box:** click **+ Box** in Scene → Zones (or the box-zone tool on the left rail, key `T`) and drag opposite corners.
+- **Polygon:** click **+ Polygon** (key `G`), click the vertices, then **double-click**, press **Enter** or click the first vertex to finish. **Esc** cancels the drawing; `Ctrl+Z` removes the last vertex while drawing. A polygon may be concave but must not cross itself (3–32 vertices).
+- New zones span floor to ceiling, get the next free number and colour, and become the edited zone. Points outside the walls are moved onto the room bounds.
+
+**Editing:** click **Edit** on a zone (or click inside it in Plan). Drag a **vertex** (square handle), an **edge** (round handle or the edge itself) or the **inside** (moves the whole zone). The zone and anything that depends on it update live during the drag; each drag is **one Undo step**, and **Esc** during a drag cancels it. In the list you can rename a zone, pick its display colour, set **Bottom / Top** (metres), **Soft edge**, **Hysteresis**, **Enabled**, **Visible**, reorder it with **↑ / ↓**, or **Delete** it (or press `Del` while it is edited). Up to **16 zones** per instance.
+
+**Soft edge and hysteresis:**
+
+- **Soft edge** (`0–10 m`, default `0` = hard): the **In zone** driver fades from `0` at the boundary to `1` once the object is `Soft edge` metres inside (smooth S-curve). Use it for cross-fades; leave `0` for switches.
+- **Hysteresis** (`0–2 m`, default `0.05 m`): with a hard edge, an object counts as inside as soon as it touches the zone and only leaves after it is `Hysteresis` metres outside. An object that stands on the boundary or jitters across it does not flicker.
+- Fast objects never skip a zone: the motion between two control steps is tested as a segment, so even a 2 cm zone crossed at 100 m/s registers for at least one step. A seek, loop jump or project reload re-evaluates the state from the current position (no stuck state).
+
+**Drivers** (Modulation → **Driver**; **Creative mode only**, like every route):
+
+| Driver | Value | Typical use |
+|---|---|---|
+| **In zone** (+ **Zone** picker) | `0` outside, `1` inside (soft edge: smooth `0–1`) | switch or cross-fade one thing |
+| **Zone index** | `0` outside every zone, else the list number of the first enabled zone that contains the object | several surfaces/rooms on one slot |
+| **Distance to zone** (+ **Zone**) | signed metres: negative inside, positive outside (`1000` if the zone is missing or disabled) | approach effects, “getting closer to the stage” |
+
+The route editor shows a **Zone** picker and a live `● inside / ○ outside` readout next to the usual live telemetry. Deleting a zone keeps the routes; they read “outside” until you pick another zone. Disabled zones read “outside”; hidden zones still trigger.
+
+![Route editor: In zone driver with the Zone picker and live inside readout, sent to Mod Out 1](images/manual/zones-route.png)
+
+*In zone → Host output only → Mod Out 1, with the Zone picker and the live `● inside` readout.*
+
+**Footstep foley in REAPER (zone → Mod Out → sampler):**
+
+1. Put Verb Room in **Creative** mode. In **Edit room → Scene → Zones** draw a zone over the tiled area (`Tiles`) and one over the wooden stage (`Stage`).
+2. Give Source 1 a path that walks over both (or move it by hand / with automation).
+3. Open the **Modulation** tab → **+ Add route**: Source `01`, Driver **In zone**, Zone **Tiles**, Target **Host output only**, **Host out** `1`, Atk/Rel `0 ms` for a hard switch (or a few ms to soften it). Add a second route with Zone **Stage** → **Host out** `2`. For a single selector, use **Zone index** → **Host out** `3` instead, with `In 0…N`.
+4. On the sampler (on this or another track), click the parameter that selects the sample set or layer volume → **Param** → **Parameter modulation / MIDI link** → enable **Link from FX parameter** → **Verb Room** → **`Mod Out 1`**; set scale/offset. Repeat with `Mod Out 2` for the second layer.
+5. Play: the layer switches when the source enters the zone, with at most one audio block of delay. Do not draw envelopes on `Mod Out 1–16`; they are outputs.
+
+**Limits:** zones drive routes only in **Creative** mode (in **Physical** all routes and `Mod Out` are bypassed and return to `0.5`); up to **16 zones**; host outputs follow with **up to one audio block** of latency; Verb Room can also send **MIDI** notes or CC (see [MIDI out](#midi-out)); zone occupancy is not a host parameter of its own. The **Classic UI** shows a short zone list on the **Space** page (Enabled / Visible / Delete) but no zone drawing; zones are kept in the project.
+<a name="midi-out"></a>
+
+#### MIDI out
+
+Any modulation route can also send **MIDI notes or CC** to the next plug-in on the track (for example a sampler that plays footsteps). Open the route in the **Modulation** tab or the floating editor and pick a **MIDI out** mode (in the compact dock, click **MIDI**). **Off** (the default) sends nothing; a route without MIDI is stored exactly as before.
+
+| Mode | What is sent | Settings |
+|---|---|---|
+| **Gate** | note-on when the route output rises to **Thr**, note-off when it falls below **Thr − Hyst** | Ch, Note, Thr, Hyst, Vel (or **= value**) |
+| **Trigger** | one note of fixed length on every rise above **Thr** | Ch, Note, Thr, Len ms, Vel |
+| **CC** | the route output scaled to **Range** `lo…hi`, sent only when the value changes | Ch, CC number, Range |
+| **Index** (keyswitch) | with **Zone index**: zone `N` plays note `Base + N − 1` and holds it while the object stays there; outside every zone nothing is held. Optional **program change** = `N` | Ch, Base, Vel, Program change |
+
+The route row shows the note name (middle C = **C3** = `60`) and a live indicator of the **last message sent**. Each edit is one Undo step; routes with MIDI are saved in the project, in `.verbroom` presets and survive **Keep I/O**.
+
+**Footstep foley in REAPER (zone → MIDI note → sampler):**
+
+1. Put Verb Room in **Creative** mode and draw zones (`Tiles`, `Stage`) as described above; give Source 1 a path across them.
+2. In the same FX chain, insert a sampler **after** Verb Room (for example ReaSamplOmatic5000 with a tile step on note `C3`, or a multi-sample instrument with one sample set per note).
+3. Add a route: Source `01`, Driver **In zone**, Zone **Tiles**, Target **Host output only**, **MIDI out** = **Gate** (or **Trigger** for one hit per entry), Ch `1`, Note `60`. For one instrument with several surfaces, use **Zone index** with **MIDI out** = **Index** and **Base** = the first keyswitch note.
+4. **Press Play.** Verb Room sends MIDI only while the host transport plays; the sampler on the next slot receives it.
+5. If your host or sampler ignores MIDI coming from an effect, use the **Mod Out** route described above (`Link from FX parameter`), or a small MIDI-generating script (in REAPER a JSFX) linked to `Mod Out`.
+
+**Routing in REAPER (verified on Windows):** REAPER does not let one track both take audio from a source and send the MIDI that an effect on that track generates to a sampler on *another* track, and enabling REAPER's internal-feedback option in the preferences did not change this in testing. The setup that worked uses the MIDI loopback built into Windows:
+
+1. **Preferences → Audio → MIDI Devices:** enable **Output** for *Default App Loopback (A)* and **Input** for *Default App Loopback (B)*. They work as a pair: what is sent to A comes out of B. If nothing arrives, swap them.
+2. On the Verb Room track, set **MIDI Hardware Output** to *Default App Loopback (A)*.
+3. On the sampler track (for example "Steps"), set the **MIDI input** to *Default App Loopback (B)*, **All channels**, and force MIDI.
+4. Right-click the sampler track's red record-arm button and choose **Monitor input** (or *Record: disable (input monitoring only)* if you do not need to record).
+
+A third-party virtual MIDI loopback program did not work on the tester's Windows system (the cause was not investigated); the Windows built-in loopback above did. MIDI delivery therefore depends on the host's and the operating system's routing, not on Verb Room: the plug-in always emits the events on its VST3 MIDI output.
+
+**Rules and limits:**
+
+- MIDI is generated only in **Creative** mode and only while the **transport plays** (a host without transport information counts as playing). Physical mode, stop, seek/loop jump, bypass, project or preset load, a removed/disabled route and a changed channel/note **release every held note** with a note-off — never with "All notes off" (CC 123), so other MIDI on the track is left alone.
+- Two routes that hold the same note on the same channel share it: one note-on, the note-off when the last route lets go. CC values are sent once per change and never twice in a row for the same controller.
+- **Latency:** messages are stamped at the end of the 128-sample control step that produced them (at most **128 samples**, about 2.7 ms at 48 kHz), plus the usual one-block delay of the route.
+- Verb Room generates MIDI and does not pass incoming MIDI through. The JUCE VST3 smoke host verified the event output bus and note/CC delivery, and the route from Verb Room to a sampler on another track was tested in REAPER on Windows through the Windows MIDI loopback (see above). Other hosts and real macOS/Linux systems remain unverified for 0.4.0. The release ships VST3 builds only.
+
 
 #### Known limits
 
@@ -461,7 +606,7 @@ xattr -dr com.apple.quarantine "$HOME/Library/Audio/Plug-Ins/VST3/Verb Room.vst3
 
 With more than four sources, early reflections update in batches and glide between updates during motion. The geometry is **2.5D**, with vertical walls and horizontal surfaces. Low-frequency wave modes are outside this model. The late tail is a statistical estimate, and the Energy analyzer shows modeled coverage with unit excitation. Treat the readouts as model diagnostics and audition the scene in the session.
 
-Windows was tested in REAPER (including the 0.3.1 64-channel output bus and 0.3.0 `Mod Out` parameter linking). A community tester tried 0.2.0 on a real Mac. Versions 0.2.1–0.3.1 await Mac testing. Linux builds and passes CI tests with the classic interface and awaits testing in a real host. Live performance on older four-core machines still needs checks. See the [0.3.1 release notes](Release_0.3.1_en.md).
+The owner tested a pre-release Windows build in REAPER. The 64-channel host output bus was tested in 0.3.1, and REAPER parameter linking for `Mod Out` was tested in 0.3.0. A community tester tried 0.2.0 on a real Mac. Real-host testing of 0.4.0 on macOS and Linux and performance on older four-core machines remain open. [0.4.0 release notes](Release_0.4.0_en.md)
 
 <a name="reporting"></a>
 
@@ -485,8 +630,10 @@ Verb Room is distributed under **AGPL-3.0** and uses JUCE under its AGPLv3 optio
 | AmbiX | Ambisonic output in ACN order with SN3D normalization. |
 | Group | Enabled movement paths sharing one Position driver. |
 | Path | The editable movement curve and its timing settings. |
+| **Endless (∞)** | Transport-locked continuous circulation along a closed path at constant speed (`Period s` / `m/s`) without a lap count. |
 | **Motion modulation** | Creative-only routing from spatial/motion drivers through custom curves to source or mix targets. |
 | **Path LFO** | Built-in low-frequency oscillator (`0.05–8 Hz`) modulating an object's **Position** along its drawn path in Creative mode. |
+| **Path wander** | Creative-only deterministic smooth random displacement across the path (horizontal and vertical), clamped inside the room. |
 | Bake | Precompute a late-tail table along motion so playback can use it as the objects move. |
 | Recorded pass | Poses captured while the DAW plays, available to the bake engine. |
 | Settle | Stay at a stable pose long enough to schedule the accurate late-tail rebuild. |

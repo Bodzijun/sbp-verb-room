@@ -2,6 +2,7 @@ import { element, button, note, scrollArea, accordion } from './dom.js';
 import { sourceParts, listenerParts, surfaceParts, scenePartsRoom } from './inspector.js';
 import { sourceStripColour } from '../viewport/colour.js';
 import { cornerRepair } from '../pages/edit-room.js';
+import { zonesPanel } from './zones-panel.js';
 // Edit-page inspector: two tabs (Selected object / Scene) with accordion sections.
 // Open/closed state and the active tab live in the session view state; only the
 // first section of a tab is open until the user changes it.
@@ -19,6 +20,7 @@ export function editInspector(ctx) {
     body.push(...accordion(store, 'scene', [
       { key: 'room', title: 'Room', nodes: [...p.room, ...cornerRepair(ctx)] },
       { key: 'air', title: 'Air', hint: 'temperature · humidity', nodes: p.air },
+      (() => { const z = zonesPanel(ctx); return { key: 'zones', title: 'Zones', hint: z.hint, nodes: z.nodes }; })(),
       { key: 'clutter', title: 'Clutter', nodes: p.clutter },
       { key: 'rough', title: 'Roughness', nodes: p.roughness },
       { key: 'autoRange', title: 'Automation range', hint: p.autoRangeHint, nodes: p.automationRange },

@@ -168,6 +168,8 @@ juce::ValueTree modRoutesToValueTree(const std::vector<verbp::ModulationRoute>& 
         rt.setProperty("target", juce::String(verbp::modTargetName(r.target)), nullptr);
         if (r.hostOut > 0)
             rt.setProperty("hostOut", r.hostOut, nullptr);
+        if (r.zoneId > 0)
+            rt.setProperty("zoneId", r.zoneId, nullptr);
         rt.setProperty("attackMs", fmtModDouble(r.attackMs), nullptr);
         rt.setProperty("releaseMs", fmtModDouble(r.releaseMs), nullptr);
         juce::ValueTree cv("Curve");
@@ -186,6 +188,23 @@ juce::ValueTree modRoutesToValueTree(const std::vector<verbp::ModulationRoute>& 
             cv.appendChild(nt, nullptr);
         }
         rt.appendChild(cv, nullptr);
+        // V04e: optional <Midi/> child, written only when the route sends MIDI (older builds ignore unknown children).
+        if (r.midi.enabled()) {
+            const auto& mo = r.midi;
+            juce::ValueTree mt("Midi");
+            mt.setProperty("mode", juce::String(verbp::modMidiModeName(mo.mode)), nullptr);
+            mt.setProperty("channel", mo.channel, nullptr);
+            mt.setProperty("number", mo.number, nullptr);
+            mt.setProperty("velocity", mo.velocity, nullptr);
+            if (mo.velocityFromValue) mt.setProperty("velocityFromValue", true, nullptr);
+            mt.setProperty("threshold", fmtModDouble(mo.threshold), nullptr);
+            mt.setProperty("hysteresis", fmtModDouble(mo.hysteresis), nullptr);
+            mt.setProperty("lengthMs", fmtModDouble(mo.lengthMs), nullptr);
+            mt.setProperty("ccLo", mo.ccLo, nullptr);
+            mt.setProperty("ccHi", mo.ccHi, nullptr);
+            if (mo.program) mt.setProperty("program", true, nullptr);
+            rt.appendChild(mt, nullptr);
+        }
         modTree.appendChild(rt, nullptr);
     }
     return modTree;
@@ -211,6 +230,7 @@ std::vector<verbp::ModulationRoute> modRoutesFromValueTree(const juce::ValueTree
         if (!verbp::parseModTarget(rt.getProperty("target", "").toString().toStdString(), tgt)) continue;
         r.target = tgt;
         if (rt.hasProperty("hostOut")) r.hostOut = (int)rt.getProperty("hostOut", 0);
+        if (rt.hasProperty("zoneId")) r.zoneId = (int)rt.getProperty("zoneId", 0);
         if (rt.hasProperty("attackMs")) r.attackMs = parseModDouble(rt.getProperty("attackMs"));
         if (rt.hasProperty("releaseMs")) r.releaseMs = parseModDouble(rt.getProperty("releaseMs"));
         const auto cv = rt.getChildWithName("Curve");
@@ -232,7 +252,80 @@ std::vector<verbp::ModulationRoute> modRoutesFromValueTree(const juce::ValueTree
             }
             if (nc > 0) r.curve.nodeCount = nc;
         }
+        const auto mt = rt.getChildWithName("Midi");
+        if (mt.isValid()) {
+            verbp::ModMidiOut mo;
+            if (verbp::parseModMidiMode(mt.getProperty("mode", "off").toString().toStdString(), mo.mode)) {
+                mo.channel = (int)mt.getProperty("channel", 1);
+                mo.number = (int)mt.getProperty("number", 60);
+                mo.velocity = (int)mt.getProperty("velocity", 100);
+                mo.velocityFromValue = (bool)mt.getProperty("velocityFromValue", false);
+                if (mt.hasProperty("threshold")) mo.threshold = parseModDouble(mt.getProperty("threshold"));
+                if (mt.hasProperty("hysteresis")) mo.hysteresis = parseModDouble(mt.getProperty("hysteresis"));
+                if (mt.hasProperty("lengthMs")) mo.lengthMs = parseModDouble(mt.getProperty("lengthMs"));
+                mo.ccLo = (int)mt.getProperty("ccLo", 0);
+                mo.ccHi = (int)mt.getProperty("ccHi", 127);
+                mo.program = (bool)mt.getProperty("program", false);
+                // A damaged MIDI block drops only the MIDI out, never the route.
+                if (verbp::validModMidiOut(mo)) r.midi = mo;
+            }
+        }
         if (verbp::validModRoute(r)) out.push_back(r);
+    }
+    return out;
+}
+
+// V04c: <TriggerZones><Zone id name kind zMin zMax edge hysteresis [colour] [enabled] [visible]><P x y/>...</Zone></TriggerZones>
+juce::ValueTree triggerZonesToValueTree(const std::vector<verbp::TriggerZone>& zones) {
+    juce::ValueTree t("TriggerZones");
+    for (int i = 0; i < (int)zones.size() && i < verbp::kMaxTriggerZones; ++i) {
+        const auto& z = zones[(size_t)i];
+        juce::ValueTree zt("Zone");
+        zt.setProperty("id", z.id, nullptr);
+        zt.setProperty("name", juce::String::fromUTF8(z.name.c_str()), nullptr);
+        zt.setProperty("kind", z.polygon ? "polygon" : "box", nullptr);
+        zt.setProperty("zMin", fmtModDouble(z.zMin), nullptr);
+        zt.setProperty("zMax", fmtModDouble(z.zMax), nullptr);
+        zt.setProperty("edge", fmtModDouble(z.edge), nullptr);
+        zt.setProperty("hysteresis", fmtModDouble(z.hysteresis), nullptr);
+        if (!z.colour.empty()) zt.setProperty("colour", juce::String(z.colour), nullptr);
+        if (!z.enabled) zt.setProperty("enabled", false, nullptr);
+        if (!z.visible) zt.setProperty("visible", false, nullptr);
+        for (const auto& pt : z.points) {
+            juce::ValueTree pv("P");
+            pv.setProperty("x", fmtModDouble(pt.first), nullptr);
+            pv.setProperty("y", fmtModDouble(pt.second), nullptr);
+            zt.appendChild(pv, nullptr);
+        }
+        t.appendChild(zt, nullptr);
+    }
+    return t;
+}
+
+std::vector<verbp::TriggerZone> triggerZonesFromValueTree(const juce::ValueTree& t) {
+    std::vector<verbp::TriggerZone> out;
+    if (!t.isValid()) return out;
+    for (int i = 0; i < t.getNumChildren() && (int)out.size() < verbp::kMaxTriggerZones; ++i) {
+        const auto zt = t.getChild(i);
+        if (!zt.hasType("Zone")) continue;
+        verbp::TriggerZone z;
+        z.id = (int)zt.getProperty("id", 0);
+        z.name = zt.getProperty("name", "").toString().toStdString();
+        z.polygon = zt.getProperty("kind", "box").toString() == "polygon";
+        if (zt.hasProperty("zMin")) z.zMin = parseModDouble(zt.getProperty("zMin"));
+        if (zt.hasProperty("zMax")) z.zMax = parseModDouble(zt.getProperty("zMax"));
+        if (zt.hasProperty("edge")) z.edge = parseModDouble(zt.getProperty("edge"));
+        if (zt.hasProperty("hysteresis")) z.hysteresis = parseModDouble(zt.getProperty("hysteresis"));
+        z.colour = zt.getProperty("colour", "").toString().toStdString();
+        z.enabled = (bool)zt.getProperty("enabled", true);
+        z.visible = (bool)zt.getProperty("visible", true);
+        for (int k = 0; k < zt.getNumChildren(); ++k) {
+            const auto pv = zt.getChild(k);
+            if (pv.hasType("P")) z.points.emplace_back(parseModDouble(pv.getProperty("x")), parseModDouble(pv.getProperty("y")));
+        }
+        bool dup = false;
+        for (const auto& o : out) dup |= o.id == z.id;
+        if (!dup && verbp::validTriggerZone(z)) out.push_back(std::move(z));
     }
     return out;
 }
@@ -249,6 +342,10 @@ VerbProcessor::VerbProcessor()
       modMailbox(std::make_unique<verbp::ModRoutesMailbox>()),
       wallMailbox(std::make_unique<verbp::WallSnapshotMailbox>()),
       modProc(std::make_unique<verbp::ModulationProcessor>()) {
+    zoneMailbox = std::make_unique<verbp::TriggerZoneMailbox>();
+    zoneTracker = std::make_unique<verbp::TriggerZoneTracker>();
+    zoneTracker->reset();
+    midiGen = std::make_unique<verbp::ModMidiGenerator<verbp::kMaxModRoutes>>();
     for (int o = 0; o <= verbp::kMaxSources; ++o)
         for (int k = 0; k < (o == verbp::kListener ? 4 : 5); ++k) pv[o][k] = apvts.getRawParameterValue(verbp::paramId(o, k));
     for(int o=0;o<=verbp::kMaxSources;++o) pathParams[o]=apvts.getRawParameterValue(pathParamId(o));
@@ -323,6 +420,7 @@ void VerbProcessor::prepareToPlay(double sr, int block) {
     havePlayHead = false;
     modProc->reset();
     modFallbackClock = 0;
+    midiReleaseRequest.store(true, std::memory_order_release);  // V04e: flush held notes in the first block after (re)prepare
     lfeSoloGain.reset(sr, 0.01);
     bool needRebuild;
     {
@@ -344,7 +442,41 @@ void VerbProcessor::captureOutputMeters(const juce::AudioBuffer<float>& buffer) 
         if(peak>=1.f)outClips[(size_t)ch].store(true,std::memory_order_relaxed);
     }
 }
-void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer&) {
+// V04e: one control period of route MIDI out into the host buffer (audio thread; fixed-size state, no allocation).
+static void addMidiEvent(juce::MidiBuffer& midi, const verbp::ModMidiEvent& ev) noexcept {
+    const juce::uint8 bytes[3] = {ev.status, ev.d1, ev.d2};
+    midi.addEvent(bytes, ev.size, ev.sample);
+}
+
+void VerbProcessor::emitRouteMidi(const verbp::ModRouteSet& set, const float* raw, bool running, int periodStart, int len, double sampleRate, juce::MidiBuffer& midi) noexcept {
+    std::array<verbp::ModMidiRouteInput, verbp::kMaxModRoutes> in{};
+    const int count = std::min(set.count, verbp::kMaxModRoutes);
+    for (int i = 0; i < count; ++i) {
+        const auto& r = set.routes[(size_t)i];
+        auto& x = in[(size_t)i];
+        if (!r.midi.enabled()) continue;
+        x.cfg = &r.midi;
+        x.active = running && r.enabled && modProc->routeWasActive[(size_t)i];
+        x.norm = modProc->routeNormState[(size_t)i];
+        x.raw = raw ? (double)raw[i] : 0.0;
+        x.identity = (uint32_t)r.object | ((uint32_t)r.driver << 6) | ((uint32_t)r.zoneId << 11) | ((uint32_t)(r.enabled ? 1 : 0) << 20);
+    }
+    midiGen->process(in.data(), count, periodStart, len, sampleRate, [&](const verbp::ModMidiEvent& ev) noexcept { addMidiEvent(midi, ev); });
+}
+
+void VerbProcessor::processBlockBypassed(juce::AudioBuffer<float>& buf, juce::MidiBuffer& midi) {
+    juce::AudioProcessor::processBlockBypassed(buf, midi);
+    midi.clear();
+    if (midiGen->anyHeld()) {
+        midiGen->releaseAll([&](const verbp::ModMidiEvent& ev) noexcept { addMidiEvent(midi, ev); }, 0);
+        midiTotal.store(midiGen->totalEvents, std::memory_order_relaxed);
+    }
+    midiPrevRunning = false;
+}
+
+void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer& midi) {
+    midi.clear();  // V04e: no MIDI input is accepted; what the buffer holds afterwards is this plugin's own output
+    midiGen->beginBlock();
     const auto blockStart = std::chrono::steady_clock::now();
     juce::ScopedNoDenormals noDenormals;
     static_assert(std::atomic<uint64_t>::is_always_lock_free, "Web processing observation must be lock-free");
@@ -430,27 +562,9 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     const verbp::CompiledPath* cp[verbp::kMaxSources + 1] = {};
     for(int o=0;o<=verbp::kMaxSources;++o) cp[o] = &pathMailboxes[(size_t)o].consume();
     const auto& modSet = modMailbox->consume();
+    const auto& zoneSet = zoneMailbox->consume();
+    const bool haveZones = zoneSet.count > 0;
     const auto& wallSnap = wallMailbox->consume();
-    double pathTangent[verbp::kMaxSources + 1] = {};
-    bool pathActive[verbp::kMaxSources + 1] = {};
-    for(int o=0;o<=verbp::kMaxSources;++o) {
-        const auto& path=*cp[o];
-        if(!path.enabled || (o>=NS && o!=verbp::kListener))continue;
-        int driver=o;
-        if(path.group>=0)for(int d=0;d<NS;++d)if(cp[d]->enabled && cp[d]->group==path.group){driver=d;break;}
-        const double u=pathParams[driver]->load(std::memory_order_relaxed);
-        double yaw=0;const auto q=path.evaluate(u,&yaw);
-        for(int k=0;k<3;++k)cur[o][k]=q[(size_t)k];
-        cur[o][2]=std::clamp(cur[o][2],0.0,zTop);
-        cur[o][3]=path.evaluateAzimuth(u,cur[o][3]);
-        pathTangent[o]=yaw;pathActive[o]=true;
-    }
-    // E19: orientation is resolved after every position is known (Look at needs the target's position this block).
-    // The azimuth control is the offset of Along path / Look at, so the raw manual value is kept: cur[o][3] holds the resolved azimuth afterwards.
-    double manualAz[verbp::kMaxSources + 1] = {};
-    for(int o=0;o<=verbp::kMaxSources;++o)manualAz[o]=cur[o][3];
-    verbp::applyOrientation(NS,cur,pathTangent,pathActive,[&](int o)->const verbp::CompiledPath&{return *cp[o];});
-    for(int o=0;o<=verbp::kMaxSources;++o)if(o<NS||o==verbp::kListener)liveAz[(size_t)o].store((float)cur[o][3],std::memory_order_relaxed);
     const uint64_t ser = loadSerial.load();
     const bool newEngine = (ser != serialSeen);
     const double appliedSize=engineSize.load();
@@ -460,23 +574,12 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     double curPtOff[verbp::kMaxPoints][3] = {};
     for (int p = 0; p < P; ++p)
         for (int k = 0; k < 3; ++k) curPtOff[p][k] = ptOff[p][k].load(std::memory_order_relaxed);
-    if (newEngine) {  // new engine: start from the current values, no glide
-        prevAnySourceSolo = anySourceSolo;
-        for (int i = 0; i < NS; ++i) {
-            std::memcpy(prev[i], cur[i], sizeof prev[i]);
-            std::memcpy(prevRaw[i], cur[i], sizeof prevRaw[i]);
-            samplesSinceMove[i] = 0;
-            prevGain[i] = curGain[i]; prevSourceGate[i] = sourceGate[i];
-        }
-        std::memcpy(prev[verbp::kListener], cur[verbp::kListener], sizeof prev[verbp::kListener]);
-        std::memcpy(prevRaw[verbp::kListener], cur[verbp::kListener], sizeof prevRaw[verbp::kListener]);
-        samplesSinceMove[verbp::kListener] = 0;
-        for (int p = 0; p < P; ++p) std::memcpy(prevPtOff[p], curPtOff[p], sizeof prevPtOff[p]);
+    if (newEngine) {
         havePlayHead = false;
         haveLastProcessWall = false;
         modProc->reset();
+        zoneTracker->reset();
         modFallbackClock = 0;
-        serialSeen = ser;
     }
     const double wallGap = haveLastProcessWall ? std::chrono::duration<double>(blockStart - lastProcessWall).count() : 0.0;
     const bool gapJump = !newEngine && haveLastProcessWall && wallGap > std::max(0.25, 8.0 * blockSec);
@@ -514,6 +617,115 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             }
         }
     }
+    auto endlessPhaseAt = [&](int o, int sampleOffset) noexcept -> double {
+        const double periodS = cp[o]->endlessPeriodS;
+        if (phPresent) {
+            if (!phPlaying) return 0.0;
+            if (phBaseSec >= 0.0)
+                return verbp::endlessTransportPhaseSec(std::max(0.0, phBaseSec + (double)sampleOffset / sampleRate), periodS);
+            return verbp::endlessTransportPhase(phBaseSample + (int64_t)sampleOffset, sampleRate, periodS);
+        }
+        return verbp::endlessTransportPhase(modFallbackClock + (int64_t)sampleOffset, sampleRate, periodS);
+    };
+    double pathTangent[verbp::kMaxSources + 1] = {};
+    bool pathActive[verbp::kMaxSources + 1] = {};
+    bool anyEndlessActive = false;
+    // V04d: the Position driver of an object: its Coupling group's driver, or for a follower its target's (and the target's group's).
+    auto pathDriverOf = [&](int o) noexcept -> int {
+        const int src = cp[o]->followTarget >= 0 ? cp[o]->followTarget : o;
+        if (cp[src]->group >= 0)
+            for (int d = 0; d < NS; ++d)
+                if (cp[d]->enabled && cp[d]->group == cp[src]->group) return d;
+        return src;
+    };
+    // V04d: follower pose = drawn target pose (+ shared wander already applied by the caller) + offset in the path frame,
+    // clamped into the room from the target pose (walls / floor / ceiling like a wander displacement, then 0..zTop).
+    auto followerPlace = [&](int o, double bx, double by, double bz, double yawDeg, double& qx, double& qy, double& qz) noexcept {
+        double dx = 0, dy = 0, dz = 0;
+        verbp::followOffsetDelta(yawDeg, cp[o]->followOffset, dx, dy, dz);
+        qx = bx + dx; qy = by + dy; qz = bz + dz;
+        verbp::clampWanderPoseToRoom(wallSnap, bx, by, bz, qx, qy, qz);
+        qz = std::clamp(qz, 0.0, zTop);
+    };
+    for(int o=0;o<=verbp::kMaxSources;++o) {
+        const auto& path=*cp[o];
+        if(!path.enabled || (o>=NS && o!=verbp::kListener))continue;
+        if (path.followTarget >= 0) {  // V04d follower
+            if (path.followTarget >= NS || o == verbp::kListener) continue;
+            const int driver = pathDriverOf(o);
+            const double u = pathParams[driver]->load(std::memory_order_relaxed);
+            double fyaw = 0;
+            verbp::PathPoint q;
+            double uAz = u;
+            if (path.closed && path.endless) {
+                anyEndlessActive = true;
+                const double uEff = path.endlessEffectiveU(u, endlessPhaseAt(o, 0));
+                q = path.evaluateSingleLapArcFraction(uEff);
+                fyaw = path.followYawAtSingleLap(uEff);
+                uAz = uEff;
+            } else {
+                q = path.evaluate(u);
+                fyaw = path.followYawAtSingleLap(path.singleLapFrac(u));
+            }
+            followerPlace(o, q[0], q[1], std::clamp(q[2], 0.0, zTop), fyaw, cur[o][0], cur[o][1], cur[o][2]);
+            cur[o][3] = path.evaluateAzimuth(uAz, cur[o][3]);
+            pathTangent[o] = fyaw; pathActive[o] = true;
+            continue;
+        }
+        int driver=o;
+        if(path.group>=0)for(int d=0;d<NS;++d)if(cp[d]->enabled && cp[d]->group==path.group){driver=d;break;}
+        const double u=pathParams[driver]->load(std::memory_order_relaxed);
+        double yaw=0;
+        if (path.closed && path.endless) {
+            anyEndlessActive = true;
+            const double uEff = path.endlessEffectiveU(u, endlessPhaseAt(o, 0));
+            const auto q = path.evaluateSingleLapArcFraction(uEff, &yaw);
+            for(int k=0;k<3;++k)cur[o][k]=q[(size_t)k];
+            cur[o][2]=std::clamp(cur[o][2],0.0,zTop);
+            cur[o][3]=path.evaluateAzimuth(uEff,cur[o][3]);
+        } else {
+            const auto q=path.evaluate(u,&yaw);
+            for(int k=0;k<3;++k)cur[o][k]=q[(size_t)k];
+            cur[o][2]=std::clamp(cur[o][2],0.0,zTop);
+            cur[o][3]=path.evaluateAzimuth(u,cur[o][3]);
+        }
+        pathTangent[o]=yaw;pathActive[o]=true;
+    }
+    {
+        const bool effTransPlaying = phPresent ? phPlaying : (n > 0);
+        const int64_t effTransSample = phPresent
+            ? (phPlaying ? (phBaseSec >= 0.0 ? (int64_t)std::llround(std::max(0.0, phBaseSec) * sampleRate) : phBaseSample) : prevPlayHeadSample)
+            : modFallbackClock;
+        const double effTransSec = phPresent
+            ? (phPlaying ? (phBaseSec >= 0.0 ? std::max(0.0, phBaseSec) : (double)phBaseSample / sampleRate)
+                         : (phBaseSec >= 0.0 ? std::max(0.0, phBaseSec) : (double)prevPlayHeadSample / sampleRate))
+            : (double)modFallbackClock / sampleRate;
+        webTransPlaying.store(effTransPlaying, std::memory_order_relaxed);
+        webTransSamplePos.store(effTransSample, std::memory_order_relaxed);
+        webTransTimeSec.store(effTransSec, std::memory_order_relaxed);
+        webTransSr.store(sampleRate, std::memory_order_relaxed);
+        webAnyEndless.store(anyEndlessActive, std::memory_order_relaxed);
+    }
+    // E19: orientation is resolved after every position is known (Look at needs the target's position this block).
+    // The azimuth control is the offset of Along path / Look at, so the raw manual value is kept: cur[o][3] holds the resolved azimuth afterwards.
+    double manualAz[verbp::kMaxSources + 1] = {};
+    for(int o=0;o<=verbp::kMaxSources;++o)manualAz[o]=cur[o][3];
+    verbp::applyOrientation(NS,cur,pathTangent,pathActive,[&](int o)->const verbp::CompiledPath&{return *cp[o];});
+    for(int o=0;o<=verbp::kMaxSources;++o)if(o<NS||o==verbp::kListener)liveAz[(size_t)o].store((float)cur[o][3],std::memory_order_relaxed);
+    if (newEngine) {  // new engine: start from the current values, no glide
+        prevAnySourceSolo = anySourceSolo;
+        for (int i = 0; i < NS; ++i) {
+            std::memcpy(prev[i], cur[i], sizeof prev[i]);
+            std::memcpy(prevRaw[i], cur[i], sizeof prevRaw[i]);
+            samplesSinceMove[i] = 0;
+            prevGain[i] = curGain[i]; prevSourceGate[i] = sourceGate[i];
+        }
+        std::memcpy(prev[verbp::kListener], cur[verbp::kListener], sizeof prev[verbp::kListener]);
+        std::memcpy(prevRaw[verbp::kListener], cur[verbp::kListener], sizeof prevRaw[verbp::kListener]);
+        samplesSinceMove[verbp::kListener] = 0;
+        for (int p = 0; p < P; ++p) std::memcpy(prevPtOff[p], curPtOff[p], sizeof prevPtOff[p]);
+        serialSeen = ser;
+    }
     bool objJumped[verbp::kMaxSources + 1] = {};
     bool yawJumped[verbp::kMaxSources + 1] = {};
     bool anyJumped = false;
@@ -523,9 +735,10 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             const double dPos = std::hypot(std::hypot(cur[o][0] - prevRaw[o][0], cur[o][1] - prevRaw[o][1]), cur[o][2] - prevRaw[o][2]) * sizeScale;
             const double dAng = std::fabs(std::remainder(cur[o][3] - prevRaw[o][3], 360.0));
             const double dtSinceMove = (double)(samplesSinceMove[o] + (uint64_t)n) / sampleRate;
-            const bool largeStep = dPos > std::max(0.75, 90.0 * blockSec);
-            const bool fastStep = (dtSinceMove <= 1.5 * blockSec) && dPos > std::max(0.45, 90.0 * blockSec);
-            const bool angJump = dAng > std::max(45.0, 1440.0 * blockSec);
+            const bool isEndlessObj = pathActive[o] && cp[o]->closed && cp[o]->endless;
+            const bool largeStep = !isEndlessObj && (dPos > std::max(0.75, 90.0 * blockSec));
+            const bool fastStep = !isEndlessObj && ((dtSinceMove <= 1.5 * blockSec) && dPos > std::max(0.45, 90.0 * blockSec));
+            const bool angJump = !isEndlessObj && (dAng > std::max(45.0, 1440.0 * blockSec));
             // A Manual turn still snaps azimuth and triggers the acoustic jump handling.
             // It must not reset the XYZ tracker while the object continues along its trajectory.
             yawJumped[o] = angJump;
@@ -555,9 +768,24 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
         }
         if (anyJumped) e.notifyJump();
     }
+    // V04c: a seek / loop / gap / new engine re-evaluates zone occupancy from the pose (no sweep from a stale position).
+    bool zoneReset = newEngine || gapJump || transportJump;
+    const verbp::TriggerZoneTracker* zoneTrk = haveZones ? zoneTracker.get() : nullptr;
     const float makeupGain = juce::Decibels::decibelsToGain(makeupParam->load(std::memory_order_relaxed));
     const float outGain = juce::Decibels::decibelsToGain(gainParam->load(std::memory_order_relaxed));
     const bool creative = modeParam->load(std::memory_order_relaxed) >= .5f;
+    // V04e: MIDI out runs in Creative while the transport plays (or always without a host transport). Stuck-note safety:
+    // stop, seek/loop/gap, new engine, (re)prepare/releaseResources, state load and leaving Creative release every
+    // held note at sample 0 of this block; the routes then re-evaluate from the current pose.
+    bool anyMidiRoute = false;
+    for (int i = 0; i < modSet.count && i < verbp::kMaxModRoutes; ++i) anyMidiRoute |= modSet.routes[(size_t)i].midi.enabled();
+    const bool midiRunning = creative && (!phPresent || phPlaying);
+    {
+        const bool releaseReq = midiReleaseRequest.exchange(false, std::memory_order_acq_rel);
+        if (releaseReq || newEngine || gapJump || transportJump || (midiPrevRunning && !midiRunning))
+            midiGen->releaseAll([&](const verbp::ModMidiEvent& ev) noexcept { addMidiEvent(midi, ev); }, 0);
+        midiPrevRunning = midiRunning;
+    }
     e.setDecayMultipliers(creative ? decayParam[0]->load() : 1., creative ? decayParam[1]->load() : 1., creative ? decayParam[2]->load() : 1.);
     e.setEarlyLevel(creative ? earlyParam->load(std::memory_order_relaxed) : 0.);
     e.setEarlyDiffusion(diffusionParam->load(std::memory_order_relaxed));
@@ -580,6 +808,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     if (positioned) { wetG1 = 1.f; dryG1 = 0.f; }
     const float wetG0 = prevWet, dryG0 = prevDry;
     bool anyLfoActive = false;
+    bool anyWanderActive = false;
     for (int o = 0; o <= verbp::kMaxSources; ++o) {
         if (o >= NS && o != verbp::kListener) continue;
         if (!pathActive[o]) continue;
@@ -588,7 +817,9 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             for (int d = 0; d < NS; ++d)
                 if (cp[d]->enabled && cp[d]->group == cp[o]->group) { driver = d; break; }
         }
-        if (cp[driver]->lfo.enabled && cp[driver]->lfo.depth > 0.0) { anyLfoActive = true; break; }
+        if (cp[driver]->lfo.enabled && cp[driver]->lfo.depth > 0.0) anyLfoActive = true;
+        if (cp[o]->wander.isActive()) anyWanderActive = true;
+        if (anyLfoActive && anyWanderActive) break;
     }
     bool hasAudioModRoute = false;
     for (int i = 0; i < modSet.count && i < verbp::kMaxModRoutes; ++i) {
@@ -597,8 +828,8 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             break;
         }
     }
-    const bool hasAudioModFeature = anyLfoActive || hasAudioModRoute;
-    const bool hasAnyModFeature = anyLfoActive || (modSet.count > 0);
+    const bool hasAudioModFeature = anyLfoActive || anyWanderActive || hasAudioModRoute;
+    const bool hasAnyModFeature = anyLfoActive || anyWanderActive || (modSet.count > 0);
     const bool useModPath = (hasAudioModFeature && (creative || modProc->currentCreativeBlend() > 1e-6))
                          || modProc->hasAnyWetFilter()
                          || (modProc->currentCreativeBlend() > 0.0 && !creative && hasAudioModFeature);
@@ -664,6 +895,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
     float segWetCur = prevWet, segDryCur = prevDry;
     double lastSegAz[verbp::kMaxSources + 1] = {};
     for (int o = 0; o <= verbp::kMaxSources; ++o) lastSegAz[o] = cur[o][3];
+    double lastSegPos[verbp::kMaxSources][3] = {};  // V04d: effective pose of the last segment (tests / diagnostics)
     float segModRaw[verbp::kMaxModRoutes] = {};
     float segModValue[verbp::kMaxModRoutes] = {};
     uint8_t segModActive[verbp::kMaxModRoutes] = {};
@@ -741,15 +973,51 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             };
             double mpx[verbp::kMaxSources + 1] = {}, mpy[verbp::kMaxSources + 1] = {}, mpz[verbp::kMaxSources + 1] = {}, mpt[verbp::kMaxSources + 1] = {};
             if (!useModPath) {
+                double segEndlessU[verbp::kMaxSources + 1] = {};
                 for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) {
-                    mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); mpz[o] = mix(o, 2);
-                    if (pathActive[o] && !cp[o]->points.empty()) cp[o]->projectOnPath(mpx[o], mpy[o], mpz[o], &mpt[o]);
+                    if (pathActive[o] && cp[o]->followTarget >= 0 && !cp[o]->points.empty()) {  // V04d follower
+                        if (cp[o]->closed && cp[o]->endless) {
+                            const double uBase = std::clamp((double)pathParams[pathDriverOf(o)]->load(std::memory_order_relaxed), 0.0, 1.0);
+                            const double uEff = cp[o]->endlessEffectiveU(uBase, endlessPhaseAt(o, done + off));
+                            segEndlessU[o] = uEff;
+                            const auto q = cp[o]->evaluateSingleLapArcFraction(uEff);
+                            mpt[o] = cp[o]->followYawAtSingleLap(uEff);
+                            followerPlace(o, q[0], q[1], std::clamp(q[2], 0.0, zTop), mpt[o], mpx[o], mpy[o], mpz[o]);
+                            hPEnd[o][0] = mpx[o]; hPEnd[o][1] = mpy[o]; hPEnd[o][2] = mpz[o];
+                        } else {
+                            // Hermite-smoothed follower pose -> back to the drawn path (offset removed with the block heading),
+                            // projected, then re-offset with the heading at the projected point.
+                            double dx = 0, dy = 0, dz = 0;
+                            verbp::followOffsetDelta(pathTangent[o], cp[o]->followOffset, dx, dy, dz);
+                            double bx = mix(o, 0) - dx, by = mix(o, 1) - dy, bz = mix(o, 2) - dz, fyaw = pathTangent[o];
+                            cp[o]->projectFollowBase(bx, by, bz, fyaw);
+                            mpt[o] = fyaw;
+                            followerPlace(o, bx, by, std::clamp(bz, 0.0, zTop), fyaw, mpx[o], mpy[o], mpz[o]);
+                        }
+                    } else if (pathActive[o] && cp[o]->closed && cp[o]->endless && !cp[o]->points.empty()) {
+                        int driver = o;
+                        if (cp[o]->group >= 0) {
+                            for (int d = 0; d < NS; ++d)
+                                if (cp[d]->enabled && cp[d]->group == cp[o]->group) { driver = d; break; }
+                        }
+                        const double uBase = std::clamp((double)pathParams[driver]->load(std::memory_order_relaxed), 0.0, 1.0);
+                        const double uEff = cp[o]->endlessEffectiveU(uBase, endlessPhaseAt(o, done + off));
+                        segEndlessU[o] = uEff;
+                        const auto q = cp[o]->evaluateSingleLapArcFraction(uEff, &mpt[o]);
+                        mpx[o] = q[0]; mpy[o] = q[1]; mpz[o] = std::clamp(q[2], 0.0, zTop);
+                        hPEnd[o][0] = mpx[o]; hPEnd[o][1] = mpy[o]; hPEnd[o][2] = mpz[o];
+                    } else {
+                        mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); mpz[o] = mix(o, 2);
+                        if (pathActive[o] && !cp[o]->points.empty()) cp[o]->projectOnPath(mpx[o], mpy[o], mpz[o], &mpt[o]);
+                    }
                 }
                 auto azOf = [&](int o) -> double {
                     const verbp::CompiledPath& cpa = *cp[o];
                     if (!cpa.lookAt) {
                         if (cpa.orient && pathActive[o])
                             return verbp::orientedAzimuth(verbp::OrientMode::AlongPath, manualAz[o], mpt[o], false, 0.0, cpa.orientOffset);
+                        if (pathActive[o] && cpa.closed && cpa.endless)
+                            return cpa.evaluateAzimuth(segEndlessU[o], baseManualAz[o]);
                         return mix(o, 3);
                     }
                     double tx = 0, ty = 0, look = 0; bool ok = false;
@@ -760,6 +1028,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 };
                 for (int s = 0; s < NS; ++s) {
                     const double az = azOf(s), x = mpx[s], y = mpy[s], z = mpz[s];
+                    lastSegAz[s] = az;
                     const double ca = std::cos(az * verb::kPi / 180.0), sa = std::sin(az * verb::kPi / 180.0);
                     for (int p = b.pointStart[(size_t)s]; p < b.pointStart[(size_t)s] + b.pointCount[(size_t)s]; ++p) {
                         // live offset in the source's frame (x forward along the azimuth, y left, z up)
@@ -768,7 +1037,18 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                         e.setSourceAzimuth(p, az);
                     }
                 }
-                e.setListener(mpx[verbp::kListener]*sizeScale, mpy[verbp::kListener]*sizeScale, mpz[verbp::kListener]*sizeScale, azOf(verbp::kListener));
+                const double lisAz = azOf(verbp::kListener);
+                lastSegAz[verbp::kListener] = lisAz;
+                e.setListener(mpx[verbp::kListener]*sizeScale, mpy[verbp::kListener]*sizeScale, mpz[verbp::kListener]*sizeScale, lisAz);
+                if (haveZones) {
+                    double zonePoses[verbp::kMaxSources + 1][4] = {};
+                    for (int o = 0; o <= verbp::kMaxSources; ++o) {
+                        if (o >= NS && o != verbp::kListener) continue;
+                        zonePoses[o][0] = mpx[o]; zonePoses[o][1] = mpy[o]; zonePoses[o][2] = mpz[o];
+                    }
+                    zoneTracker->update(zoneSet, NS, zonePoses, objJumped, zoneReset);
+                    zoneReset = false;
+                }
                 if (needModEval) {
                     const double blend = modProc->advanceCreativeBlend(creative, len, sampleRate);
                     double segPoses[verbp::kMaxSources + 1][4] = {};
@@ -780,18 +1060,24 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                         segPoses[o][2] = mpz[o];
                         segPoses[o][3] = azOf(o);
                         if (pathActive[o]) {
-                            int driver = o;
-                            if (cp[o]->group >= 0) {
-                                for (int d = 0; d < NS; ++d)
-                                    if (cp[d]->enabled && cp[d]->group == cp[o]->group) { driver = d; break; }
+                            if (cp[o]->closed && cp[o]->endless) {
+                                segU[o] = segEndlessU[o];
+                            } else {
+                                int driver = o;
+                                if (cp[o]->followTarget >= 0) driver = pathDriverOf(o);  // V04d: a follower reports its target's Position
+                                else if (cp[o]->group >= 0) {
+                                    for (int d = 0; d < NS; ++d)
+                                        if (cp[d]->enabled && cp[d]->group == cp[o]->group) { driver = d; break; }
+                                }
+                                segU[o] = std::clamp((double)pathParams[driver]->load(std::memory_order_relaxed), 0.0, 1.0);
                             }
-                            segU[o] = std::clamp((double)pathParams[driver]->load(std::memory_order_relaxed), 0.0, 1.0);
                         }
                         lastSegAz[o] = segPoses[o][3];
                     }
                     std::array<verbp::SourceModState, verbp::kModMaxSources> srcMod{};
                     verbp::GlobalModState globMod{};
-                    modProc->evaluateSegment(modSet, NS, segPoses, segU, objJumped, wallSnap, creative, blend, len, sampleRate, srcMod, globMod, segModRaw, segModValue, segModActive, segHostOutNorm);
+                    modProc->evaluateSegment(modSet, NS, segPoses, segU, objJumped, wallSnap, creative, blend, len, sampleRate, srcMod, globMod, segModRaw, segModValue, segModActive, segHostOutNorm, zoneTrk);
+                    if (anyMidiRoute || midiGen->anyHeld()) emitRouteMidi(modSet, segModRaw, midiRunning, done + off, len, sampleRate, midi);
                     modProc->snapped = false;
                 }
                 modProc->prevSegGainValid = false;
@@ -810,25 +1096,83 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 for (int o = 0; o <= verbp::kMaxSources; ++o) {
                     if (o >= NS && o != verbp::kListener) continue;
                     segPathActive[o] = pathActive[o];
-                    if (pathActive[o]) {
+                    if (pathActive[o] && cp[o]->followTarget >= 0) {  // V04d follower: the target's parameter, shared wander, offset
+                        const int driver = pathDriverOf(o);
+                        const double uBase = std::clamp((double)pathParams[driver]->load(std::memory_order_relaxed), 0.0, 1.0);
+                        const bool isEndless = cp[o]->closed && cp[o]->endless;
+                        const bool hasLfo = cp[driver]->lfo.enabled && cp[driver]->lfo.depth > 0.0 && blend > 1e-9;
+                        const bool hasWander = cp[o]->wander.isActive() && blend > 1e-9;
+                        double uEff = isEndless ? cp[o]->endlessEffectiveU(uBase, endlessPhaseAt(o, done + off)) : uBase;
+                        if (hasLfo) uEff = cp[driver]->lfo.applyToU(uEff, tLfoSec, cp[o]->closed, blend);
+                        double bx = 0, by = 0, bz = 0, rawYaw = 0, fyaw = 0;
+                        if (isEndless || hasLfo || hasWander) {
+                            const auto q = isEndless ? cp[o]->evaluateSingleLapArcFraction(uEff, &rawYaw) : cp[o]->evaluate(uEff, &rawYaw);
+                            bx = q[0]; by = q[1]; bz = std::clamp(q[2], 0.0, zTop);
+                            fyaw = cp[o]->followYawAtSingleLap(isEndless ? uEff : cp[o]->singleLapFrac(uEff));
+                        } else {
+                            double dx = 0, dy = 0, dz = 0;
+                            verbp::followOffsetDelta(pathTangent[o], cp[o]->followOffset, dx, dy, dz);
+                            bx = mix(o, 0) - dx; by = mix(o, 1) - dy; bz = mix(o, 2) - dz; fyaw = pathTangent[o];
+                            cp[o]->projectFollowBase(bx, by, bz, fyaw);
+                            bz = std::clamp(bz, 0.0, zTop);
+                        }
+                        if (hasWander) {  // identical to the target's displacement (same parameter, seed, drawn tangent and clamp)
+                            const double uOpen = cp[o]->hasTiming ? cp[o]->evaluateTimeMap(uEff) : std::clamp(uEff, 0.0, 1.0);
+                            const double uPathEnv = cp[o]->closed ? uEff : uOpen;
+                            double wdx = 0.0, wdy = 0.0, wdz = 0.0;
+                            cp[o]->wander.evaluateWorldDelta(tLfoSec, 0.0, uPathEnv, cp[o]->closed, rawYaw, wdx, wdy, wdz);
+                            double wx = bx + wdx * blend, wy = by + wdy * blend, wz = bz + wdz * blend;
+                            verbp::clampWanderPoseToRoom(wallSnap, bx, by, bz, wx, wy, wz);
+                            bx = wx; by = wy; bz = wz;
+                        }
+                        followerPlace(o, bx, by, bz, fyaw, mpx[o], mpy[o], mpz[o]);
+                        mpt[o] = fyaw;
+                        segPoses[o][3] = (cp[o]->orient || cp[o]->lookAt) ? manualAz[o] : cp[o]->evaluateAzimuth(uEff, baseManualAz[o]);
+                        if (isEndless || hasLfo || hasWander) { hPEnd[o][0] = mpx[o]; hPEnd[o][1] = mpy[o]; hPEnd[o][2] = mpz[o]; }
+                        segU[o] = uEff;
+                    } else if (pathActive[o]) {
                         int driver = o;
                         if (cp[o]->group >= 0) {
                             for (int d = 0; d < NS; ++d)
                                 if (cp[d]->enabled && cp[d]->group == cp[o]->group) { driver = d; break; }
                         }
                         const double uBase = std::clamp((double)pathParams[driver]->load(std::memory_order_relaxed), 0.0, 1.0);
-                        double uEff = uBase;
-                        if (cp[driver]->lfo.enabled && cp[driver]->lfo.depth > 0.0 && blend > 1e-9) {
-                            uEff = cp[driver]->lfo.applyToU(uBase, tLfoSec, cp[o]->closed, blend);
+                        const bool isEndless = cp[o]->closed && cp[o]->endless;
+                        const bool hasLfo = cp[driver]->lfo.enabled && cp[driver]->lfo.depth > 0.0 && blend > 1e-9;
+                        const bool hasWander = cp[o]->wander.isActive() && blend > 1e-9;
+                        double uEff = isEndless ? cp[o]->endlessEffectiveU(uBase, endlessPhaseAt(o, done + off)) : uBase;
+                        if (hasLfo) {
+                            uEff = cp[driver]->lfo.applyToU(uEff, tLfoSec, cp[o]->closed, blend);
+                        }
+                        if (isEndless) {
+                            double yaw = 0.0;
+                            const auto q = cp[o]->evaluateSingleLapArcFraction(uEff, &yaw);
+                            mpx[o] = q[0]; mpy[o] = q[1]; mpz[o] = std::clamp(q[2], 0.0, zTop);
+                            mpt[o] = yaw;
+                            segPoses[o][3] = (cp[o]->orient || cp[o]->lookAt) ? manualAz[o] : cp[o]->evaluateAzimuth(uEff, baseManualAz[o]);
+                            hPEnd[o][0] = mpx[o]; hPEnd[o][1] = mpy[o]; hPEnd[o][2] = mpz[o];
+                        } else if (hasLfo || hasWander) {
                             double yaw = 0.0;
                             const auto q = cp[o]->evaluate(uEff, &yaw);
                             mpx[o] = q[0]; mpy[o] = q[1]; mpz[o] = std::clamp(q[2], 0.0, zTop);
                             mpt[o] = yaw;
-                            segPoses[o][3] = cp[o]->evaluateAzimuth(uEff, baseManualAz[o]);
+                            segPoses[o][3] = (cp[o]->orient || cp[o]->lookAt) ? manualAz[o] : cp[o]->evaluateAzimuth(uEff, baseManualAz[o]);
+                            hPEnd[o][0] = mpx[o]; hPEnd[o][1] = mpy[o]; hPEnd[o][2] = mpz[o];
                         } else {
                             mpx[o] = mix(o, 0); mpy[o] = mix(o, 1); mpz[o] = mix(o, 2);
                             if (!cp[o]->points.empty()) cp[o]->projectOnPath(mpx[o], mpy[o], mpz[o], &mpt[o]);
                             segPoses[o][3] = (cp[o]->orient || cp[o]->lookAt) ? manualAz[o] : mix(o, 3);
+                        }
+                        if (hasWander) {
+                            const double uOpen = cp[o]->hasTiming ? cp[o]->evaluateTimeMap(uEff) : std::clamp(uEff, 0.0, 1.0);
+                            const double uPathEnv = cp[o]->closed ? uEff : uOpen;
+                            double wdx = 0.0, wdy = 0.0, wdz = 0.0;
+                            cp[o]->wander.evaluateWorldDelta(tLfoSec, 0.0, uPathEnv, cp[o]->closed, mpt[o], wdx, wdy, wdz);
+                            double wx = mpx[o] + wdx * blend;
+                            double wy = mpy[o] + wdy * blend;
+                            double wz = mpz[o] + wdz * blend;
+                            verbp::clampWanderPoseToRoom(wallSnap, mpx[o], mpy[o], mpz[o], wx, wy, wz);
+                            mpx[o] = wx; mpy[o] = wy; mpz[o] = wz;
                         }
                         segU[o] = uEff;
                     } else {
@@ -841,10 +1185,15 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 }
                 verbp::applyOrientation(NS, segPoses, mpt, segPathActive, [&](int o) -> const verbp::CompiledPath& { return *cp[o]; });
                 for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) lastSegAz[o] = segPoses[o][3];
+                if (haveZones) {
+                    zoneTracker->update(zoneSet, NS, segPoses, objJumped, zoneReset);
+                    zoneReset = false;
+                }
 
                 std::array<verbp::SourceModState, verbp::kModMaxSources> srcMod{};
                 verbp::GlobalModState globMod{};
-                modProc->evaluateSegment(modSet, NS, segPoses, segU, objJumped, wallSnap, creative, blend, len, sampleRate, srcMod, globMod, segModRaw, segModValue, segModActive, segHostOutNorm);
+                modProc->evaluateSegment(modSet, NS, segPoses, segU, objJumped, wallSnap, creative, blend, len, sampleRate, srcMod, globMod, segModRaw, segModValue, segModActive, segHostOutNorm, zoneTrk);
+                if (anyMidiRoute || midiGen->anyHeld()) emitRouteMidi(modSet, segModRaw, midiRunning, done + off, len, sampleRate, midi);
 
                 float targetSegGain[verbp::kMaxSources] = {};
                 for (int s = 0; s < NS; ++s) {
@@ -941,6 +1290,7 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
                 }
                 e.setListener(segPoses[verbp::kListener][0]*sizeScale, segPoses[verbp::kListener][1]*sizeScale, segPoses[verbp::kListener][2]*sizeScale, segPoses[verbp::kListener][3]);
             }
+            for (int o = 0; o < NS; ++o) { lastSegPos[o][0] = mpx[o]; lastSegPos[o][1] = mpy[o]; lastSegPos[o][2] = mpz[o]; }
             for (int p = 0; p < P; ++p) ip[p] = b.in[(size_t)p].data() + off;
             for (int r = 0; r < R; ++r) op[r] = b.out[(size_t)r].data() + off;
             e.acknowledgePoseScale(appliedSize/b.constructionSize);
@@ -997,8 +1347,11 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
             juce::FloatVectorOperations::multiply(buf.getWritePointer(ch) + done, ambisonics.gain(ch), m);
         done += m;
     }
-    if (needModEval && n > 0) {
+    if (n > 0) for (int o = 0; o < NS; ++o) for (int k = 0; k < 3; ++k) livePos[(size_t)o][(size_t)k].store(lastSegPos[o][k], std::memory_order_relaxed);
+    if ((needModEval || anyEndlessActive) && n > 0) {
         for (int o = 0; o <= verbp::kMaxSources; ++o) if (o < NS || o == verbp::kListener) liveAz[(size_t)o].store((float)lastSegAz[o], std::memory_order_relaxed);
+    }
+    if (needModEval && n > 0) {
         const int nRoutes = std::min(modSet.count, verbp::kMaxModRoutes);
         for (int i = 0; i < nRoutes; ++i) {
             modLiveRaw[(size_t)i].store(segModRaw[(size_t)i], std::memory_order_relaxed);
@@ -1009,6 +1362,15 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
         modLiveGen.store(modSet.generation, std::memory_order_release);
     }
     if (n > 0) {
+        if (haveZones) {
+            for (int zi = 0; zi < zoneSet.count && zi < verbp::kMaxTriggerZones; ++zi)
+                zoneLiveMask[(size_t)zi].store(zoneTracker->occupancyMask(zi, NS), std::memory_order_relaxed);
+            zoneLiveCount.store(zoneSet.count, std::memory_order_relaxed);
+            zoneLiveGen.store(zoneSet.generation, std::memory_order_release);
+        } else if (zoneLiveCount.load(std::memory_order_relaxed) != 0) {
+            zoneLiveCount.store(0, std::memory_order_relaxed);
+            zoneLiveGen.store(zoneSet.generation, std::memory_order_release);
+        }
         if (needModEval) {
             for (int s = 0; s < verbp::kMaxModHostOuts; ++s)
                 if (modOutParams[(size_t)s])
@@ -1020,6 +1382,15 @@ void VerbProcessor::processBlock(juce::AudioBuffer<float>& buf, juce::MidiBuffer
         }
     }
     if (!phPresent || phPlaying) modFallbackClock += n;
+    if (n > 0 && (anyMidiRoute || midiGen->totalEvents != midiTotal.load(std::memory_order_relaxed))) {
+        if (!needModEval && midiGen->anyHeld())  // no evaluation this block (Physical settled): nothing may stay held
+            midiGen->releaseAll([&](const verbp::ModMidiEvent& ev) noexcept { addMidiEvent(midi, ev); }, 0);
+        for (int i = 0; i < verbp::kMaxModRoutes; ++i) {
+            midiLiveMsg[(size_t)i].store(midiGen->lastMsg[(size_t)i], std::memory_order_relaxed);
+            midiLiveCount[(size_t)i].store(midiGen->sendCount[(size_t)i], std::memory_order_relaxed);
+        }
+        midiTotal.store(midiGen->totalEvents, std::memory_order_relaxed);
+    }
     prevWet = anySegMixMod ? segWetCur : wetG1;
     prevDry = anySegMixMod ? segDryCur : dryG1;
     for (int i = 0; i < NS; ++i) {
@@ -1059,6 +1430,8 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
         st.setProperty("keepRouting", keepRouting.load(), nullptr);
         if (keepProcessing.load()) st.setProperty("keepProcessing", true, nullptr);   // optional: absent in old projects and when OFF
         else st.removeProperty("keepProcessing", nullptr);                           // the APVTS tree may still carry the field of a restored state
+        if (motionTailEnabled()) st.setProperty("motionTail", true, nullptr);
+        else st.removeProperty("motionTail", nullptr);
         st.setProperty("mixerCompact", mixerCompact.load(), nullptr);
         st.setProperty("navLocked", navLocked.load(), nullptr);
         st.setProperty("showOutliner", showOutliner.load(), nullptr);
@@ -1125,12 +1498,14 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
     st.removeChild(st.getChildWithName("MovementPaths"),nullptr);
     juce::ValueTree paths("MovementPaths");
     for(int o=0;o<=verbp::kMaxSources;++o) {
-        const auto path=getMovementPath(o);if(path.points.empty()&&!path.lookAt&&path.orientOffset==0.0&&path.azKeys.empty()&&path.lfo.isDefault())continue;
+        const auto path=getMovementPath(o);if(path.points.empty()&&!path.lookAt&&path.orientOffset==0.0&&path.azKeys.empty()&&path.lfo.isDefault()&&path.wander.isDefault()&&!path.endless&&path.endlessPeriodS==verbp::kDefaultEndlessPeriodS&&!path.follow.active())continue;
         juce::ValueTree v("Path");v.setProperty("object",o,nullptr);
         v.setProperty("enabled",path.enabled,nullptr);v.setProperty("closed",path.closed,nullptr);
         v.setProperty("smooth",path.smooth,nullptr);v.setProperty("orient",path.orient,nullptr);v.setProperty("laps",path.laps,nullptr);
         if(path.group>=0)v.setProperty("group",path.group,nullptr);
         auto fmtDouble=[](double val){std::ostringstream number;number.imbue(std::locale::classic());number<<std::setprecision(std::numeric_limits<double>::max_digits10)<<val;return juce::String(number.str());};
+        if(path.endless)v.setProperty("endless",true,nullptr);
+        if(path.endless||path.endlessPeriodS!=verbp::kDefaultEndlessPeriodS)v.setProperty("endlessPeriodS",fmtDouble(path.endlessPeriodS),nullptr);
         // E19 orientation: optional, written only when not at the defaults (old projects stay byte-identical).
         if(path.lookAt){
             v.setProperty("lookAt",true,nullptr);
@@ -1178,6 +1553,28 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
             lfoTree.setProperty("seed",(int)path.lfo.seed,nullptr);
             v.appendChild(lfoTree,nullptr);
         }
+        if(!path.wander.isDefault()){
+            juce::ValueTree wTree("Wander");
+            wTree.setProperty("enabled",path.wander.enabled,nullptr);
+            wTree.setProperty("ampHorizM",fmtDouble(path.wander.ampHorizM),nullptr);
+            wTree.setProperty("ampVertM",fmtDouble(path.wander.ampVertM),nullptr);
+            wTree.setProperty("rateHz",fmtDouble(path.wander.rateHz),nullptr);
+            wTree.setProperty("smoothness",fmtDouble(path.wander.smoothness),nullptr);
+            wTree.setProperty("pinEnds",path.wander.pinEnds,nullptr);
+            wTree.setProperty("horizOnly",path.wander.horizOnly,nullptr);
+            wTree.setProperty("seed",(int)path.wander.seed,nullptr);
+            v.appendChild(wTree,nullptr);
+        }
+        if(path.follow.active()){  // V04d: optional; older versions ignore the unknown child (the source then stays static)
+            juce::ValueTree fTree("Follow");
+            fTree.setProperty("target",path.follow.target,nullptr);
+            fTree.setProperty("fwd",fmtDouble(path.follow.offset[0]),nullptr);
+            fTree.setProperty("left",fmtDouble(path.follow.offset[1]),nullptr);
+            fTree.setProperty("up",fmtDouble(path.follow.offset[2]),nullptr);
+            if(!path.follow.followWander)fTree.setProperty("followWander",false,nullptr);
+            fTree.setProperty("frame","path",nullptr);
+            v.appendChild(fTree,nullptr);
+        }
         paths.appendChild(v,nullptr);
     }
     if(paths.getNumChildren())st.appendChild(paths,nullptr);
@@ -1185,6 +1582,11 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
     {
         const auto routes = getModulationRoutes();
         if (!routes.empty()) st.appendChild(modRoutesToValueTree(routes), nullptr);
+    }
+    st.removeChild(st.getChildWithName("TriggerZones"), nullptr);
+    {
+        const auto zones = getTriggerZones();
+        if (!zones.empty()) st.appendChild(triggerZonesToValueTree(zones), nullptr);
     }
     st.removeChild(st.getChildWithName("RecordedPass"),nullptr);
     {
@@ -1218,6 +1620,10 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
             baked = bs.state == verb::Engine::BakeState::Baked || bs.state == verb::Engine::BakeState::Approximate;
             if (baked) for (const auto& t : eng->bakedTablesSnapshot()) if (t) tables.push_back(*t);
         }
+        if (tables.empty()) {
+            juce::ScopedLock l(dispLock);
+            if (!endlessStashedBakeTables.empty()) tables = endlessStashedBakeTables;
+        }
         if (!tables.empty()) {
             const auto bin = verb::bakeSerializeTables(tables);
             if (bin.size() <= verb::kBakePersistMaxBytes) {
@@ -1238,6 +1644,7 @@ void VerbProcessor::getStateInformation(juce::MemoryBlock& dest) {
 }
 
 void VerbProcessor::setStateInformation(const void* data, int size) {
+    midiReleaseRequest.store(true, std::memory_order_release);  // V04e: a state load releases every held route note
     auto xml = getXmlFromBinary(data, size);
     if (!xml) return;
     auto st = juce::ValueTree::fromXml(*xml);
@@ -1295,6 +1702,7 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
         juce::ScopedLock l(dispLock);
         savedRecordedPass = std::move(loadedPass);
         savedBakeTables = std::move(loadedTables);
+        endlessStashedBakeTables.clear();
         srcCfg.clear();
         auto srcs = st.getChildWithName("Sources");
         for (int i = 0; i < srcs.getNumChildren() && i < verbp::kMaxSources; ++i) {
@@ -1390,8 +1798,10 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
         if(v.isValid()) {
             path.enabled=(bool)v.getProperty("enabled",true);path.closed=(bool)v.getProperty("closed",false);
             path.smooth=(bool)v.getProperty("smooth",false);path.orient=(bool)v.getProperty("orient",false);path.laps=std::clamp((int)v.getProperty("laps",1),1,64);
+            path.endless=(bool)v.getProperty("endless",false);
             path.group=std::clamp((int)v.getProperty("group",-1),-1,31);
             auto coordinate=[](const juce::var& value){if(!value.isString())return (double)value;std::istringstream number(value.toString().toStdString());number.imbue(std::locale::classic());double result=std::numeric_limits<double>::quiet_NaN();number>>result;return result;};
+            if(v.hasProperty("endlessPeriodS"))path.endlessPeriodS=coordinate(v.getProperty("endlessPeriodS"));
             if((bool)v.getProperty("lookAt",false)){
                 path.lookAt=true;path.orient=false;
                 if((bool)v.getProperty("lookPoint",false)){path.lookPoint=true;path.lookPos={coordinate(v.getProperty("lookX",0.0)),coordinate(v.getProperty("lookY",0.0)),coordinate(v.getProperty("lookZ",0.0))};}
@@ -1446,6 +1856,20 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
                     if(pt.hasProperty("depth"))path.lfo.depth=coordinate(pt.getProperty("depth"));
                     if(pt.hasProperty("phaseDeg"))path.lfo.phaseDeg=coordinate(pt.getProperty("phaseDeg"));
                     if(pt.hasProperty("seed"))path.lfo.seed=(uint32_t)std::max(0,(int)pt.getProperty("seed",1));
+                }else if(pt.hasType("Wander")){
+                    path.wander.enabled=(bool)pt.getProperty("enabled",false);
+                    if(pt.hasProperty("ampHorizM"))path.wander.ampHorizM=coordinate(pt.getProperty("ampHorizM"));
+                    if(pt.hasProperty("ampVertM"))path.wander.ampVertM=coordinate(pt.getProperty("ampVertM"));
+                    if(pt.hasProperty("rateHz"))path.wander.rateHz=coordinate(pt.getProperty("rateHz"));
+                    if(pt.hasProperty("smoothness"))path.wander.smoothness=coordinate(pt.getProperty("smoothness"));
+                    path.wander.pinEnds=(bool)pt.getProperty("pinEnds",true);
+                    path.wander.horizOnly=(bool)pt.getProperty("horizOnly",false);
+                    if(pt.hasProperty("seed"))path.wander.seed=(uint32_t)std::max(0,(int)pt.getProperty("seed",1));
+                }else if(pt.hasType("Follow")){
+                    path.follow.target=(int)pt.getProperty("target",-1);
+                    path.follow.offset={coordinate(pt.getProperty("fwd",0.0)),coordinate(pt.getProperty("left",0.0)),coordinate(pt.getProperty("up",0.0))};
+                    path.follow.followWander=(bool)pt.getProperty("followWander",true);
+                    if(pt.getProperty("frame","path").toString()!="path")path.follow.target=-2;  // unknown frame: invalid record
                 }
             }
             if(anyTime)path.times=std::move(loadedTimes);
@@ -1460,6 +1884,7 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
         setModulationRoutes(modRoutesFromValueTree(modTree));
     else
         setModulationRoutes({});
+    setTriggerZones(triggerZonesFromValueTree(st.getChildWithName("TriggerZones")));
     apvts.replaceState(st);
     if (!isCreativeMode() || modConfiguredCount.load(std::memory_order_acquire) == 0) {
         modProc->reset();
@@ -1475,7 +1900,12 @@ void VerbProcessor::setStateInformation(const void* data, int size) {
         updateHostDisplay(ChangeDetails().withParameterInfoChanged(true).withNonParameterStateChanged(true));
     }
     const juce::String text = st.getProperty("sceneText").toString(), name = st.getProperty("sceneName").toString();
+    const bool motion = (bool)st.getProperty("motionTail", false);
+    auto request = motionTailRequest.load();
+    while (bool(request & 1) != motion &&
+           !motionTailRequest.compare_exchange_weak(request, request + 1)) {}
     if (text.isNotEmpty()) loadSceneText(text, name, false);
+    else wake.signal();
 }
 
 // ---------- scene loading ----------
@@ -1594,6 +2024,41 @@ void VerbProcessor::updateBounds(const verb::Scene& sc) {
         for (int i = 0; i < ws->count; ++i) {
             const auto& w = sc.walls[(size_t)i];
             ws->segs[(size_t)i] = {w.ax, w.ay, w.bx, w.by, w.z0, w.z1};
+        }
+        ws->zTop = sc.ceilMat < 0 ? 30.0 : std::max(1.0, sc.height);
+        ws->floorZoneCount = 0;
+        for (const auto& fz : sc.floorZones) {
+            if (fz.z < 0.0 || fz.poly.size() < 3 || ws->floorZoneCount >= verbp::kMaxZoneSnapshotPolys) continue;
+            auto& dst = ws->floorZones[(size_t)ws->floorZoneCount++];
+            dst.z = fz.z;
+            dst.vertCount = std::min((int)fz.poly.size(), verbp::kMaxZoneSnapshotVerts);
+            for (int vi = 0; vi < dst.vertCount; ++vi) {
+                dst.vx[(size_t)vi] = fz.poly[(size_t)vi].first;
+                dst.vy[(size_t)vi] = fz.poly[(size_t)vi].second;
+            }
+        }
+        ws->ceilZoneCount = 0;
+        for (const auto& cz : sc.ceilZones) {
+            if (cz.z <= 0.0 || cz.poly.size() < 3 || ws->ceilZoneCount >= verbp::kMaxZoneSnapshotPolys) continue;
+            auto& dst = ws->ceilZones[(size_t)ws->ceilZoneCount++];
+            dst.z = cz.z;
+            dst.vertCount = std::min((int)cz.poly.size(), verbp::kMaxZoneSnapshotVerts);
+            for (int vi = 0; vi < dst.vertCount; ++vi) {
+                dst.vx[(size_t)vi] = cz.poly[(size_t)vi].first;
+                dst.vy[(size_t)vi] = cz.poly[(size_t)vi].second;
+            }
+        }
+        const verb::CeilingPlan plan(sc);
+        ws->planPolyCount = 0;
+        for (const auto& pl : plan.polygons) {
+            if (pl.poly.size() < 3 || ws->planPolyCount >= verbp::kMaxPlanSnapshotPolys) continue;
+            auto& dst = ws->planPolys[(size_t)ws->planPolyCount++];
+            dst.z = -1.0;
+            dst.vertCount = std::min((int)pl.poly.size(), verbp::kMaxZoneSnapshotVerts);
+            for (int vi = 0; vi < dst.vertCount; ++vi) {
+                dst.vx[(size_t)vi] = pl.poly[(size_t)vi].first;
+                dst.vy[(size_t)vi] = pl.poly[(size_t)vi].second;
+            }
         }
         juce::ScopedLock wl(wallMailLock);
         wallMailbox->publish(*ws);
@@ -2047,6 +2512,16 @@ void VerbProcessor::setTailSettings(verbp::TailSettings settings) {
     updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
 }
 
+void VerbProcessor::setMotionTailEnabled(bool enabled) {
+    auto request = motionTailRequest.load();
+    do {
+        if (bool(request & 1) == enabled) return;
+    } while (!motionTailRequest.compare_exchange_weak(request, request + 1));
+    ++structRevision;
+    wake.signal();
+    updateHostDisplay(ChangeDetails().withNonParameterStateChanged(true));
+}
+
 std::shared_ptr<const verb::TailDiagnostics> VerbProcessor::getTailDiagnostics() const {
     juce::SpinLock::ScopedLockType lock(engineLock);
     return bundle ? bundle->engine->tailDiagnostics() : nullptr;
@@ -2160,6 +2635,8 @@ void VerbProcessor::startTargetRT60(double seconds) {
 
 // Web UI publications are immutable and produced off the audio thread. The page never holds engineLock.
 bool VerbProcessor::isWebTailCurrent() const {
+    const auto request = motionTailRequest.load();
+    if ((request & 1) && webMotionReadyRequest.load() != request) return false;
     if (!webTailCurrent.load() || !isWebSceneCurrent() || qualityDirty.load()) return false;
     const auto d = getWebTailDiagnostics();
     if (!d) return false;
@@ -2171,11 +2648,35 @@ bool VerbProcessor::isWebTailCurrent() const {
     return d->baseRays == quality.rays && d->adaptive == quality.adaptive;
 }
 
+verb::Engine::MotionTailState VerbProcessor::webMotionTailState() const {
+    using State = verb::Engine::MotionTailState;
+    if (!motionTailEnabled()) return State::Off;
+    return isWebTailCurrent() ? State::Ready : State::Preparing;
+}
+
 bool VerbProcessor::startPathBake(int object) {
-    if(getLoadState()!=2||object < -1||object>verbp::kListener)return false;
+    if(motionTailEnabled()||getLoadState()!=2||object < -1||object>verbp::kListener)return false;
+    const bool creativeNow = isCreativeMode();
     if(object>=0){
         auto path=getMovementPath(object);
+        if(path.enabled&&path.points.size()>=2&&((path.closed&&path.endless)||(creativeNow&&path.wander.enabled)))return false;
         if(!path.enabled||path.points.size()<2){
+            verb::Engine::RecordedPassStats pass;
+            {juce::SpinLock::ScopedLockType el(engineLock);if(bundle&&bundle->engine)pass=bundle->engine->recordedPassStats();}
+            if(!((pass.state==3||pass.state==4)&&pass.samples>=2))return false;
+        }
+    }else{
+        const int ns=(int)getSources().size();
+        bool anyNonBypassed=false,anyBypassed=false;
+        for(int o=0;o<=verbp::kListener;++o){
+            if(o>=ns&&o!=verbp::kListener)continue;
+            const auto path=getMovementPath(o);
+            if(path.enabled&&path.points.size()>=2){
+                if((path.closed&&path.endless)||(creativeNow&&path.wander.enabled))anyBypassed=true;
+                else anyNonBypassed=true;
+            }
+        }
+        if(anyBypassed&&!anyNonBypassed){
             verb::Engine::RecordedPassStats pass;
             {juce::SpinLock::ScopedLockType el(engineLock);if(bundle&&bundle->engine)pass=bundle->engine->recordedPassStats();}
             if(!((pass.state==3||pass.state==4)&&pass.samples>=2))return false;
@@ -2191,7 +2692,7 @@ void VerbProcessor::bakeDiagnosticEditorOpened(bool opened) noexcept {
     if (bakeLogEnabled()) bakeLogEditors.fetch_add(opened ? 1 : -1, std::memory_order_relaxed);
 }
 void VerbProcessor::cancelPathBake(){webBakeStart=-2;webBakeCancel=true;wake.signal();}
-void VerbProcessor::clearPathBake(){webBakeStart=-2;webBakeClear=true;wake.signal();}
+void VerbProcessor::clearPathBake(){{juce::ScopedLock l(dispLock);endlessStashedBakeTables.clear();}webBakeStart=-2;webBakeClear=true;wake.signal();}
 void VerbProcessor::recordPathPass(bool stop) {
     std::shared_ptr<verb::Engine> engine;
     { juce::SpinLock::ScopedLockType lock(engineLock); if (bundle) engine = bundle->engine; }
@@ -2264,7 +2765,7 @@ void VerbProcessor::publishWebDiagnostics() {
     for(int o=0;o<=verbp::kMaxSources;++o){
         if(o>=NS&&o!=verbp::kListener)continue;
         const auto& rp=rawPaths[(size_t)o];
-        if(!rp.lookAt||rp.lookPoint)continue;
+        if(rp.follow.active()||!rp.lookAt||rp.lookPoint)continue;
         const int t=rp.lookTarget;
         if(t<0||t==o||t>verbp::kListener||(t>=NS&&t!=verbp::kListener)||!movingObj(t))continue;
         if(movingObj(o)){if(!(rp.group>=0&&rp.group==rawPaths[(size_t)t].group)){orientConflict=true;if(conflictOwner<0){conflictOwner=o;conflictTarget=t;}}}
@@ -2430,13 +2931,53 @@ void VerbProcessor::publishWebDiagnostics() {
         }
         if(!p.distance.empty()&&p.distance.back()>0)paths.push_back(std::move(p));
     };
-    if(listenerActive) {
+    const bool creativeNow = isCreativeMode();
+    auto isEndlessGroup=[&](int o)->bool{
+        const auto& rp=rawPaths[(size_t)o];
+        if(rp.closed&&rp.endless)return true;
+        if(rp.group>=0){
+            for(int m:activeObjects)if(rawPaths[(size_t)m].group==rp.group&&rawPaths[(size_t)m].closed&&rawPaths[(size_t)m].endless)return true;
+        }
+        return false;
+    };
+    auto isWanderGroup=[&](int o)->bool{
+        const auto& rp=rawPaths[(size_t)o];
+        if(rp.wander.enabled)return true;
+        if(rp.group>=0){
+            for(int m:activeObjects)if(rawPaths[(size_t)m].group==rp.group&&rawPaths[(size_t)m].wander.enabled)return true;
+        }
+        return false;
+    };
+    auto isBypassedGroup=[&](int o)->bool{
+        return isEndlessGroup(o)||(creativeNow&&isWanderGroup(o));
+    };
+    bool anyEndlessActive=false;
+    bool anyWanderBypassed=false;
+    for(int o:activeObjects){
+        if(isEndlessGroup(o))anyEndlessActive=true;
+        if(creativeNow&&isWanderGroup(o))anyWanderBypassed=true;
+    }
+    const bool anyBypassed=anyEndlessActive||anyWanderBypassed;
+    if(anyBypassed){
+        const auto snap=bundle->engine->bakedTablesSnapshot();
+        if(!snap.empty()){
+            juce::ScopedLock l(dispLock);
+            for(const auto& t:snap){
+                if(!t)continue;
+                auto it=std::find_if(endlessStashedBakeTables.begin(),endlessStashedBakeTables.end(),
+                    [&](const auto& e){return e.path.group==t->path.group;});
+                if(it!=endlessStashedBakeTables.end())*it=*t;
+                else endlessStashedBakeTables.push_back(*t);
+            }
+        }
+    }
+    if(listenerActive && !isBypassedGroup(verbp::kListener)) {
         const auto& lp = rawPaths[verbp::kListener];
         appendPath(lp, -1, engGroupOf(verbp::kListener), -1, 0, 0, 0);
     }
     for(int logical=0;logical<NS;++logical){
         const auto& raw=rawPaths[(size_t)logical];
-        if(!raw.enabled||raw.points.size()<2)continue;
+        if(!raw.enabled||raw.points.size()<2||isBypassedGroup(logical))continue;
         const int engGroup = engGroupOf(logical);
         for(size_t j=0;j<bundle->points.size();++j)
             if(bundle->points[j].source==logical)
@@ -2444,7 +2985,7 @@ void VerbProcessor::publishWebDiagnostics() {
     }
     for(int o=0;o<=verbp::kMaxSources;++o){  // E19 riders: static objects that look at a moving target
         const int t=riderOf[(size_t)o];
-        if(t<0)continue;
+        if(t<0||isBypassedGroup(t))continue;
         const auto& draw=rawPaths[(size_t)t];const int eg=engGroupOf(t);
         if(o==verbp::kListener)appendPath(draw,-1,eg,-1,0,0,0,true);
         else for(size_t j=0;j<bundle->points.size();++j)
@@ -2457,12 +2998,24 @@ void VerbProcessor::publishWebDiagnostics() {
     for(size_t j=0;j<bundle->points.size();++j)
         recordedYawMatch.push_back(yawMatchFor(bundle->points[j].source,ptOff[j][0].load(),ptOff[j][1].load()));
     bundle->engine->setBakedPaths(paths,recordedYawMatch);
+    if(!paths.empty()){
+        std::vector<verb::BakedTable> stashed;
+        {juce::ScopedLock l(dispLock);stashed=endlessStashedBakeTables;}
+        if(!stashed.empty() && bundle->engine->bakeStats().state!=verb::Engine::BakeState::Baking){
+            if(bundle->engine->installBakedTables(stashed) && !anyBypassed){
+                juce::ScopedLock l(dispLock);
+                endlessStashedBakeTables.clear();
+            }
+        }
+    }
     const int object = activeObjects.size() == 1 ? activeObjects.front() : -1;
+    if (motionTailEnabled()) webBakeStart = -2;
     if(webBakeClear.exchange(false)){webBakeTouched.fill(false);webRecordedTouched=false;bundle->engine->clearPathBake();}
     else if(webBakeCancel.exchange(false)){bundle->engine->cancelPathBake();}
     else if(isWebSceneCurrent() && !qualityDirty.load()) {
         const int requested=webBakeStart.exchange(-2);
         if(requested!=-2){
+            {juce::ScopedLock l(dispLock);endlessStashedBakeTables.clear();}
             for(int o:activeObjects)webBakeTouched[(size_t)o]=true;
             const auto ps=bundle->engine->recordedPassStats();
             if((ps.state==3||ps.state==4)&&ps.samples>=2)webRecordedTouched=true;
@@ -2556,9 +3109,32 @@ void VerbProcessor::publishWebDiagnostics() {
                     :(juce::String((int)activeObjects.size())+" paths");
     }else name="Multiple paths";
 
+    auto bypassReasonFor = [](bool e, bool w) -> const char* {
+        if (e && w) return "Endless and Path wander bypass baked tables";
+        if (w) return "Path wander bypasses baked tables";
+        return "Endless bypasses baked tables";
+    };
+    if(anyBypassed && paths.empty() && !usesRecording){
+        bakeStateText="notBaked";
+        reason=bypassReasonFor(anyEndlessActive, anyWanderBypassed);
+    }
     juce::Array<juce::var> perPathArr;
     for(int o:activeObjects){
         const auto& raw=rawPaths[(size_t)o];
+        if(isBypassedGroup(o)){
+            const bool eGrp=isEndlessGroup(o), wGrp=creativeNow&&isWanderGroup(o);
+            auto* item=new juce::DynamicObject();
+            item->setProperty("object",o);
+            item->setProperty("group",raw.group);
+            item->setProperty("drivenBy",verbp::pathGroupDriver(rawPaths,NS,o));
+            item->setProperty("state","notBaked");
+            item->setProperty("percent",0);
+            item->setProperty("reason",bypassReasonFor(eGrp, wGrp));
+            item->setProperty("done",0);
+            item->setProperty("total",0);
+            perPathArr.add(juce::var(item));
+            continue;
+        }
         const int expectedGrp=engGroupOf(o);
         const verb::Engine::PathGroupStats* grpStat=nullptr;
         for(const auto& gs:bake.groups)if(gs.group==expectedGrp){grpStat=&gs;break;}
@@ -2647,6 +3223,8 @@ void VerbProcessor::publishWebDiagnostics() {
     webTailCurrent = state.load() == 2 && !geomDirty.load() && !qualityDirty.load()
         && geometryEpoch.load() == appliedGeometryEpoch.load() && engineAbsorption.load() == absorptionParam->load() && engineSize.load()==sizeParam->load()
         && bundle->engine->tailIsCurrent();
+    webMotionReadyRequest = bundle->engine->motionTailState() == verb::Engine::MotionTailState::Ready
+        ? appliedMotionTailRequest : 0;
 }
 
 // ---------- loader thread ----------
@@ -2671,6 +3249,11 @@ void VerbProcessor::run() {
     while (!threadShouldExit()) {
         wake.wait(250);
         if (threadShouldExit()) break;
+        const auto motionRequest = motionTailRequest.load();
+        if (bundle && motionRequest != appliedMotionTailRequest) {
+            bundle->engine->setMotionTail(bool(motionRequest & 1));
+            appliedMotionTailRequest = motionRequest;
+        }
         const auto directivityEpoch = srcDirectivityEpoch.load(std::memory_order_acquire);
         if (bundle && directivityEpoch != directivitySeen) {
             const auto sources = getSources(); // locks/copies exclusively on this loader thread
@@ -2836,6 +3419,7 @@ void VerbProcessor::run() {
             ec.ctrlInterval = 128;
             ec.tailBlock = 512;
             ec.tailThread = !offlineRender.load();
+            ec.motionTail = motionTailEnabled();
             ec.sharedTail = points.size() > 4;  // many sources: one late-field convolver per output channel
             const auto quality = getTailSettings();
             ec.tailRays = quality.rays;
@@ -2916,6 +3500,9 @@ void VerbProcessor::run() {
             }
             {
                 juce::SpinLock::ScopedLockType l(engineLock);
+                appliedMotionTailRequest = motionTailRequest.load();
+                nb->engine->setMotionTail(bool(appliedMotionTailRequest & 1));
+                webMotionReadyRequest = 0;
                 bundle.swap(nb);
                 publishedSourceStates.swap(nextSourceStates);
                 directivitySeen = ~0ull; wake.signal();
@@ -3139,6 +3726,8 @@ juce::String VerbProcessor::getRoomPresetText() {
     if (!stateXml) return {};
     while (auto* rp = stateXml->getChildByName("RecordedPass")) stateXml->removeChildElement(rp, true);
     stateXml->setAttribute("sceneText", getRoomText());
+    // New presets spell out Off as well as On so Keep I/O can distinguish a legacy preset.
+    if (!stateXml->hasAttribute("motionTail")) stateXml->setAttribute("motionTail", false);
     juce::XmlElement preset("VerbRoomPreset");
     preset.setAttribute("formatVersion", 2);
    #ifdef JucePlugin_VersionString
@@ -3149,6 +3738,7 @@ juce::String VerbProcessor::getRoomPresetText() {
 }
 
 bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& error) {
+    midiReleaseRequest.store(true, std::memory_order_release);  // V04e
     error.clear();
     auto xml = juce::parseXML(text);
     const int format = xml ? xml->getIntAttribute("formatVersion") : 0;
@@ -3226,6 +3816,8 @@ bool VerbProcessor::loadRoomPresetText(const juce::String& text, juce::String& e
         st.setProperty(key, local.getProperty(key), nullptr);
     if (local.hasProperty("keepProcessing")) st.setProperty("keepProcessing", true, nullptr); else st.removeProperty("keepProcessing", nullptr);   // host-level preference stays local
     if (keepRoutingEnabled()) {
+        if (!st.hasProperty("motionTail") && local.hasProperty("motionTail"))
+            st.setProperty("motionTail", local.getProperty("motionTail"), nullptr);
         for (const char* child : {"Sources", "Output"}) {
             st.removeChild(st.getChildWithName(child), nullptr);
             st.appendChild(local.getChildWithName(child).createCopy(), nullptr);
@@ -3398,7 +3990,14 @@ void VerbProcessor::runExport(juce::File dir) {
         auto cancelled=[&]{if(exportCancel.load())throw std::runtime_error("cancelled");};
         while(offline.getLoadState()!=2){cancelled();if(std::chrono::steady_clock::now()>timeout)throw std::runtime_error("offline room timed out");if(offline.getLoadState()==3)throw std::runtime_error(offline.getStatus().toStdString());juce::Thread::sleep(10);}
         const auto poseUntil=std::chrono::steady_clock::now()+std::chrono::milliseconds(650);
-        do {cancelled();if(std::chrono::steady_clock::now()>timeout)throw std::runtime_error("offline tail timed out");warm.clear();offline.processBlock(warm,midi);juce::Thread::sleep(10);}
+        do {
+            cancelled();
+            if (std::chrono::steady_clock::now() > timeout) throw std::runtime_error("offline tail timed out");
+            if (offline.motionTailEnabled() && !offline.isTailCurrent()) offline.bundle->engine->runWorkerStep();
+            warm.clear();
+            offline.processBlock(warm, midi);
+            juce::Thread::sleep(10);
+        }
         while(std::chrono::steady_clock::now()<poseUntil||!offline.isTailCurrent());
         auto& eng=*offline.bundle->engine;
         if(!eng.copyTailForOffline(*liveEngine))throw std::runtime_error("room topology changed during export; retry");
@@ -3485,12 +4084,64 @@ void VerbProcessor::runExport(juce::File dir) {
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new VerbProcessor(); }
 
+void VerbProcessor::publishPathLocked(int object) {
+    const auto& p = movementPaths[(size_t)object];
+    if (!p.follow.active()) { pathMailboxes[(size_t)object].publish(p); return; }
+    const int t = p.follow.target;
+    const verbp::MovementPath* target = (t >= 0 && t < verbp::kListener && t != object) ? &movementPaths[(size_t)t] : nullptr;
+    pathMailboxes[(size_t)object].publish(verbp::resolveFollowerPath(p, target, object));
+}
 verbp::MovementPath VerbProcessor::getMovementPath(int object) const {
     juce::ScopedLock lock(pathLock);return object>=0 && object<=verbp::kMaxSources?movementPaths[(size_t)object]:verbp::MovementPath{};
 }
 bool VerbProcessor::setMovementPath(int object,const verbp::MovementPath& path) {
     if(object<0 || object>verbp::kMaxSources || !verbp::validPath(path))return false;
-    {juce::ScopedLock lock(pathLock);movementPaths[(size_t)object]=path;pathMailboxes[(size_t)object].publish(path);}
+    const bool creativeNow = isCreativeMode();
+    bool bypassChanged = false;
+    const bool nowBypassed = path.enabled && path.points.size() >= 2 && ((path.closed && path.endless) || (creativeNow && path.wander.enabled));
+    {
+        juce::ScopedLock lock(pathLock);
+        const auto& prev = movementPaths[(size_t)object];
+        const bool prevBypassed = prev.enabled && prev.points.size() >= 2 && ((prev.closed && prev.endless) || (creativeNow && prev.wander.enabled));
+        bypassChanged = (prevBypassed != nowBypassed);
+        movementPaths[(size_t)object]=path;
+        publishPathLocked(object);
+        // V04d: followers of this object run its geometry: republish them (also covers loading a follower before its target)
+        for (int f = 0; f <= verbp::kMaxSources; ++f)
+            if (f != object && movementPaths[(size_t)f].follow.target == object) publishPathLocked(f);
+        bool anyE = false;
+        for (const auto& mp : movementPaths)
+            if (mp.enabled && mp.closed && mp.endless && mp.points.size() >= 2) { anyE = true; break; }
+        webAnyEndless.store(anyE, std::memory_order_relaxed);
+    }
+    if (bypassChanged) {
+        if (nowBypassed) {
+            std::shared_ptr<verb::Engine> eng;
+            { juce::SpinLock::ScopedLockType el(engineLock); if (bundle) eng = bundle->engine; }
+            if (eng) {
+                const auto snap = eng->bakedTablesSnapshot();
+                if (!snap.empty()) {
+                    juce::ScopedLock l(dispLock);
+                    for (const auto& t : snap) {
+                        if (!t) continue;
+                        auto it = std::find_if(endlessStashedBakeTables.begin(), endlessStashedBakeTables.end(),
+                            [&](const auto& e) { return e.path.group == t->path.group; });
+                        if (it != endlessStashedBakeTables.end()) *it = *t;
+                        else endlessStashedBakeTables.push_back(*t);
+                    }
+                }
+                bool anyNonBypassed = false;
+                const int ns = (int)getSources().size();
+                for (int o = 0; o <= verbp::kListener; ++o) {
+                    if (o >= ns && o != verbp::kListener) continue;
+                    const auto p = getMovementPath(o);
+                    if (p.enabled && p.points.size() >= 2 && !((p.closed && p.endless) || (creativeNow && p.wander.enabled))) { anyNonBypassed = true; break; }
+                }
+                if (!anyNonBypassed) eng->setBakedPaths({});
+            }
+        }
+        wake.signal();
+    }
     bumpRevision();updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));return true;
 }
 std::vector<verbp::ModulationRoute> VerbProcessor::getModulationRoutes() const {
@@ -3509,6 +4160,38 @@ bool VerbProcessor::setModulationRoutes(const std::vector<verbp::ModulationRoute
     }
     bumpRevision();
     updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
+    return true;
+}
+
+std::vector<verbp::TriggerZone> VerbProcessor::getTriggerZones() const {
+    juce::ScopedLock lock(modLock);
+    return triggerZones;
+}
+bool VerbProcessor::setTriggerZones(const std::vector<verbp::TriggerZone>& zones) {
+    if ((int)zones.size() > verbp::kMaxTriggerZones) return false;
+    for (size_t i = 0; i < zones.size(); ++i) {
+        if (!verbp::validTriggerZone(zones[i])) return false;
+        for (size_t j = 0; j < i; ++j) if (zones[j].id == zones[i].id) return false;
+    }
+    {
+        juce::ScopedLock lock(modLock);
+        if (zones == triggerZones) return true;  // unchanged (e.g. a project without zones): no revision, no republish
+        triggerZones = zones;
+        zoneMailbox->publish(triggerZones);
+        zonePublishedGen.store(zoneMailbox->lastGeneration(), std::memory_order_release);
+    }
+    bumpRevision();
+    updateHostDisplay(juce::AudioProcessor::ChangeDetails().withNonParameterStateChanged(true));
+    return true;
+}
+bool VerbProcessor::webZoneTelemetry(std::array<uint64_t, verbp::kMaxTriggerZones>& masks, int& count) const noexcept {
+    masks.fill(0);
+    count = 0;
+    const uint64_t want = zonePublishedGen.load(std::memory_order_acquire);
+    const uint64_t live = zoneLiveGen.load(std::memory_order_acquire);
+    if (want == 0 || live != want) return false;
+    count = std::clamp(zoneLiveCount.load(std::memory_order_relaxed), 0, verbp::kMaxTriggerZones);
+    for (int i = 0; i < count; ++i) masks[(size_t)i] = zoneLiveMask[(size_t)i].load(std::memory_order_relaxed);
     return true;
 }
 

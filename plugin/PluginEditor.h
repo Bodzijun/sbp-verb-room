@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "Camera3D.h"
+#include "ClassicZoneList.h"
+#include "EditorSession.h"
 #include "PluginLookAndFeel.h"
 #include "PluginProcessor.h"
 #include "RoomLibrary.h"
@@ -87,6 +89,7 @@ public:
     bool testHasFrameButtons() const { return frameAllBtn.isVisible() && frameSelBtn.isVisible(); }
     bool testPick3D(juce::Point<float> pos, verbp::Cam3D::Vec& at) { const auto sc = proc.getDisplayScene(); setup3D(sc); const auto r = pick3D(sc, pos); at = r.point; return r.hit; }
     void testSelectObject(int obj) { selectObject(obj); }
+    ClassicZoneList& testZoneList() { return zoneListPanel; }
     void showPage(int tabIndex, int object) {                            // 0 Objects, 1 Surfaces, 2 Mix, 3 Space, 4 Decay
         if (object >= 0) selectObject(object);
         showTab(tabIndex);
@@ -315,6 +318,7 @@ private:
     juce::ToggleButton showMeters{"Show input channel meters (map, bottom)"};
     juce::Label versionLabel;  // the running version and build time (Space tab)
     juce::ToggleButton diffToggle{"Edge diffraction (sound bends round wall ends)"};
+    ClassicZoneList zoneListPanel;  // V04e: Space page, minimal trigger-zone list
     void refreshSpace();
     void editClutter(std::function<void(verb::ClutterCfg&)> fn);
     // interaction state
@@ -336,6 +340,15 @@ private:
     juce::Label selLabel;
     std::array<juce::Slider, 4> sliders;
     std::array<juce::Label, 4> sliderLabels;
+    juce::ComboBox pathShapeBox;
+    juce::Slider pathRadiusSlider;
+    juce::TextButton pathApplyBtn{"Apply"};
+    juce::ToggleButton pathEndlessBtn{"Endless"};
+    juce::ToggleButton pathWanderBtn{"Wander"};
+    juce::Slider pathWanderAmpSlider;
+    juce::TextButton pathWanderReseedBtn{"Reseed"};
+    void applyClassicPathShape();
+    void syncClassicPathControls();
     bool updatingUI = false;
     // surfaces tab
     juce::Label surfTitle, presetLabel;
@@ -348,6 +361,8 @@ private:
     Row heightRow, passRow, roughRow;
     // mix tab
     juce::ComboBox modeBox;
+    juce::ToggleButton motionButton{"Motion"};
+    juce::Label motionStatus;
     juce::Slider absorptionSlider;
     juce::Label absorptionLabel, targetLabel, targetResult;
     juce::TextEditor targetInput;

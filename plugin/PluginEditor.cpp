@@ -203,6 +203,81 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
             if (auto* pr = proc.apvts.getParameter(verbp::paramId(selected, k))) pr->endChangeGesture();
         };
     }
+    for (auto* c : std::initializer_list<juce::Component*>{&pathShapeBox, &pathRadiusSlider, &pathApplyBtn, &pathEndlessBtn,
+                                                           &pathWanderBtn, &pathWanderAmpSlider, &pathWanderReseedBtn})
+        addAndMakeVisible(*c);
+    static const char* kClassicShapes[8] = {"Circle", "Ellipse", "Figure-8", "Square", "Rectangle", "Triangle", "Star", "Spiral"};
+    for (int i = 0; i < 8; ++i) pathShapeBox.addItem(kClassicShapes[i], i + 1);
+    pathShapeBox.setSelectedId(1, juce::dontSendNotification);
+    pathShapeBox.setTooltip("Path shape template");
+    pathRadiusSlider.setSliderStyle(juce::Slider::LinearBar);
+    pathRadiusSlider.setRange(0.2, 50.0, 0.1);
+    pathRadiusSlider.setValue(2.0, juce::dontSendNotification);
+    pathRadiusSlider.setTextValueSuffix(" m");
+    pathRadiusSlider.setNumDecimalPlacesToDisplay(1);
+    pathRadiusSlider.setTooltip("Path shape radius / size (m)");
+    pathApplyBtn.setTooltip("Generate closed path shape for the selected object");
+    pathApplyBtn.onClick = [this] { applyClassicPathShape(); };
+    pathEndlessBtn.setTooltip("Endless loop (circulate at constant speed without lap count)");
+    pathEndlessBtn.onClick = [this] {
+        if (updatingUI) return;
+        const auto cur = proc.getMovementPath(selected);
+        if (cur.points.size() < 2) return;
+        const bool on = pathEndlessBtn.getToggleState();
+        auto* cmdObj = new juce::DynamicObject();
+        cmdObj->setProperty("op", "path.setFlags");
+        cmdObj->setProperty("object", selected);
+        if (on) cmdObj->setProperty("closed", true);
+        cmdObj->setProperty("endless", on);
+        proc.getEditorSession().run(juce::var(cmdObj));
+        syncClassicPathControls();
+        repaint();
+    };
+    auto sendClassicWander = [this](bool enabled, double ampH, uint32_t seed) {
+        const auto cur = proc.getMovementPath(selected);
+        if (cur.points.size() < 2) return;
+        auto* wObj = new juce::DynamicObject();
+        wObj->setProperty("enabled", enabled);
+        wObj->setProperty("ampHorizM", std::clamp(ampH, 0.0, verbp::kMaxPathWanderHorizM));
+        wObj->setProperty("ampVertM", std::clamp(ampH * 0.5, 0.0, verbp::kMaxPathWanderVertM));
+        wObj->setProperty("rateHz", cur.wander.rateHz);
+        wObj->setProperty("smoothness", cur.wander.smoothness);
+        wObj->setProperty("pinEnds", cur.wander.pinEnds);
+        wObj->setProperty("horizOnly", cur.wander.horizOnly);
+        wObj->setProperty("seed", (int)std::clamp<uint32_t>(seed, 1u, 999999u));
+        auto* cmdObj = new juce::DynamicObject();
+        cmdObj->setProperty("op", "path.setWander");
+        cmdObj->setProperty("object", selected);
+        cmdObj->setProperty("wander", juce::var(wObj));
+        proc.getEditorSession().run(juce::var(cmdObj));
+        syncClassicPathControls();
+        repaint();
+    };
+    pathWanderBtn.setTooltip("Path wander (smooth transverse deviation in Creative mode)");
+    pathWanderBtn.onClick = [this, sendClassicWander] {
+        if (updatingUI) return;
+        const auto cur = proc.getMovementPath(selected);
+        sendClassicWander(pathWanderBtn.getToggleState(), pathWanderAmpSlider.getValue(), cur.wander.seed);
+    };
+    pathWanderAmpSlider.setSliderStyle(juce::Slider::LinearBar);
+    pathWanderAmpSlider.setRange(0.0, 5.0, 0.05);
+    pathWanderAmpSlider.setValue(0.5, juce::dontSendNotification);
+    pathWanderAmpSlider.setTextValueSuffix(" m");
+    pathWanderAmpSlider.setNumDecimalPlacesToDisplay(2);
+    pathWanderAmpSlider.setTooltip("Path wander amplitude (m, vertical = 50%, Creative mode)");
+    pathWanderAmpSlider.onValueChange = [this, sendClassicWander] {
+        if (updatingUI) return;
+        const auto cur = proc.getMovementPath(selected);
+        sendClassicWander(pathWanderBtn.getToggleState(), pathWanderAmpSlider.getValue(), cur.wander.seed);
+    };
+    pathWanderReseedBtn.setTooltip("Generate a new deterministic seed for path wander");
+    pathWanderReseedBtn.onClick = [this, sendClassicWander] {
+        const auto cur = proc.getMovementPath(selected);
+        if (cur.points.size() < 2) return;
+        uint32_t nextSeed = 1u + ((cur.wander.seed * 1664525u + 1013904223u) % 999998u);
+        if (nextSeed == cur.wander.seed) nextSeed = (cur.wander.seed % 999999u) + 1u;
+        sendClassicWander(pathWanderBtn.getToggleState(), pathWanderAmpSlider.getValue(), nextSeed);
+    };
 
     // ---- sources (objects tab) ----
     for (auto* c : std::initializer_list<juce::Component*>{&sourceBox, &addSourceBtn, &removeSourceBtn, &nameEdit, &nameLabel, &formatLabel, &firstInLabel,
@@ -507,6 +582,9 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     setupRow(roughRow, "Roughness", 0, 100, 1, " %");
     roughRow.slider.onValueChange = [this] { if (!updatingUI) proc.editScene([v = roughRow.slider.getValue() / 100.0](verb::Scene& s) { s.roughness = v; }); };
     addAndMakeVisible(diffToggle);
+    zoneListPanel.getZones = [this] { return proc.getTriggerZones(); };
+    zoneListPanel.setZones = [this](const std::vector<verbp::TriggerZone>& z) { return proc.setTriggerZones(z); };
+    addChildComponent(zoneListPanel);
     diffToggle.onClick = [this] { if (!updatingUI) proc.editScene([on = diffToggle.getToggleState()](verb::Scene& s) { s.diffraction = on; }); };
     showClutter.setToggleState(true, juce::dontSendNotification);
     showClutter.onClick = [this] { repaint(); };
@@ -585,6 +663,10 @@ VerbEditor::VerbEditor(VerbProcessor& p) : AudioProcessorEditor(&p), proc(p) {
     addAndMakeVisible(modeBox);
     modeAttachment = std::make_unique<juce::ComboBoxParameterAttachment>(*proc.apvts.getParameter("mode"),modeBox);
     modeBox.onChange = [this] { refreshCreativeControls(); };
+    addAndMakeVisible(motionButton);
+    addAndMakeVisible(motionStatus);
+    motionButton.setTooltip("Experimental. The tail follows moving objects without waiting for Bake. Best in single rooms; large multi-room scenes are less accurate. Baked tables are bypassed while Motion is on.");
+    motionButton.onClick = [this] { proc.setMotionTailEnabled(motionButton.getToggleState()); };
     addAndMakeVisible(absorptionSlider); addAndMakeVisible(absorptionLabel);
     absorptionLabel.setText("Absorption",juce::dontSendNotification);
     absorptionSlider.setSliderStyle(juce::Slider::LinearHorizontal);
@@ -800,7 +882,7 @@ void VerbEditor::showTab(int t) {
     outliner.setVisible(t != 2 && t != 4 && t != 5 && proc.outlinerVisible());
     updateLayerButtons();
     positionedDry.setVisible(t == 2);
-    for (auto* c : std::initializer_list<juce::Component*>{&modeBox,&absorptionSlider,&absorptionLabel,&targetInput,&targetApply,&targetCancel,&targetLabel,&targetResult}) c->setVisible(t == 2);
+    for (auto* c : std::initializer_list<juce::Component*>{&modeBox,&motionButton,&motionStatus,&absorptionSlider,&absorptionLabel,&targetInput,&targetApply,&targetCancel,&targetLabel,&targetResult}) c->setVisible(t == 2);
     for (int g=0;g<3;++g) { decaySliders[g].setVisible(t==2); decayLabels[g].setVisible(t==2); }
     refreshCreativeControls();
     mixLabel.setText("Dry / wet (%)",juce::dontSendNotification);
@@ -828,6 +910,8 @@ void VerbEditor::showTab(int t) {
                                                            &minLenRow.label, &minLenRow.slider, &maxLenRow.label, &maxLenRow.slider, &tlMinRow.label, &tlMinRow.slider,
                                                            &tlMaxRow.label, &tlMaxRow.slider, &hMinRow.label, &hMinRow.slider, &hMaxRow.label, &hMaxRow.slider, &seedSlider, &seedLabel, &airInfo, &clutterInfo, &randomizeBtn, &showClutter, &showMeters, &versionLabel})
         c->setVisible(sp);
+    zoneListPanel.setVisible(sp);
+    if (sp) zoneListPanel.refresh();
     // The outliner reserves map space only on editing pages. Tab clicks must
     // update geometry immediately, including when returning from Mix/Decay.
     resized();
@@ -840,6 +924,8 @@ void VerbEditor::updateObjectsVisibility() {
     selLabel.setVisible(o);
     for (auto& x : sliders) x.setVisible(o);
     for (auto& x : sliderLabels) x.setVisible(o);
+    for (auto* c : std::initializer_list<juce::Component*>{&pathShapeBox, &pathRadiusSlider, &pathApplyBtn, &pathEndlessBtn,
+                                                           &pathWanderBtn, &pathWanderAmpSlider, &pathWanderReseedBtn}) c->setVisible(o);
     for (auto* c : std::initializer_list<juce::Component*>{&sourceBox, &addSourceBtn, &removeSourceBtn}) c->setVisible(o);
     const bool src = o && uiIsSource;
     for (auto* c : std::initializer_list<juce::Component*>{&nameEdit, &nameLabel, &formatLabel, &formatBox, &firstInLabel, &firstInBox, &srcGainLabel, &srcGainSlider, &infoLabel})
@@ -976,6 +1062,7 @@ void VerbEditor::selectObject(int obj) {
     selLabel.setText(lis ? "Listener" : "Source " + juce::String(obj + 1), juce::dontSendNotification);
     updateSliderRanges();
     syncSliders();
+    syncClassicPathControls();
     refreshSurface();
     refreshSources();
     repaint();
@@ -1220,6 +1307,79 @@ void VerbEditor::syncSliders() {
     for (int k = 0; k < 4; ++k)
         if (!sliders[(size_t)k].isMouseButtonDown()) sliders[(size_t)k].setValue(paramValue(selected, k), juce::dontSendNotification);
     updatingUI = false;
+    syncClassicPathControls();
+}
+
+void VerbEditor::syncClassicPathControls() {
+    const auto p = proc.getMovementPath(selected);
+    const bool hasPath = p.points.size() >= 2;
+    const bool old = updatingUI;
+    updatingUI = true;
+    pathEndlessBtn.setToggleState(hasPath && p.closed && p.endless, juce::dontSendNotification);
+    pathWanderBtn.setToggleState(hasPath && p.wander.enabled, juce::dontSendNotification);
+    pathWanderAmpSlider.setValue(std::clamp(p.wander.ampHorizM, 0.0, 5.0), juce::dontSendNotification);
+    pathWanderBtn.setEnabled(hasPath);
+    pathWanderAmpSlider.setEnabled(hasPath);
+    pathWanderReseedBtn.setEnabled(hasPath);
+    updatingUI = old;
+}
+
+void VerbEditor::applyClassicPathShape() {
+    verbp::PathShapeParams sp;
+    sp.kind = (verbp::PathShapeKind)std::clamp(pathShapeBox.getSelectedId() - 1, 0, 7);
+    const auto existing = proc.getMovementPath(selected);
+    if (existing.points.size() >= 2) {
+        double x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
+        for (const auto& pt : existing.points) {
+            x0 = std::min(x0, pt[0]); x1 = std::max(x1, pt[0]);
+            y0 = std::min(y0, pt[1]); y1 = std::max(y1, pt[1]);
+        }
+        sp.cx = 0.5 * (x0 + x1);
+        sp.cy = 0.5 * (y0 + y1);
+        sp.z = existing.points.front()[2];
+    } else {
+        sp.cx = paramValue(selected, 0);
+        sp.cy = paramValue(selected, 1);
+        sp.z = paramValue(selected, 2);
+    }
+    sp.radiusX = std::clamp(pathRadiusSlider.getValue(), 0.2, 50.0);
+    sp.radiusY = (sp.kind == verbp::PathShapeKind::Square) ? sp.radiusX
+               : (sp.kind == verbp::PathShapeKind::Figure8) ? 0.5 * sp.radiusX
+               : (sp.kind == verbp::PathShapeKind::Star) ? 0.3819660112501051 * sp.radiusX
+               : (sp.kind == verbp::PathShapeKind::Spiral) ? 0.25 * sp.radiusX
+               : 0.6 * sp.radiusX;
+    sp.nodes = (sp.kind == verbp::PathShapeKind::Spiral) ? 24 : 16;
+    const auto sc = proc.getDisplayScene();
+    const auto fit = verbp::generatePathShapeForRoom(sp, &sc, true);
+    juce::Array<juce::var> pts;
+    for (const auto& q : fit.path.points) {
+        juce::Array<juce::var> xyz;
+        xyz.add(q[0]); xyz.add(q[1]); xyz.add(q[2]);
+        pts.add(juce::var(xyz));
+    }
+    auto* cmdObj = new juce::DynamicObject();
+    cmdObj->setProperty("op", "path.set");
+    cmdObj->setProperty("object", selected);
+    cmdObj->setProperty("points", pts);
+    cmdObj->setProperty("enabled", true);
+    cmdObj->setProperty("closed", true);
+    cmdObj->setProperty("smooth", fit.path.smooth);
+    cmdObj->setProperty("endless", pathEndlessBtn.getToggleState());
+    if (!existing.wander.isDefault()) {
+        auto* wObj = new juce::DynamicObject();
+        wObj->setProperty("enabled", existing.wander.enabled);
+        wObj->setProperty("ampHorizM", existing.wander.ampHorizM);
+        wObj->setProperty("ampVertM", existing.wander.ampVertM);
+        wObj->setProperty("rateHz", existing.wander.rateHz);
+        wObj->setProperty("smoothness", existing.wander.smoothness);
+        wObj->setProperty("pinEnds", existing.wander.pinEnds);
+        wObj->setProperty("horizOnly", existing.wander.horizOnly);
+        wObj->setProperty("seed", (int)existing.wander.seed);
+        cmdObj->setProperty("wander", juce::var(wObj));
+    }
+    proc.getEditorSession().run(juce::var(cmdObj));
+    syncClassicPathControls();
+    repaint();
 }
 
 // ---------- surfaces tab ----------
@@ -1432,6 +1592,14 @@ void VerbEditor::timerCallback() {
     auto s = proc.getStatus();
     const int st = proc.getLoadState();
     const uint64_t ser = proc.getSceneSerial();
+    if (tab == 3) zoneListPanel.refresh();  // V04e: zones edited elsewhere (state load, automation of the WebView) show up here
+    if (tab == 2) {
+        using State = verb::Engine::MotionTailState;
+        const auto motion = proc.webMotionTailState();
+        motionButton.setToggleState(motion != State::Off, juce::dontSendNotification);
+        motionStatus.setText(motion == State::Ready ? "Motion: ready"
+            : motion == State::Preparing ? "Motion: preparing tail..." : "", juce::dontSendNotification);
+    }
     syncLayers();  // a project, preset or room load may have changed the masks
     bool exporting = false;
     if (exportShown) {  // the export's progress / result replaces the scene status until the scene status changes again
@@ -1946,16 +2114,35 @@ void VerbEditor::resized() {
             srcGainSlider.setBounds(src ? r : juce::Rectangle<int>());
             a.removeFromTop(src ? 3 : 0);
         }
-        infoLabel.setBounds(src ? a.removeFromTop(44) : juce::Rectangle<int>());
+        const bool compactH = getHeight() < 680;
+        infoLabel.setBounds(src ? a.removeFromTop(compactH ? 30 : 44) : juce::Rectangle<int>());
         keepRoutingBtn.setBounds(a.removeFromTop(24));
-        a.removeFromTop(4);
-        header(0, a, "@SEL", src ? 6 : 2);
+        a.removeFromTop(compactH ? 2 : 4);
+        header(0, a, "@SEL", src ? (compactH ? 2 : 6) : 2);
         selLabel.setBounds({});
         for (int k = 0; k < 4; ++k) {
-            sliderLabels[(size_t)k].setBounds(a.removeFromTop(16));
-            sliders[(size_t)k].setBounds(a.removeFromTop(24));
-            a.removeFromTop(4);
+            sliderLabels[(size_t)k].setBounds(a.removeFromTop(compactH ? 14 : 16));
+            sliders[(size_t)k].setBounds(a.removeFromTop(compactH ? 21 : 24));
+            a.removeFromTop(compactH ? 2 : 4);
         }
+        auto layoutPathRow = [&](juce::Rectangle<int>& area) {
+            auto pr = area.removeFromTop(24);
+            pathShapeBox.setBounds(pr.removeFromLeft(96));
+            pr.removeFromLeft(4);
+            pathRadiusSlider.setBounds(pr.removeFromLeft(78));
+            pr.removeFromLeft(4);
+            pathApplyBtn.setBounds(pr.removeFromLeft(52));
+            pr.removeFromLeft(4);
+            pathEndlessBtn.setBounds(pr);
+            area.removeFromTop(compactH ? 3 : 4);
+            auto wr = area.removeFromTop(24);
+            pathWanderBtn.setBounds(wr.removeFromLeft(78));
+            wr.removeFromLeft(4);
+            pathWanderReseedBtn.setBounds(wr.removeFromRight(60));
+            wr.removeFromRight(4);
+            pathWanderAmpSlider.setBounds(wr);
+            area.removeFromTop(compactH ? 3 : 4);
+        };
         if (selected == verbp::kListener) {  // output configuration of the listener
             header(0, a, "OUTPUT", 8);
             layoutLabel.setBounds(a.removeFromTop(16));
@@ -1977,9 +2164,11 @@ void VerbEditor::resized() {
             }
             a.removeFromTop(4);
             showMic.setBounds(a.removeFromTop(24));
-            a.removeFromTop(6);
-            outInfoLabel.setBounds(a.removeFromTop(110));
+            a.removeFromTop(4);
+            layoutPathRow(a);
+            outInfoLabel.setBounds(a.removeFromTop(compactH ? 56 : 82));
         } else {
+            layoutPathRow(a);
             for (auto* c : std::initializer_list<juce::Component*>{&layoutBox, &layoutLabel, &micBox, &micLabel, &outInfoLabel, &radiusRow.label, &radiusRow.slider, &showMic}) c->setBounds({});
         }
     }
@@ -2070,12 +2259,18 @@ void VerbEditor::resized() {
         a.removeFromTop(4);
         clutterInfo.setBounds(a.removeFromTop(70));
         versionLabel.setBounds(a.removeFromTop(18));
+        a.removeFromTop(4);
+        zoneListPanel.setBounds(a.getHeight() >= 60 ? a : juce::Rectangle<int>{});
     }
     // mix
     {
         auto a = panel;
         header(2, a, "MIX", 2);
-        modeBox.setBounds(a.removeFromTop(24)); a.removeFromTop(3);
+        auto modeRow = a.removeFromTop(24);
+        modeBox.setBounds(modeRow.removeFromLeft(108));
+        motionButton.setBounds(modeRow.removeFromLeft(78));
+        motionStatus.setBounds(modeRow);
+        a.removeFromTop(3);
         positionedDry.setBounds(a.removeFromTop(22));
         auto row = [&](juce::Label& label, juce::Slider& slider) {
             auto r = a.removeFromTop(24); label.setBounds(r.removeFromLeft(112)); slider.setBounds(r);

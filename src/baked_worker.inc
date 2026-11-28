@@ -640,10 +640,14 @@
         if(!bakeRequested.load()){
             // P4: Outdated/NotBaked with a matching cached content (typical after Undo/Redo) restores without a worker.
             const auto idleState=bakeState.load();
-            if(idleState==BakeState::Outdated||idleState==BakeState::NotBaked){std::lock_guard<std::mutex>lock(bakeRequestMx);if(tryRestoreBakedCacheLocked(2))return;}
+            // Motion can interrupt a rebake. Keep any still-valid previous table.
+            const bool motionCancelled = idleState == BakeState::Cancelled
+                && (motionRequest.load(std::memory_order_acquire) & 1);
+            if(idleState==BakeState::Outdated||idleState==BakeState::NotBaked||motionCancelled){std::lock_guard<std::mutex>lock(bakeRequestMx);if(tryRestoreBakedCacheLocked(2))return;}
             bakeStreamChangedAt={};
             stopBakeTasks();if(bakeFallbackAction!=bakeAction.load()){lastEstEpoch=~0ull;bakeFallbackAction=bakeAction.load();}return;
         }
+        if (motionRequest.load(std::memory_order_acquire) & 1) return;
         if(!bakeEnabled.load()||cfg.motionMode<2){const auto action=bakeAction.load();stopBakeTasks();endBake(BakeState::Blocked,10,action);return;}
         std::shared_ptr<World> world;
         {std::lock_guard<std::mutex>lock(worldMx);world=latest;}

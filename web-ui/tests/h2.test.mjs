@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { serve } from '../scripts/serve.mjs';
 import { createMockBridge } from '../src/bridge/mock.js';
 import { createStore } from '../src/state/store.js';
@@ -88,6 +90,7 @@ test('H2 web UI: Sources hint always visible, Positioned dry warning reactive in
   const errors = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, reducedMotion: 'reduce' });
+    page.setDefaultTimeout(5000);
     page.on('pageerror', e => errors.push(e.message));
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
 
@@ -160,3 +163,74 @@ test('H2 web UI: Sources hint always visible, Positioned dry warning reactive in
     server.close();
   }
 });
+
+test('MO3b Motion toggle, preparing and ready, Bake bypass, scoped undo and compact headers', async () => {
+  const candidates = [process.env.PLAYWRIGHT_MODULE, 'playwright', 'C:/Users/User/AppData/Local/ms-playwright-go/1.57.0/package'].filter(Boolean);
+  let pw;
+  for (const candidate of candidates) { try { pw = require(candidate); break; } catch {} }
+  assert.ok(pw, 'Playwright available');
+  const executablePath = process.env.CHROME_PATH || [
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
+  ].find(existsSync);
+  const shots = process.env.VERB_MOTION_SHOTS;
+  if (shots) await mkdir(shots, { recursive: true });
+  const { server, url } = await serve({ port: 0 });
+  const browser = await pw.chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 720 }, reducedMotion: 'reduce' });
+    page.setDefaultTimeout(5000);
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    const capture = async name => { if (shots) await page.screenshot({ path: join(shots, name + '.png') }); };
+    const motion = page.getByRole('button', { name: 'Motion', exact: true });
+    const status = page.locator('.rebuild-indicator');
+    const waitMotion = value => page.waitForFunction(v => document.querySelector('.motion-toggle')?.getAttribute('aria-pressed') === String(v), value);
+    await page.goto(url);
+    await waitMotion(false);
+    assert.match(await motion.getAttribute('title'), /follows moving objects.*without waiting for Bake.*single rooms.*multi-room.*bypassed/i);
+    await capture('motion-off-1280x720');
+    await page.getByRole('button', { name: 'Creative', exact: true }).click();
+    await page.evaluate(() => {
+      const { store, bridge } = window.verbRoom;
+      store.setView({ selection: [{ kind: 'source', index: 0 }] }, false);
+      bridge.setBakeStatus({ state: 'baked', object: 0, percent: 100 });
+    });
+    await motion.click();
+    await status.getByText('Motion: preparing tail…', { exact: true }).waitFor();
+    await capture('motion-preparing-1280x720');
+    await status.getByText('Motion: ready', { exact: true }).waitFor();
+    const bakeNote = page.getByText('Motion bypasses baked tables.', { exact: true });
+    await bakeNote.waitFor({ state: 'attached' });
+    await bakeNote.scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('[data-bake-path="0"]').isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: 'Creative', exact: true }).getAttribute('aria-pressed'), 'true');
+    await page.evaluate(() => window.verbRoom.bridge.setRebuilding(true));
+    assert.equal(await page.locator('.viewport-rebuilding').isVisible(), false);
+    assert.equal(await page.evaluate(() => window.verbRoom.store.telemetry['status.load'].pathBake.state), 'baked');
+    await capture('motion-ready-1280x720');
+
+    await page.getByRole('button', { name: /Undo.*Toggle Motion/ }).click();
+    await waitMotion(false);
+    assert.equal(await page.locator('[data-bake-path="0"]').isDisabled(), false);
+    await page.getByRole('button', { name: /Redo.*Toggle Motion/ }).click();
+    await waitMotion(true);
+    await status.getByText('Motion: ready', { exact: true }).waitFor();
+    await page.setViewportSize({ width: 1100, height: 560 });
+    const fit = await page.evaluate(() => {
+      const header = document.querySelector('.header');
+      const footer = document.querySelector('.footer');
+      const last = header.querySelector('.header-actions > :last-child');
+      return header.scrollWidth <= header.clientWidth + 1
+        && last.getBoundingClientRect().right <= innerWidth
+        && footer.scrollWidth <= footer.clientWidth + 1;
+    });
+    assert.ok(fit, 'Motion header and status fit the 1100 × 560 viewport');
+    await capture('motion-ready-1100x560');
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+

@@ -63,8 +63,17 @@ test('F1 wall drag sends autoLink on and off, previews both connected endpoints 
   await withPage(async page => {
     await page.evaluate(() => window.verbRoom.store.setView({ page: 'edit', projection: 'plan', tool: 'move' }));
     await page.waitForFunction(() => document.querySelector('.viewport')?.liveCamera?.view === 'plan' && document.querySelector('.edit-inspector'));
+    // V04e (flaky fix): after switching to Edit the viewport canvas catches up with the page layout over a few hundred
+    // ms. Wait until its on-screen rect AND backing size are unchanged for 10 consecutive animation frames (no sleeps).
+    const layoutSettled = () => page.waitForFunction(() => {
+      const c = document.querySelector('.viewport canvas'); if (!c) return false;
+      const r = c.getBoundingClientRect(), k = [r.x, r.y, r.width, r.height, c.width, c.height].map(v => Math.round(v * 10)).join(',');
+      if (window.__u2LayoutKey === k) window.__u2Stable = (window.__u2Stable || 0) + 1; else { window.__u2LayoutKey = k; window.__u2Stable = 0; }
+      return r.width > 0 && r.height > 0 && window.__u2Stable >= 10;
+    }, null, { polling: 'raf' });
     for (const enabled of [true, false]) {
       if (!enabled) await page.getByRole('switch', { name: 'Auto-link corners' }).click();
+      await layoutSettled();
       const start = await page.evaluate(async () => {
         const { project } = await import('/src/viewport/camera.js');
         const { store, bridge } = window.verbRoom;

@@ -16,7 +16,7 @@ Verb Room is built by one person. If it is useful to you:
 
 </details>
 
-**Latest release: [0.3.1](docs/Release_0.3.1_en.md)** · [українською](docs/Release_0.3.1_uk.md). Version 0.3.1 keeps baked late tails across project save/reload when an analytic source pattern is fixed, widens accepted host output buses up to 64 channels (silencing channels beyond the rendered layout), fixes a tail-status thread race, and adds UI hints plus a signal-flow diagram in the manual. See also [0.3.0](docs/Release_0.3.0_en.md) · [українською](docs/Release_0.3.0_uk.md) and [0.2.3](docs/Release_0.2.3_en.md) · [українською](docs/Release_0.2.3_uk.md).
+**Latest release: [0.4.0](docs/Release_0.4.0_en.md)** · [українською](docs/Release_0.4.0_uk.md). Version 0.4.0 adds real-time Motion reverb, path shapes and Endless playback, wander, linked paths, and trigger zones with modulation and MIDI output. See also [0.3.1](docs/Release_0.3.1_en.md) · [українською](docs/Release_0.3.1_uk.md) and [0.3.0](docs/Release_0.3.0_en.md) · [українською](docs/Release_0.3.0_uk.md).
 
 **User manual:** [English](docs/Manual_en.md) · [українською](docs/Manual_uk.md), including a guide to baking paths and recording host automation.
 
@@ -29,7 +29,7 @@ Instead of a fixed impulse response, Verb Room traces the sound through a room y
 materials, floor/ceiling zones, lowered ceilings, doorways) and re-solves the geometry as the sources and the
 listener move. Position and orientation of every source and of the listener are **automatable parameters**.
 
-> Status: working alpha (0.3.1). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
+> Status: working alpha (0.4.0). Developed and tested on Windows 11 with REAPER. Only the VST3 format on
 > Windows x64 has been tested in REAPER. Experimental macOS Universal and Linux x86_64 builds are provided by GitHub Actions and need host testing. The default Windows build requires AVX2/FMA; the portable CI builds do not. macOS test builds are ad-hoc signed, not Apple-notarized.
 
 ## What it does

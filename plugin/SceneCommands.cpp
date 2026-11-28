@@ -258,9 +258,11 @@ std::string Key::path() const {
     case KeyType::SourceList: return "document.sources";
     case KeyType::Output: return "document.output";
     case KeyType::Tail: return "document.tail";
+    case KeyType::MotionTail: return "document.motionTail";
     case KeyType::Path: return "document.paths["+std::to_string(index)+"]";
     case KeyType::AutomationRange: return "document.scene.automationRange";
     case KeyType::Modulation: return "document.modulation";
+    case KeyType::Zones: return "document.zones";
     case KeyType::Param: return "parameters." + id;
     }
     return {};
@@ -270,10 +272,12 @@ Model readModel(VerbProcessor& p) {
     Model m;
     for(int o=0;o<=kMaxSources;++o)m.paths[(size_t)o]=p.getMovementPath(o);
     m.modRoutes = p.getModulationRoutes();
+    m.zones = p.getTriggerZones();
     m.scene = p.getDisplayScene();
     m.sources = p.getSources();
     m.output = p.getOutputCfg();
     m.tail = p.getTailSettings();
+    m.motionTail = p.motionTailEnabled();
     m.automationRange = p.getAutomationRange();
     for (const auto& id : modelParamIds())
         if (auto* v = p.apvts.getRawParameterValue(id)) m.params[id] = v->load();
@@ -331,6 +335,7 @@ std::vector<KeyChange> diffModels(const Model& a, const Model& b) {
         Key k; k.type = KeyType::Output; add(k, a.output, b.output, true);
     }
     if (a.tail.rays != b.tail.rays || a.tail.adaptive != b.tail.adaptive) { Key k; k.type = KeyType::Tail; add(k, a.tail, b.tail, true); }
+    if (a.motionTail != b.motionTail) { Key k; k.type = KeyType::MotionTail; add(k, a.motionTail, b.motionTail, false); }
     if (a.automationRange != b.automationRange) { Key k; k.type = KeyType::AutomationRange; add(k, a.automationRange, b.automationRange, false); }
     for (const auto& kv : b.params) {
         auto it = a.params.find(kv.first);
@@ -341,6 +346,7 @@ std::vector<KeyChange> diffModels(const Model& a, const Model& b) {
     }
     for(int o=0;o<=kMaxSources;++o)if(!(a.paths[(size_t)o]==b.paths[(size_t)o])) {Key k;k.type=KeyType::Path;k.index=o;add(k,a.paths[(size_t)o],b.paths[(size_t)o],false);}
     if (a.modRoutes != b.modRoutes) { Key k; k.type = KeyType::Modulation; add(k, a.modRoutes, b.modRoutes, false); }
+    if (a.zones != b.zones) { Key k; k.type = KeyType::Zones; add(k, a.zones, b.zones, false); }
     return out;
 }
 
@@ -371,8 +377,10 @@ std::optional<Snap> captureKey(const Model& m, const Key& k) {
     case KeyType::SourceList: return Snap(m.sources);
     case KeyType::Output: return Snap(m.output);
     case KeyType::Tail: return Snap(m.tail);
+    case KeyType::MotionTail: return Snap(m.motionTail);
     case KeyType::AutomationRange: return Snap(m.automationRange);
     case KeyType::Modulation: return Snap(m.modRoutes);
+    case KeyType::Zones: return Snap(m.zones);
     case KeyType::Param: {
         auto it = m.params.find(k.id);
         if (it == m.params.end()) return std::nullopt;
@@ -405,9 +413,11 @@ bool snapsEqual(const Snap& a, const Snap& b) {
     }
     if (auto* x = std::get_if<OutputCfg>(&a)) { const auto& y = std::get<OutputCfg>(b); return *x == y; }
     if (auto* x = std::get_if<TailSettings>(&a)) return x->rays == std::get<TailSettings>(b).rays && x->adaptive == std::get<TailSettings>(b).adaptive;
+    if (auto* x = std::get_if<bool>(&a)) return *x == std::get<bool>(b);
     if (auto* x = std::get_if<AutomationRange>(&a)) return *x == std::get<AutomationRange>(b);
     if (auto* x = std::get_if<MovementPath>(&a)) return *x==std::get<MovementPath>(b);
     if (auto* x = std::get_if<std::vector<ModulationRoute>>(&a)) return *x == std::get<std::vector<ModulationRoute>>(b);
+    if (auto* x = std::get_if<std::vector<TriggerZone>>(&a)) return *x == std::get<std::vector<TriggerZone>>(b);
     if (auto* x = std::get_if<float>(&a)) return std::fabs(*x - std::get<float>(b)) < 1e-4f;  // parameters are quantised to 0.001
     return false;
 }
@@ -415,6 +425,7 @@ bool snapsEqual(const Snap& a, const Snap& b) {
 size_t snapBytes(const Snap& s) {
     if(auto* x=std::get_if<MovementPath>(&s))return sizeof(*x)+x->points.capacity()*sizeof(PathPoint)+x->times.capacity()*sizeof(std::optional<double>)+x->easings.capacity()*sizeof(PathEasing)+x->azKeys.capacity()*sizeof(AzimuthKey);
     if (auto* x = std::get_if<std::vector<ModulationRoute>>(&s)) return sizeof(*x) + x->capacity() * sizeof(ModulationRoute);
+    if (auto* x = std::get_if<std::vector<TriggerZone>>(&s)) { size_t n = sizeof(*x) + x->capacity() * sizeof(TriggerZone); for (const auto& z : *x) n += z.name.capacity() + z.colour.capacity() + z.points.capacity() * sizeof(z.points[0]); return n; }
     if (auto* x = std::get_if<SurfaceSnap>(&s)) return surfBytes(*x);
     if (auto* x = std::get_if<std::vector<SurfaceSnap>>(&s)) { size_t n = sizeof(*x); for (auto& e : *x) n += surfBytes(e); return n; }
     if (auto* x = std::get_if<SourceCfg>(&s)) return sourceBytes(*x);
@@ -477,9 +488,11 @@ Fail applyTargets(VerbProcessor& proc, const std::vector<Target>& targets, int* 
     for (const auto& t : targets) {
         if (t.key.type == KeyType::Output) proc.setOutputCfg(std::get<OutputCfg>(*t.snap));
         else if (t.key.type == KeyType::Tail) proc.setTailSettings(std::get<TailSettings>(*t.snap));
+        else if (t.key.type == KeyType::MotionTail) proc.setMotionTailEnabled(std::get<bool>(*t.snap));
     }
     for(const auto& t:targets)if(t.key.type==KeyType::Path)proc.setMovementPath(t.key.index,std::get<MovementPath>(*t.snap));
     for (const auto& t : targets) if (t.key.type == KeyType::Modulation) proc.setModulationRoutes(std::get<std::vector<ModulationRoute>>(*t.snap));
+    for (const auto& t : targets) if (t.key.type == KeyType::Zones) proc.setTriggerZones(std::get<std::vector<TriggerZone>>(*t.snap));
     if (conflicts) *conflicts = skipped;
     return {};
 }
@@ -1222,6 +1235,8 @@ Fail opScale(const juce::var& p, Model& m, const Ctx& c) {
             m.params[ix] = clampParamWithRange(m.automationRange, c.proc, ix, cx + (m.params[ix] - cx) * f);
             m.params[iy] = clampParamWithRange(m.automationRange, c.proc, iy, cy + (m.params[iy] - cy) * f);
             m.params[iz] = clampParamWithRange(m.automationRange, c.proc, iz, m.params[iz] * f);
+            if (auto& fo = m.paths[(size_t)obj].follow; fo.active())  // V04d: a rig scales with the room
+                for (auto& v : fo.offset) v = std::clamp(v * f, -kMaxFollowOffsetM, kMaxFollowOffsetM);
             for (auto& pt : m.paths[(size_t)obj].points) {
                 pt[0] = std::clamp(cx + (pt[0] - cx) * f, -200.0, 200.0);
                 pt[1] = std::clamp(cy + (pt[1] - cy) * f, -200.0, 200.0);
@@ -1409,6 +1424,136 @@ Fail opSourceAdd(const juce::var&, Model& m, const Ctx& c) {
     return {};
 }
 
+// ---- V04d: Link to path (rig) helpers ----
+static double followZTop(const Model& m) { return std::clamp(m.scene.height > 0 ? m.scene.height : 30.0, 0.5, 30.0); }
+static std::string followObjName(const Model& m, int o) {
+    if (o == kListener) return "Listener";
+    if (o >= 0 && o < (int)m.sources.size() && !m.sources[(size_t)o].name.empty()) return m.sources[(size_t)o].name;
+    return "Source " + std::to_string(o + 1);
+}
+static int followerCount(const Model& m, int target) {
+    int n = 0;
+    for (int f = 0; f < kListener; ++f) if (m.paths[(size_t)f].follow.target == target) ++n;
+    return n;
+}
+static void detachFollower(Model& m, int object, int target) {
+    const int driver = pathGroupDriver(m.paths, static_cast<int>(m.sources.size()), target);
+    m.params[VerbProcessor::pathParamId(object).toStdString()] =
+        m.params.at(VerbProcessor::pathParamId(driver).toStdString());
+    auto& follower = m.paths[(size_t)object];
+    follower = followerToOwnPath(follower, m.paths[(size_t)target], followZTop(m));
+}
+
+// Unlink every follower of `target` (each becomes its own path = the sampled offset curve). Part of the caller's command: one undo step.
+static void detachFollowersOf(Model& m, int target) {
+    if (target < 0 || target >= kListener) return;
+    for (int f = 0; f < kListener; ++f) {
+        auto& fp = m.paths[(size_t)f];
+        if (f == target || fp.follow.target != target) continue;
+        detachFollower(m, f, target);
+    }
+}
+// A usable link target: an existing source with an enabled path of >= 2 points that is not itself a follower.
+static Fail followTargetCheck(const Model& m, int object, int target) {
+    if (target < 0 || target >= (int)m.sources.size()) return {"invalid", "Target source does not exist", "target"};
+    if (target == object) return {"invalid", "A source cannot follow itself", "target"};
+    const auto& t = m.paths[(size_t)target];
+    if (t.follow.active()) return {"invalid", followObjName(m, target) + " already follows " + followObjName(m, t.follow.target) + ": link to that path instead (no chains)", "target"};
+    if (t.points.size() < 2) return {"invalid", followObjName(m, target) + " has no path to follow", "target"};
+    if (!t.enabled) return {"invalid", followObjName(m, target) + "'s path is disabled", "target"};
+    return {};
+}
+static bool parseFollowOffset(const juce::var& v, PathPoint& out) {
+    auto* arr = v.getArray();
+    if (!arr || arr->size() != 3) return false;
+    for (int k = 0; k < 3; ++k) {
+        if (!Args::isNum((*arr)[k])) return false;
+        const double d = (double)(*arr)[k];
+        if (!std::isfinite(d) || std::abs(d) > kMaxFollowOffsetM) return false;
+        out[(size_t)k] = d;
+    }
+    return true;
+}
+
+// path.link {object | objects:[...], target, offset?:[fwd,left,up], followWander?}
+// path.setFollow {object, offset?, followWander?, target?}
+// path.unlink {object}   (the follower keeps its motion as an own path)
+Fail opFollow(const juce::var& p, Model& m, const Ctx&) {
+    Args a(p);
+    const auto op = a.get("op").toString();
+    std::vector<int> objects;
+    if (op == "path.link" && a.has("objects")) {
+        auto* arr = a.get("objects").getArray();
+        if (!arr || arr->isEmpty() || arr->size() > kMaxSources) return {"invalid", "Expected 1..32 source indexes", "objects"};
+        for (const auto& v : *arr) {
+            if (!(v.isInt() || v.isInt64() || (v.isDouble() && std::floor((double)v) == (double)v))) return {"invalid", "Expected integer source indexes", "objects"};
+            const int o = (int)v;
+            if (o < 0 || o >= (int)m.sources.size()) return {"invalid", "Source does not exist", "objects"};
+            if (std::find(objects.begin(), objects.end(), o) == objects.end()) objects.push_back(o);
+        }
+    } else {
+        const int o = a.integer("object", 0, kListener);
+        if (a.bad()) return a.f;
+        if (o == kListener) return {"invalid", "Only sources can be linked to a path", "object"};
+        if (o >= (int)m.sources.size()) return {"invalid", "Source does not exist", "object"};
+        objects.push_back(o);
+    }
+    if (op == "path.unlink") {
+        const int o = objects.front();
+        auto& fp = m.paths[(size_t)o];
+        if (!fp.follow.active()) return {"invalid", "This source is not linked to a path", "object"};
+        const int t = fp.follow.target;
+        if (t >= 0 && t < kListener && t != o) detachFollower(m, o, t);
+        else { MovementPath cleared; cleared.lookAt = fp.lookAt; cleared.lookPoint = fp.lookPoint; cleared.lookTarget = fp.lookTarget; cleared.lookPos = fp.lookPos; cleared.orientOffset = fp.orientOffset; fp = cleared; }
+        return {};
+    }
+    PathPoint offset{0.0, 0.0, 0.0};
+    const bool hasOffset = a.has("offset");
+    if (hasOffset && !parseFollowOffset(a.get("offset"), offset)) return {"invalid", "offset must be [forward, left, up] in metres within +/-50", "offset"};
+    std::optional<bool> followWander;
+    if (a.has("followWander")) { const bool v = a.boolean("followWander"); if (a.bad()) return a.f; followWander = v; }
+    if (op == "path.setFollow") {
+        const int o = objects.front();
+        auto next = m.paths[(size_t)o];
+        if (!next.follow.active()) return {"invalid", "This source is not linked to a path", "object"};
+        if (!hasOffset && !followWander && !a.has("target")) return {"invalid", "Expected offset, followWander and/or target", "offset"};
+        if (a.has("target")) {
+            const int t = a.integer("target", 0, kListener);
+            if (a.bad()) return a.f;
+            if (auto f = followTargetCheck(m, o, t); f.bad()) return f;
+            next.follow.target = t;
+        }
+        if (hasOffset) next.follow.offset = offset;
+        if (followWander) next.follow.followWander = *followWander;
+        if (!validPath(next)) return {"invalid", "Invalid link", "offset"};
+        m.paths[(size_t)o] = std::move(next);
+        return {};
+    }
+    // path.link
+    const int t = a.integer("target", 0, kListener);
+    if (a.bad()) return a.f;
+    for (int o : objects) {
+        if (auto f = followTargetCheck(m, o, t); f.bad()) return f.field == "target" && objects.size() > 1 && t == o ? Fail{"invalid", "The target cannot be linked to itself", "objects"} : f;
+        if (const int n = followerCount(m, o); n > 0)
+            return {"invalid", followObjName(m, o) + " is followed by " + std::to_string(n) + (n == 1 ? " source" : " sources") + ": unlink them first (no chains)", "objects"};
+    }
+    for (int o : objects) {
+        const auto& own = m.paths[(size_t)o];
+        MovementPath next;  // the follower's own geometry, timing, LFO, wander, Endless and Coupling are replaced by the link
+        next.enabled = true;
+        next.orient = own.orient; next.lookAt = own.lookAt; next.lookPoint = own.lookPoint; next.lookTarget = own.lookTarget; next.lookPos = own.lookPos;
+        next.orientOffset = own.orientOffset;
+        next.azKeys = own.azKeys;
+        next.follow.target = t;
+        next.follow.offset = offset;
+        next.follow.followWander = followWander.value_or(true);
+        normalizePathAzKeys(next);
+        if (!validPath(next)) return {"invalid", "Invalid link", "offset"};
+        m.paths[(size_t)o] = std::move(next);
+    }
+    return {};
+}
+
 Fail opSourceRemove(const juce::var& p, Model& m, const Ctx&) {
     Args a(p);
     const int index = a.integer("index", 0, 31);
@@ -1419,7 +1564,9 @@ Fail opSourceRemove(const juce::var& p, Model& m, const Ctx&) {
         for (int k = 0; k < 5; ++k) m.params[paramId(i, k).toStdString()] = m.params[paramId(i + 1, k).toStdString()];
         for (bool solo : {false, true}) m.params[sourceSwitchId(i, solo).toStdString()] = m.params[sourceSwitchId(i + 1, solo).toStdString()];
     }
+    detachFollowersOf(m, index);  // V04d: followers of the removed source keep their motion as own paths (same undo step)
     for(int i=index;i+1<(int)m.sources.size();++i){m.paths[(size_t)i]=m.paths[(size_t)i+1];m.params[VerbProcessor::pathParamId(i).toStdString()]=m.params[VerbProcessor::pathParamId(i+1).toStdString()];}
+    for(int o=0;o<kListener;++o){auto& fo=m.paths[(size_t)o].follow;if(fo.target>index)--fo.target;}
     m.paths[m.sources.size()-1]={};
     for(int o=0;o<=kMaxSources;++o){  // E19: Look at targets follow the source list (the removed source leaves the target unset)
         auto& lp=m.paths[(size_t)o];
@@ -1597,6 +1744,14 @@ Fail opOutputSet(const juce::var& p, Model& m, const Ctx&) {
     return {};
 }
 
+Fail opSetMotion(const juce::var& p, Model& m, const Ctx&) {
+    Args a{p};
+    const bool enabled = a.boolean("enabled");
+    if (a.bad()) return a.f;
+    m.motionTail = enabled;
+    return {};
+}
+
 Fail opTailQuality(const juce::var& p, Model& m, const Ctx&) {
     Args a(p);
     auto rays = a.optInt("baseRays", 8000, 384000);
@@ -1694,7 +1849,47 @@ Fail opPath(const juce::var& p,Model& m,const Ctx&) {
         }
         return true;
     };
+    auto parseWanderObj=[&](const juce::var& item,PathWander& wOut,const char*& fieldOut,std::string& msgOut)->bool{
+        if(!item.isObject()){fieldOut="wander";msgOut="Expected wander object";return false;}
+        auto wBool=[&](const char* key,bool& dst)->bool{
+            if(!item.hasProperty(key))return true;
+            const auto v=item.getProperty(key,{});
+            if(!v.isBool()){fieldOut="wander";msgOut=std::string("wander.")+key+" must be a boolean";return false;}
+            dst=(bool)v;return true;
+        };
+        auto wNum=[&](const char* key,double lo,double hi,double& dst)->bool{
+            if(!item.hasProperty(key))return true;
+            const auto v=item.getProperty(key,{});
+            if(!Args::isNum(v)){fieldOut="wander";msgOut=std::string("Expected numeric wander.")+key;return false;}
+            const double d=(double)v;
+            if(!std::isfinite(d)||d<lo||d>hi){fieldOut="wander";msgOut=std::string("wander.")+key+" out of range";return false;}
+            dst=d;return true;
+        };
+        if(!wBool("enabled",wOut.enabled))return false;
+        if(!wNum("ampHorizM",0.0,kMaxPathWanderHorizM,wOut.ampHorizM))return false;
+        if(!wNum("ampVertM",0.0,kMaxPathWanderVertM,wOut.ampVertM))return false;
+        if(!wNum("rateHz",kMinPathWanderRateHz,kMaxPathWanderRateHz,wOut.rateHz))return false;
+        if(!wNum("smoothness",0.0,1.0,wOut.smoothness))return false;
+        if(!wBool("pinEnds",wOut.pinEnds))return false;
+        if(!wBool("horizOnly",wOut.horizOnly))return false;
+        if(item.hasProperty("seed")){
+            const auto sv=item.getProperty("seed",{});
+            if(!(sv.isInt()||sv.isInt64()||(sv.isDouble()&&std::floor((double)sv)==(double)sv))){fieldOut="wander";msgOut="wander.seed must be an integer";return false;}
+            const double d=(double)sv;
+            if(!std::isfinite(d)||d<1.0||d>999999.0){fieldOut="wander";msgOut="wander.seed out of range [1, 999999]";return false;}
+            wOut.seed=(uint32_t)d;
+        }
+        return true;
+    };
     auto next=m.paths[(size_t)o];const auto op=a.get("op").toString();
+    if(next.follow.active()){  // V04d: a follower has no own shape / timing / LFO / wander / Endless / Laps / Coupling
+        const bool orientOnly=op=="path.setFlags"&&!a.has("closed")&&!a.has("smooth")&&!a.has("endless")&&!a.has("endlessPeriodS")&&!a.has("laps")&&!a.has("group")&&!a.has("start")&&!a.has("end")&&!a.has("lfo")&&!a.has("wander");
+        const bool allowed=op=="path.clear"||op=="path.set"||orientOnly||op=="path.setAzimuthKey"||op=="path.removeAzimuthKey"||op=="path.setAzimuthKeys";
+        if(!allowed)return {"invalid","Linked to "+followObjName(m,next.follow.target)+": Position, Laps, Endless, LFO, wander, Coupling and shape come from the target - unlink first","object"};
+        if(op=="path.set")next.follow=PathFollow{};  // drawing / generating a path replaces the link
+    }
+    if(op=="path.clear"&&o<kListener)detachFollowersOf(m,o);  // V04d: followers keep their motion (same undo step)
+    if(op=="path.setFlags"&&a.has("group")&&o<kListener&&(int)a.get("group")>=0&&next.follow.active())return {"invalid","A linked source cannot be Coupling-grouped","group"};
     if(op=="path.clear"){
         MovementPath cleared;  // E19: orientation belongs to the object; G1: azKeys require a moving path and clear with it
         cleared.lookAt=next.lookAt;cleared.lookPoint=next.lookPoint;cleared.lookTarget=next.lookTarget;cleared.lookPos=next.lookPos;cleared.orientOffset=next.orientOffset;
@@ -1784,7 +1979,7 @@ Fail opPath(const juce::var& p,Model& m,const Ctx&) {
             if(!next.easings.empty())next.easings[(size_t)i]=ease;
         }
     } else if(op=="path.setAzimuthKey") {
-        if(next.points.size()<2)return {"invalid","Path has fewer than two points","object"};
+        if(next.points.size()<2&&!next.follow.active())return {"invalid","Path has fewer than two points","object"};
         if(a.has("index")){
             int i=a.integer("index",0,(int)next.azKeys.size()-1);if(a.bad())return a.f;
             if(!a.has("t")&&!a.has("az")&&!a.has("easing"))return {"invalid","Expected t, az, and/or easing","az"};
@@ -1811,13 +2006,13 @@ Fail opPath(const juce::var& p,Model& m,const Ctx&) {
             normalizePathAzKeys(next);
         }
     } else if(op=="path.removeAzimuthKey") {
-        if(next.points.size()<2)return {"invalid","Path has fewer than two points","object"};
+        if(next.points.size()<2&&!next.follow.active())return {"invalid","Path has fewer than two points","object"};
         int i=a.integer("index",0,(int)next.azKeys.size()-1);if(a.bad())return a.f;
         next.azKeys.erase(next.azKeys.begin()+i);
     } else if(op=="path.setAzimuthKeys") {
         auto* ks=a.get("keys").getArray();
         if(!ks)return {"invalid","Expected keys array","keys"};
-        if(!ks->isEmpty()&&next.points.size()<2)return {"invalid","Path has fewer than two points","object"};
+        if(!ks->isEmpty()&&next.points.size()<2&&!next.follow.active())return {"invalid","Path has fewer than two points","object"};
         if((size_t)ks->size()>kMaxAzKeys)return {"invalid","Expected 0..128 azimuth keys","keys"};
         std::vector<AzimuthKey> parsed;parsed.reserve((size_t)ks->size());
         for(const auto& item:*ks){
@@ -1832,20 +2027,32 @@ Fail opPath(const juce::var& p,Model& m,const Ctx&) {
         const char* fld="lfo";std::string msg;
         if(!parseLfoObj(a.get("lfo"),next.lfo,fld,msg))return {"invalid",msg,fld};
         if(next.points.size()<2 && !next.lfo.isDefault())return {"invalid","Path has fewer than two points","object"};
+    } else if(op=="path.setWander") {
+        if(!a.has("wander"))return {"invalid","wander is required","wander"};
+        const char* fld="wander";std::string msg;
+        if(!parseWanderObj(a.get("wander"),next.wander,fld,msg))return {"invalid",msg,fld};
+        if(next.points.size()<2 && !next.wander.isDefault())return {"invalid","Path has fewer than two points","object"};
     } else if(op!="path.setFlags")return {"unsupported","Unknown path operation","op"};
     if(op=="path.set" || op=="path.setFlags"){
-        if(op=="path.set") next.lfo=PathLfo{};
+        if(op=="path.set") { next.lfo=PathLfo{}; next.wander=PathWander{}; }
         if(a.has("lfo")){
             const char* fld="lfo";std::string msg;
             if(!parseLfoObj(a.get("lfo"),next.lfo,fld,msg))return {"invalid",msg,fld};
         }
-        for(auto flag:{"enabled","closed","smooth","orient"})if(a.has(flag)) {
+        if(a.has("wander")){
+            const char* fld="wander";std::string msg;
+            if(!parseWanderObj(a.get("wander"),next.wander,fld,msg))return {"invalid",msg,fld};
+        }
+        for(auto flag:{"enabled","closed","smooth","orient","endless"})if(a.has(flag)) {
             bool value=a.boolean(flag);if(a.bad())return a.f;
             if(juce::String(flag)=="enabled")next.enabled=value;
             if(juce::String(flag)=="closed")next.closed=value;
             if(juce::String(flag)=="smooth")next.smooth=value;
             if(juce::String(flag)=="orient"){next.orient=value;if(value)next.lookAt=false;}
+            if(juce::String(flag)=="endless")next.endless=value;
         }
+        if(a.has("endlessPeriodS")){double per=a.num("endlessPeriodS",kMinEndlessPeriodS,kMaxEndlessPeriodS);if(a.bad())return a.f;next.endlessPeriodS=per;}
+        if(next.points.size()<2 && (next.endless || next.endlessPeriodS!=kDefaultEndlessPeriodS))return {"invalid","Path has fewer than two points","endless"};
         // E19 orientation: orientMode manual|along|lookAt, lookTarget (object index, listener = 32), lookPos [x,y,z] (fixed point), orientOffset (deg)
         if(a.has("orientMode")){
             const auto mode=a.get("orientMode").toString();
@@ -1872,7 +2079,7 @@ Fail opPath(const juce::var& p,Model& m,const Ctx&) {
         if(a.has("start")){double st=a.num("start",0.0,100.0-kMinPathWindowGap);if(a.bad())return a.f;next.start=st;}
         if(a.has("end")){double en=a.num("end",kMinPathWindowGap,100.0);if(a.bad())return a.f;next.end=en;}
     }
-    if(!validPath(next))return {"invalid","Invalid path points or timing",!validPathLfo(next.lfo)||(op=="path.setLfo")?"lfo":(!next.azKeys.empty()&&(op=="path.setAzimuthKey"||op=="path.setAzimuthKeys")?"azKeys":(!next.times.empty()||!next.easings.empty()||next.start!=0.0||next.end!=100.0)?"times":"points")};
+    if(!validPath(next))return {"invalid","Invalid path points or timing",!validPathLfo(next.lfo)||(op=="path.setLfo")?"lfo":(!validPathWander(next.wander)||(op=="path.setWander")?"wander":(!next.azKeys.empty()&&(op=="path.setAzimuthKey"||op=="path.setAzimuthKeys")?"azKeys":(!next.times.empty()||!next.easings.empty()||next.start!=0.0||next.end!=100.0)?"times":"points"))};
     normalizePathTiming(next);
     normalizePathAzKeys(next);
     m.paths[(size_t)o]=std::move(next);
@@ -1907,6 +2114,15 @@ Fail opModulation(const juce::var& p, Model& m, const Ctx&) {
                 fieldOut = "driver"; msgOut = "Invalid modulation driver"; return false;
             }
         }
+        if (item.hasProperty("zoneId")) {
+            const auto zv = item.getProperty("zoneId", {});
+            if (!(zv.isInt() || zv.isInt64() || (zv.isDouble() && std::floor((double)zv) == (double)zv)) || (double)zv < 0 || (double)zv > kMaxTriggerZoneId) {
+                fieldOut = "zoneId"; msgOut = "zoneId must be an integer in [0, 9999]"; return false;
+            }
+            r.zoneId = (int)(double)zv;
+        }
+        if (modDriverUsesZone(r.driver) && r.zoneId < 1) { fieldOut = "zoneId"; msgOut = "This driver needs a zoneId"; return false; }
+        if (!modDriverUsesZone(r.driver)) r.zoneId = 0;
         if (item.hasProperty("point")) {
             auto* arr = item.getProperty("point", {}).getArray();
             if (!arr || arr->size() != 3) { fieldOut = "point"; msgOut = "point must be [x, y, z]"; return false; }
@@ -2021,6 +2237,44 @@ Fail opModulation(const juce::var& p, Model& m, const Ctx&) {
             }
             r.curve.nodes[(size_t)ni] = {x, y, sm};
         }
+        // V04e: optional MIDI out block. Absent or {"mode":"off"} = no MIDI (identical to older documents).
+        if (item.hasProperty("midi")) {
+            const auto mv = item.getProperty("midi", {});
+            if (!mv.isObject()) { fieldOut = "midi"; msgOut = "midi must be an object"; return false; }
+            ModMidiOut mo;
+            const auto modeV = mv.getProperty("mode", {});
+            if (!modeV.isString() || !parseModMidiMode(modeV.toString().toStdString(), mo.mode)) {
+                fieldOut = "midi.mode"; msgOut = "midi.mode must be off, gate, trigger, cc or index"; return false;
+            }
+            auto intField = [&](const char* key, int lo, int hi, int& dst) -> bool {
+                if (!mv.hasProperty(key)) return true;
+                const auto v = mv.getProperty(key, {});
+                if (!(v.isInt() || v.isInt64() || (v.isDouble() && std::floor((double)v) == (double)v)) || (double)v < lo || (double)v > hi) {
+                    fieldOut = std::string("midi.") + key; msgOut = std::string("midi.") + key + " must be an integer in [" + std::to_string(lo) + ", " + std::to_string(hi) + "]"; return false;
+                }
+                dst = (int)(double)v; return true;
+            };
+            auto numField = [&](const char* key, double lo, double hi, double& dst) -> bool {
+                if (!mv.hasProperty(key)) return true;
+                const auto v = mv.getProperty(key, {});
+                if (!Args::isNum(v) || !std::isfinite((double)v) || (double)v < lo || (double)v > hi) {
+                    fieldOut = std::string("midi.") + key; msgOut = std::string("midi.") + key + " out of range"; return false;
+                }
+                dst = (double)v; return true;
+            };
+            auto boolField = [&](const char* key, bool& dst) -> bool {
+                if (!mv.hasProperty(key)) return true;
+                const auto v = mv.getProperty(key, {});
+                if (!v.isBool()) { fieldOut = std::string("midi.") + key; msgOut = std::string("midi.") + key + " must be a boolean"; return false; }
+                dst = (bool)v; return true;
+            };
+            if (!intField("channel", 1, 16, mo.channel) || !intField("number", 0, 127, mo.number) || !intField("velocity", 1, 127, mo.velocity) ||
+                !intField("ccLo", 0, 127, mo.ccLo) || !intField("ccHi", 0, 127, mo.ccHi) ||
+                !numField("threshold", 0.0, 1.0, mo.threshold) || !numField("hysteresis", 0.0, 0.5, mo.hysteresis) || !numField("lengthMs", 1.0, 5000.0, mo.lengthMs) ||
+                !boolField("velocityFromValue", mo.velocityFromValue) || !boolField("program", mo.program))
+                return false;
+            r.midi = mo.enabled() ? mo : ModMidiOut{};
+        }
         if (!validModRoute(r)) { fieldOut = "route"; msgOut = "Invalid modulation route"; return false; }
         out = r;
         return true;
@@ -2066,6 +2320,134 @@ Fail opModulation(const juce::var& p, Model& m, const Ctx&) {
         return {};
     }
     return {"unsupported", "Unknown modulation operation", "op"};
+}
+// V04c trigger zones. Ids are stable (max + 1 on create, never reused while the zone exists); points are clamped to the
+// room's plan bounds and heights to floor..ceiling; a self-intersecting polygon is rejected with a clear message.
+Fail opZone(const juce::var& p, Model& m, const Ctx& c) {
+    Args a(p);
+    const auto op = a.get("op").toString();
+    double rx0 = -200.0, rx1 = 200.0, ry0 = -200.0, ry1 = 200.0;
+    if (!m.scene.walls.empty()) {
+        rx0 = ry0 = 1e30; rx1 = ry1 = -1e30;
+        for (const auto& w : m.scene.walls) {
+            rx0 = std::min({rx0, w.ax, w.bx}); rx1 = std::max({rx1, w.ax, w.bx});
+            ry0 = std::min({ry0, w.ay, w.by}); ry1 = std::max({ry1, w.ay, w.by});
+        }
+    }
+    const double ceil = m.scene.ceilingInfinite ? 30.0 : std::clamp(m.scene.height, 1.0, 30.0);
+    auto findZone = [&](int id) -> int { for (size_t i = 0; i < m.zones.size(); ++i) if (m.zones[i].id == id) return (int)i; return -1; };
+    // Applies the fields present in `src` onto `z`. `creating`: kind and points are required.
+    auto applyFields = [&](const juce::var& src, TriggerZone& z, bool creating) -> Fail {
+        if (!src.isObject()) return {"invalid", "Expected a zone object", "zone"};
+        auto has = [&](const char* k) { return src.getDynamicObject()->hasProperty(k); };
+        auto num = [&](const char* k, double lo, double hi, double& out) -> Fail {
+            const auto v = src.getProperty(k, {});
+            if (!Args::isNum(v) || !std::isfinite((double)v) || (double)v < lo || (double)v > hi) return {"invalid", std::string(k) + " is out of range", k};
+            out = (double)v; return {};
+        };
+        if (has("name")) {
+            const auto v = src.getProperty("name", {});
+            if (!v.isString() || v.toString().length() > 64) return {"invalid", "name must be a string of at most 64 characters", "name"};
+            z.name = v.toString().toStdString();
+        }
+        if (has("kind")) {
+            const auto k = src.getProperty("kind", {}).toString();
+            if (k != "box" && k != "polygon") return {"invalid", "kind must be box or polygon", "kind"};
+            z.polygon = k == "polygon";
+        } else if (creating) return {"invalid", "kind is required", "kind"};
+        if (has("points")) {
+            auto* arr = src.getProperty("points", {}).getArray();
+            if (!arr) return {"invalid", "points must be an array of [x, y]", "points"};
+            std::vector<std::pair<double, double>> pts;
+            for (const auto& e : *arr) {
+                auto* q = e.getArray();
+                if (!q || q->size() != 2 || !Args::isNum((*q)[0]) || !Args::isNum((*q)[1]) || !std::isfinite((double)(*q)[0]) || !std::isfinite((double)(*q)[1]))
+                    return {"invalid", "points must be an array of [x, y]", "points"};
+                pts.emplace_back(std::clamp((double)(*q)[0], rx0, rx1), std::clamp((double)(*q)[1], ry0, ry1));
+            }
+            z.points = std::move(pts);
+        } else if (creating) return {"invalid", "points are required", "points"};
+        if (!z.polygon) {
+            if (z.points.size() != 2) return {"invalid", "A box zone needs two opposite corners", "points"};
+            if (std::abs(z.points[0].first - z.points[1].first) < 0.01 || std::abs(z.points[0].second - z.points[1].second) < 0.01)
+                return {"invalid", "A box zone must be at least 1 cm in each direction (inside the room)", "points"};
+        } else {
+            if (z.points.size() < 3 || z.points.size() > (size_t)kMaxTriggerZoneVerts) return {"invalid", "A polygon zone needs 3 to 32 vertices", "points"};
+            if (!triggerZonePolygonSimple(z.points)) return {"invalid", "The zone outline crosses itself (or has zero area); a zone must be a simple polygon", "points"};
+        }
+        if (has("zMin")) { if (auto f = num("zMin", -1e3, 1e3, z.zMin); f.bad()) return f; }
+        else if (creating) z.zMin = 0.0;
+        if (has("zMax")) { if (auto f = num("zMax", -1e3, 1e3, z.zMax); f.bad()) return f; }
+        else if (creating) z.zMax = ceil;
+        z.zMin = std::clamp(z.zMin, 0.0, ceil);
+        z.zMax = std::clamp(z.zMax, 0.0, ceil);
+        if (z.zMax - z.zMin < 0.01) return {"invalid", "zMax must be above zMin (inside floor..ceiling)", "zMax"};
+        if (has("edge")) { if (auto f = num("edge", 0.0, kTriggerZoneMaxEdge, z.edge); f.bad()) return f; }
+        if (has("hysteresis")) { if (auto f = num("hysteresis", 0.0, kTriggerZoneMaxHyst, z.hysteresis); f.bad()) return f; }
+        if (has("colour")) {
+            const auto v = src.getProperty("colour", {});
+            if (v.isVoid()) z.colour.clear();
+            else if (!v.isString() || !triggerZoneColourValid(v.toString().toStdString())) return {"invalid", "colour must be #rrggbb or null", "colour"};
+            else z.colour = v.toString().toLowerCase().toStdString();
+        }
+        for (const char* k : {"enabled", "visible"}) if (has(k)) {
+            const auto v = src.getProperty(k, {});
+            if (!v.isBool()) return {"invalid", std::string(k) + " must be a boolean", k};
+            (std::string(k) == "enabled" ? z.enabled : z.visible) = (bool)v;
+        }
+        if (!validTriggerZone(z)) return {"invalid", "Invalid zone", "zone"};
+        return {};
+    };
+    if (op == "zone.create") {
+        if ((int)m.zones.size() >= kMaxTriggerZones) return {"budgetExceeded", "At most 16 zones.", "zones"};
+        TriggerZone z;
+        int next = 1;
+        for (const auto& o : m.zones) next = std::max(next, o.id + 1);
+        if (a.has("id")) {  // replay / undo-redo of a create keeps its id
+            const int id = a.integer("id", 1, kMaxTriggerZoneId);
+            if (a.bad()) return a.f;
+            if (findZone(id) >= 0) return {"invalid", "A zone with this id exists", "id"};
+            next = id;
+        }
+        if (next > kMaxTriggerZoneId) return {"budgetExceeded", "No free zone id", "id"};
+        z.id = next;
+        z.name = "Zone " + std::to_string(next);
+        if (auto f = applyFields(p, z, true); f.bad()) return f;
+        m.zones.push_back(z);
+        if (c.details) *c.details = juce::var(new juce::DynamicObject()), c.details->getDynamicObject()->setProperty("zoneId", z.id);
+        return {};
+    }
+    if (op == "zone.set") {
+        const int id = a.integer("id", 1, kMaxTriggerZoneId);
+        if (a.bad()) return a.f;
+        const int i = findZone(id);
+        if (i < 0) return {"invalid", "Zone does not exist", "id"};
+        TriggerZone z = m.zones[(size_t)i];
+        if (auto f = applyFields(p, z, false); f.bad()) return f;
+        m.zones[(size_t)i] = z;
+        return {};
+    }
+    if (op == "zone.delete") {
+        const int id = a.integer("id", 1, kMaxTriggerZoneId);
+        if (a.bad()) return a.f;
+        const int i = findZone(id);
+        if (i < 0) return {"invalid", "Zone does not exist", "id"};
+        m.zones.erase(m.zones.begin() + i);  // routes referring to it keep their zoneId and read "outside" (0) until re-pointed
+        return {};
+    }
+    if (op == "zone.move") {  // reorder (zone index priority)
+        const int id = a.integer("id", 1, kMaxTriggerZoneId);
+        const int to = a.integer("index", 0, kMaxTriggerZones - 1);
+        if (a.bad()) return a.f;
+        const int i = findZone(id);
+        if (i < 0) return {"invalid", "Zone does not exist", "id"};
+        if (to >= (int)m.zones.size()) return {"invalid", "index out of range", "index"};
+        TriggerZone z = m.zones[(size_t)i];
+        m.zones.erase(m.zones.begin() + i);
+        m.zones.insert(m.zones.begin() + to, z);
+        return {};
+    }
+    return {"unsupported", "Unknown zone operation", "op"};
 }
 // ============================================================================================ labels / coalescing
 std::string lbl(const char* s) { return s; }
@@ -2124,10 +2506,18 @@ static const Descriptor kDescriptors[] = {
     {"path.removeAzimuthKey",true,[](const juce::var&){return lbl("Remove azimuth key");},noKey,opPath},
     {"path.setAzimuthKeys",true,[](const juce::var&){return lbl("Set azimuth keys");},noKey,opPath},
     {"path.setLfo",true,[](const juce::var&){return lbl("Set path LFO");},[](const juce::var& p){return p.getProperty("object",{}).toString().toStdString()+"/lfo";},opPath},
+    {"path.link",true,[](const juce::var& p){auto* arr=p.getProperty("objects",{}).getArray();return arr&&arr->size()>1?std::string("Link ")+std::to_string(arr->size())+" sources to path":lbl("Link to path");},noKey,opFollow},
+    {"path.setFollow",true,[](const juce::var& p){return p.hasProperty("offset")?lbl("Edit link offset"):p.hasProperty("target")?lbl("Change link target"):lbl("Follow wander");},[](const juce::var& p){return p.getProperty("object",{}).toString().toStdString()+"/follow";},opFollow},
+    {"path.unlink",true,[](const juce::var&){return lbl("Unlink path");},noKey,opFollow},
+    {"path.setWander",true,[](const juce::var&){return lbl("Set path wander");},[](const juce::var& p){return p.getProperty("object",{}).toString().toStdString()+"/wander";},opPath},
     {"modulation.addRoute",true,[](const juce::var&){return lbl("Add modulation route");},noKey,opModulation},
     {"modulation.setRoute",true,[](const juce::var&){return lbl("Edit modulation route");},[](const juce::var& p){const auto rt=p.getProperty("route",{});return std::string("mod/")+p.getProperty("index",{}).toString().toStdString()+"/"+rt.getProperty("driver",{}).toString().toStdString()+"/"+rt.getProperty("target",{}).toString().toStdString()+"/"+rt.getProperty("hostOut",0).toString().toStdString();},opModulation},
     {"modulation.removeRoute",true,[](const juce::var&){return lbl("Remove modulation route");},noKey,opModulation},
     {"modulation.setRoutes",true,[](const juce::var&){return lbl("Set modulation routes");},noKey,opModulation},
+    {"zone.create",true,[](const juce::var&){return lbl("Add zone");},noKey,opZone},
+    {"zone.set",true,[](const juce::var& p){return (p.hasProperty("points")&&!p.hasProperty("name")) ? lbl("Edit zone shape") : lbl("Edit zone");},[](const juce::var& p){return std::string("zone/")+p.getProperty("id",{}).toString().toStdString();},opZone},
+    {"zone.delete",true,[](const juce::var&){return lbl("Delete zone");},noKey,opZone},
+    {"zone.move",true,[](const juce::var&){return lbl("Reorder zones");},noKey,opZone},
     {"output.autoMakeup", true, [](const juce::var&) {return lbl("Auto makeup");}, noKey,
         [](const juce::var&, Model& m, const Ctx& c)->Fail { float v=0; if(!c.proc.autoMakeupDb(v))return {"notReady","No complete energy result or enabled source", ""}; m.params["makeup"]=v; return {}; }},
     {"surface.translate", true, labelMove, keyRefs, opTranslate},
@@ -2163,6 +2553,7 @@ static const Descriptor kDescriptors[] = {
     {"source.setPointOffset", true, [](const juce::var&) { return lbl("Move source point"); }, keyIndex, opSourcePointOffset},
     {"output.set", true, [](const juce::var&) { return lbl("Change output"); }, keyEmpty, opOutputSet},
     {"tail.setQuality", true, [](const juce::var&) { return lbl("Change tail quality"); }, keyEmpty, opTailQuality},
+    {"tail.setMotion", true, [](const juce::var&) { return lbl("Toggle Motion"); }, noKey, opSetMotion},
     {"listener.set", true, [](const juce::var&) { return lbl("Move listener"); }, keyEmpty, opListenerSet},
 };
 

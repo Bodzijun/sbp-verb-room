@@ -36,6 +36,7 @@
 .mixed-value {color:var(--muted);font-size:11px}
 .check[aria-checked=mixed] .led {background:var(--accent);opacity:.5}
 @media(max-width:1100px){.perspective-inset{height:125px}.analysis .energy-advanced-body{max-height:165px}}
+@media(max-height:570px){.analysis .energy-advanced-body{max-height:110px}}
 
 /* narrow viewport (900x600 Edit, 335 px bar): the full 'Snap auto · 50 cm' (D2) needs the icon buttons a little tighter, still one row */
 @container (max-width:470px){.layer-bar .layer-filters button{padding-left:2px;padding-right:2px;min-width:0}.layer-bar .outliner-toggle{padding-left:6px;padding-right:6px;margin-right:0}.layer-bar .layer-options{padding-left:2px;gap:2px}}

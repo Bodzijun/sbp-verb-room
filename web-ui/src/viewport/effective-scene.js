@@ -16,6 +16,7 @@ export function viewportState(state, edit = false) {
   for (const z of [...s.floorZones,...s.ceilingZones]) {z.vertices=z.vertices.map(p=>p.map(x=>x*f));if(z.heightM!==null)z.heightM*=f;}
   for (const [id,value] of Object.entries(v)) if(positionId(id))v[id]=value*f;
   for (const d of result.parameters.descriptors?.parameters || [])if(positionId(d.id)){d.min*=f;d.max*=f;d.step*=f;if(Number.isFinite(d.default))d.default=Math.max(d.min,Math.min(d.max,d.default*f));}
+  for (const z of result.document.zones || []) { z.points = z.points.map(q => q.map(x => x * f)); z.zMin *= f; z.zMax *= f; z.edge *= f; z.hysteresis *= f; }
   for (const source of result.document.sources){source.spreadM*=f;source.offsetsM=source.offsetsM.map(p=>p.map(x=>x*f));}
   // output.radiusM / ORTF spacing / ears radius remain physical sizes.
   cache.set(state,result);return result;

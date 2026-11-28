@@ -1,4 +1,5 @@
 import { evaluatePath, evaluateAzimuthKeys, pathGroupDriver, pathId, pathYaw, remainder360 } from '../viewport/movement-path.js';
+import { zoneDriverRaw } from '../state/trigger-zones.js';
 
 export const MOD_MAX_ROUTES = 64;
 export const MOD_MAX_HOST_OUTS = 16;
@@ -16,8 +17,13 @@ export const MOD_DRIVERS = [
   { id: 'speed', label: 'Speed', unit: 'm/s', defaultIn: [0, 10], step: 0.1, desc: 'Smoothed 3D movement speed (~30 ms window)' },
   { id: 'radialSpeed', label: 'Radial speed', unit: 'm/s', defaultIn: [-10, 10], step: 0.1, noListener: true, desc: 'Signed speed away from (+) or toward (−) listener' },
   { id: 'pathPosition', label: 'Path position', unit: '', inLabel: 'In (path 0–1)', defaultIn: [0, 1], step: 0.01, desc: 'Path progress: 0 = start, 1 = end (= Position 0–100 %, including Path LFO)' },
-  { id: 'distanceToNearestWall', label: 'Distance to nearest wall', unit: 'm', defaultIn: [0, 5], step: 0.1, desc: 'Shortest distance from object to any wall segment' }
+  { id: 'distanceToNearestWall', label: 'Distance to nearest wall', unit: 'm', defaultIn: [0, 5], step: 0.1, desc: 'Shortest distance from object to any wall segment' },
+  // V04c trigger-zone drivers (Creative only, like every route). zoneId names the zone; Zone index needs none.
+  { id: 'inZone', label: 'In zone', unit: '', inLabel: 'In (0 out – 1 in)', defaultIn: [0, 1], step: 0.01, hasZone: true, desc: '1 inside the zone, 0 outside; a soft edge fades 0→1 over the edge width. Exit uses the zone hysteresis.' },
+  { id: 'zoneIndex', label: 'Zone index', unit: '', inLabel: 'In (zone number)', defaultIn: [0, 4], step: 1, desc: '0 outside every zone, otherwise the number (list order) of the first enabled zone containing the object' },
+  { id: 'distanceToZone', label: 'Distance to zone', unit: 'm', defaultIn: [-1, 3], step: 0.1, hasZone: true, desc: 'Signed distance to the zone: negative inside, positive outside (1000 m when the zone is missing or disabled)' }
 ];
+export const zoneDriver = id => !!DRIVER_MAP.get(id)?.hasZone;
 
 export const MOD_TARGETS = [
   { id: 'sourceGain', label: 'Source gain Δ', shortLabel: 'Gain Δ', unit: 'dB', min: -60, max: 12, defaultOut: [0, -24], step: 0.5, global: false },
@@ -67,6 +73,35 @@ export function normalizeLfo(lfo) {
 export function isDefaultLfo(lfo) {
   const n = normalizeLfo(lfo);
   return !n.enabled && n.shape === 'sine' && n.rateHz === 0.5 && n.depth === 0 && n.phaseDeg === 0 && n.seed === 1;
+}
+
+export const DEFAULT_WANDER = Object.freeze({
+  enabled: false,
+  ampHorizM: 0.5,
+  ampVertM: 0.25,
+  rateHz: 0.5,
+  smoothness: 0.8,
+  pinEnds: true,
+  horizOnly: false,
+  seed: 1
+});
+
+export function normalizeWander(wander) {
+  const src = wander && typeof wander === 'object' ? wander : {};
+  const ampHorizM = Number.isFinite(src.ampHorizM) ? Math.max(0, Math.min(20, src.ampHorizM)) : 0.5;
+  const ampVertM = Number.isFinite(src.ampVertM) ? Math.max(0, Math.min(10, src.ampVertM)) : 0.25;
+  const rateHz = Number.isFinite(src.rateHz) ? Math.max(0.05, Math.min(8, src.rateHz)) : 0.5;
+  const smoothness = Number.isFinite(src.smoothness) ? Math.max(0, Math.min(1, src.smoothness)) : 0.8;
+  const pinEnds = 'pinEnds' in src ? !!src.pinEnds : true;
+  const horizOnly = !!src.horizOnly;
+  const seed = Number.isInteger(src.seed) ? Math.max(1, Math.min(999999, src.seed)) : 1;
+  return { enabled: !!src.enabled, ampHorizM, ampVertM, rateHz, smoothness, pinEnds, horizOnly, seed };
+}
+
+export function isDefaultWander(wander) {
+  const n = normalizeWander(wander);
+  return !n.enabled && n.ampHorizM === 0.5 && n.ampVertM === 0.25 && n.rateHz === 0.5 &&
+         n.smoothness === 0.8 && n.pinEnds === true && n.horizOnly === false && n.seed === 1;
 }
 
 export const MOD_PRESETS = [
@@ -239,6 +274,7 @@ export function normalizeRoute(raw, numSources = 32) {
     if (targetObject === -1 && object === 32) targetObject = 0;
   }
   const hostOut = Number.isInteger(r.hostOut) ? Math.max(0, Math.min(MOD_MAX_HOST_OUTS, r.hostOut)) : 0;
+  const zoneId = dm.hasZone && Number.isInteger(r.zoneId) && r.zoneId >= 1 && r.zoneId <= 9999 ? r.zoneId : 0;
   const route = {
     enabled: r.enabled !== false,
     object,
@@ -252,6 +288,7 @@ export function normalizeRoute(raw, numSources = 32) {
           ]
         }
       : {}),
+    ...(dm.hasZone ? { zoneId: zoneId || 1 } : {}),
     curve: {
       inputRange: [inMin, inMax],
       outputRange: [outMin, outMax],
@@ -265,7 +302,83 @@ export function normalizeRoute(raw, numSources = 32) {
     attackMs: clampFin(Number(r.attackMs), 0, 2000, 15),
     releaseMs: clampFin(Number(r.releaseMs), 0, 5000, 80)
   };
+  const midi = normalizeMidiOut(r.midi);
+  if (midi) route.midi = midi;
   return route;
+}
+
+// V04e: optional MIDI out of a route. Absent / mode 'off' = no MIDI (the key is omitted from the route).
+export const MIDI_MODES = [
+  { id: 'off', label: 'Off' },
+  { id: 'gate', label: 'Note gate', desc: 'Note-on when the route output rises to the threshold, note-off when it falls below threshold − hysteresis' },
+  { id: 'trigger', label: 'Note trigger', desc: 'Short note (one-shot) on every upward crossing of the threshold' },
+  { id: 'cc', label: 'CC', desc: 'Controller value from the route output, sent only when the integer value changes' },
+  { id: 'index', label: 'Keyswitch', desc: 'Driver value as an index (Zone index): index i holds note base + i − 1, the previous note released first' }
+];
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+// Middle C = C3 (note 60), the REAPER / Cubase convention.
+export function midiNoteName(n) { const v = Math.max(0, Math.min(127, Math.round(Number(n) || 0))); return `${NOTE_NAMES[v % 12]}${Math.floor(v / 12) - 2}`; }
+export function normalizeMidiOut(m) {
+  if (!m || typeof m !== 'object' || !MIDI_MODES.some(x => x.id === m.mode) || m.mode === 'off') return undefined;
+  const int = (v, lo, hi, fb) => Number.isFinite(Number(v)) ? Math.max(lo, Math.min(hi, Math.round(Number(v)))) : fb;
+  const num = (v, lo, hi, fb) => Number.isFinite(Number(v)) ? Math.max(lo, Math.min(hi, Number(v))) : fb;
+  return {
+    mode: m.mode,
+    channel: int(m.channel, 1, 16, 1),
+    number: int(m.number, 0, 127, m.mode === 'cc' ? 1 : m.mode === 'index' ? 36 : 60),
+    velocity: int(m.velocity, 1, 127, 100),
+    velocityFromValue: !!m.velocityFromValue,
+    threshold: num(m.threshold, 0, 1, 0.5),
+    hysteresis: num(m.hysteresis, 0, 0.5, 0.05),
+    lengthMs: num(m.lengthMs, 1, 5000, 100),
+    ccLo: int(m.ccLo, 0, 127, 0),
+    ccHi: int(m.ccHi, 0, 127, 127),
+    program: !!m.program
+  };
+}
+// Human-readable form of a 3-byte message [status, d1, d2] for the live indicator.
+export function describeMidiMessage(last) {
+  if (!Array.isArray(last) || last.length < 1) return '';
+  const st = last[0] & 0xf0, ch = (last[0] & 0x0f) + 1, d1 = last[1] ?? 0, d2 = last[2] ?? 0;
+  if (st === 0x90) return `Note on ${midiNoteName(d1)} (${d1}) vel ${d2} · ch ${ch}`;
+  if (st === 0x80) return `Note off ${midiNoteName(d1)} (${d1}) · ch ${ch}`;
+  if (st === 0xb0) return `CC ${d1} = ${d2} · ch ${ch}`;
+  if (st === 0xc0) return `Program ${d1} · ch ${ch}`;
+  return `0x${last[0].toString(16)} ${d1} ${d2}`;
+}
+// Mock-only emulation of the processor's MIDI generator (same rules, control-rate = telemetry rate) so the indicator
+// can be exercised without a plugin. `mem` is the caller's per-route memory array.
+export function simulateMidiOut(routes, wire, mem) {
+  const out = [];
+  for (let i = 0; i < routes.length; i++) {
+    const m = normalizeMidiOut(routes[i]?.midi);
+    const st = mem[i] || (mem[i] = { key: '', gate: false, primed: false, index: 0, cc: -1, count: 0, last: null });
+    const key = m ? `${m.mode}/${m.channel}/${m.number}` : '';
+    if (key !== st.key) Object.assign(st, { key, gate: false, primed: false, index: 0, cc: -1 });
+    if (!m) { out.push(null); continue; }
+    const w = wire[i] || {}, ch = m.channel - 1;
+    const send = msg => { st.last = msg; st.count++; };
+    if (!w.active) { if (st.gate && m.mode === 'gate') send([0x80 | ch, m.number, 0]); if (st.index > 0 && m.mode === 'index') send([0x80 | ch, m.number + st.index - 1, 0]); Object.assign(st, { gate: false, primed: false, index: 0, cc: -1 }); out.push(st.count ? { count: st.count, last: st.last } : null); continue; }
+    const v = Math.max(0, Math.min(1, Number(w.norm) || 0)), vel = m.velocityFromValue ? Math.round(1 + v * 126) : m.velocity;
+    if (m.mode === 'gate' || m.mode === 'trigger') {
+      if (m.mode === 'trigger' && !st.primed) { st.primed = true; st.gate = v >= m.threshold; }
+      else if (!st.gate && v >= m.threshold) { st.gate = true; send([0x90 | ch, m.number, vel]); }
+      else if (st.gate && v < m.threshold - m.hysteresis) { st.gate = false; if (m.mode === 'gate') send([0x80 | ch, m.number, 0]); }
+    } else if (m.mode === 'cc') {
+      const val = Math.max(0, Math.min(127, Math.round(m.ccLo + v * (m.ccHi - m.ccLo))));
+      if (val !== st.cc) { st.cc = val; send([0xb0 | ch, m.number, val]); }
+    } else if (m.mode === 'index') {
+      const idx = Math.max(0, Math.min(128, Math.round(Number(w.raw) || 0)));
+      if (idx !== st.index) {
+        if (st.index > 0) send([0x80 | ch, m.number + st.index - 1, 0]);
+        st.index = idx;
+        if (idx > 0 && m.number + idx - 1 <= 127) send([0x90 | ch, m.number + idx - 1, vel]);
+        if (m.program) send([0xc0 | ch, Math.min(idx, 127), 0]);
+      }
+    }
+    out.push(st.count ? { count: st.count, last: st.last } : null);
+  }
+  return out;
 }
 
 export function evaluateModCurveNormalized(curve, raw) {
@@ -523,6 +636,10 @@ export function previewRouteDriverRaw(state, route, tSec = 0, poseCache = null, 
     return Math.max(0, Math.min(1, pose.uMap[o] ?? 0));
   case 'distanceToNearestWall':
     return distanceToWallSegments(state.document?.scene, ox, oy, oz);
+  case 'inZone':
+  case 'zoneIndex':
+  case 'distanceToZone':
+    return zoneDriverRaw(route, state.document?.zones, [ox, oy, oz]);
   default:
     return 0;
   }
@@ -547,7 +664,7 @@ export function computeModulationTelemetry(state, tSec = 0, velocities = null) {
     const value = r.target === 'none' ? normVal : evaluateModCurve(r.curve, raw);
     const cleanRaw = Number.isFinite(raw) ? raw : 0;
     const cleanVal = Number.isFinite(value) ? value : 0;
-    previews.push({ raw: cleanRaw, value: cleanVal, hostOutValue: active ? normVal : 0.5, active });
+    previews.push({ raw: cleanRaw, value: cleanVal, hostOutValue: active ? normVal : 0.5, active, norm: normVal });
     wireRoutes.push({
       raw: active ? cleanRaw : 0,
       value: active ? cleanVal : 0,

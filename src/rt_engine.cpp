@@ -23,6 +23,7 @@
 #include "geometry.hpp"
 #include "tail.hpp"
 #include "energy.hpp"
+#include "motion_grid.hpp"
 #include "bake_pool.hpp"
 
 namespace verb {
@@ -204,6 +205,26 @@ struct Slot {
     mutable uint64_t bakeInvalidSince=~0ull;  // P5: sample count when the baked projection was first lost (~0 = valid); bounds the gain hold
 };
 
+struct MotionPhoto {
+    std::shared_ptr<const MotionGrid> grid;
+    uint64_t request = 0, scene = 0, quality = 0;
+    Vec3 listener{};
+    MotionEnvelope listenerEnvelope{};
+    std::vector<MotionEnvelope> listenerChannelEnvelopes;
+    std::vector<Transducer> sources;
+    std::vector<MotionEnvelope> envelopes;
+    std::vector<MotionEnvelope> channelEnvelopes;
+    std::vector<MotionEnvelope> photoWinEnergy;
+    std::vector<int> slots;
+    std::vector<float> feed;
+    double length = 0.;
+};
+
+struct MotionGains {
+    std::vector<MotionEnvelope> windows;
+    std::vector<std::array<float, NB>> feed, feedStart, feedStep;
+};
+
 struct TailConv {
     int B = 0, P = 0, R = 0, bins = 0;
     int bakeSource=-1;
@@ -235,6 +256,8 @@ struct TailConv {
     std::vector<float> cleanRe, cleanIm, cleanPrev, cleanIn;
     std::vector<uint8_t> fdlNz, freshNz, cleanNz;
     std::vector<float> preRe, preIm, preFreshRe, preFreshIm;
+    std::vector<float> motionPreRe, motionPreIm;
+    int motionSlices = 0;
     int preCurSlot = -1, preHoSlot = -1, preDoneQ = 0;
     std::atomic<int> cleanSynced{0};
     uint64_t inputStart=0; int inputFadeBlocks=0;
@@ -684,6 +707,20 @@ struct Engine::Impl {
 
     std::atomic<bool> running{true};
     std::thread worker;
+    // Worker owns the inactive bank until publishing it. Audio acknowledges
+    // the new bank only after the old convolver history drains.
+    MotionPhoto motionPhotos[2];
+    MotionGains motionGains[2];
+    std::vector<float> motionDrive, motionDriveSum, motionFeedScratch;
+    std::shared_ptr<const MotionGrid> workerGrid;
+    uint64_t workerGridScene = 0, workerGridQuality = 0;
+    std::atomic<uint64_t> motionRequest{0}; // odd = enabled, upper bits distinguish toggles
+    std::atomic<uint64_t> motionReadyRequest{0}, motionReadyScene{0}, motionReadyQuality{0};
+    std::atomic<int> motionPending{-1}, motionPublished{-1};
+    int motionActive = -1, motionIncoming = -1; // audio only
+    bool motionAudio = false, motionWorkerWasOn = false;
+    uint64_t motionNeutralUntil = 0; // audio only, one FFT block at a mode boundary
+    float motionMaxStep = 1.f;
 
     Impl(const Scene& scene, const EngineConfig& c_)
         : sc(scene), cfg(c_), S((int)scene.sources.size()), R((int)scene.receivers.size()), sr(scene.sr),
@@ -694,7 +731,10 @@ struct Engine::Impl {
         currentAbsorption=cfg.absorptionScale;
         requestedRays = cfg.tailRays; requestedAdaptive = cfg.adaptiveTail;
         for (int g=0;g<3;++g) requestedDecay[g] = cfg.decayMultipliers[g];
-        sc.length = cachedTailSeconds(sc, cfg.erOrder, cfg.absorptionScale, cfg.cancelled, tailExecution(cfg.cancelled));  // never shorter than the scene says, long enough that the tail is not cut
+        motionRequest.store(cfg.motionTail ? 1 : 0, std::memory_order_relaxed);
+        motionMaxStep = static_cast<float>(std::pow(10., (1.5 / 20.) * (cfg.ctrlInterval / 128.) * (48000. / sr)));
+        if (!cfg.motionTail)
+            sc.length = cachedTailSeconds(sc, cfg.erOrder, cfg.absorptionScale, cfg.cancelled, tailExecution(cfg.cancelled));
         roomTailLength = sc.length;
         if (cfg.tailBlock % cfg.ctrlInterval) throw std::runtime_error("tailBlock must be a multiple of ctrlInterval");
         maxWalls = cfg.erOrder <= 1 ? 128 : cfg.erOrder == 2 ? 64 : cfg.erOrder == 3 ? 24 : 12;
@@ -815,7 +855,7 @@ struct Engine::Impl {
             const Vec3& rp = sc.receivers[(size_t)r].pos;
             initAdjusted |= (initRc[(size_t)r].pos.x != rp.x || initRc[(size_t)r].pos.y != rp.y || initRc[(size_t)r].pos.z != rp.z);
         }
-        if (initAdjusted) {
+        if (initAdjusted && !cfg.motionTail) {
             std::vector<std::array<double, 4>> probeSrcs((size_t)S);
             for (int s = 0; s < S; ++s) for (int k = 0; k < 4; ++k) probeSrcs[(size_t)s][(size_t)k] = effSrc0[(size_t)s * 4 + k];
             sc.length = cachedTailSeconds(buildLengthProbe(*latest, effL0, initRc, &probeSrcs), cfg.erOrder, cfg.absorptionScale, cfg.cancelled, tailExecution(cfg.cancelled));
@@ -830,7 +870,7 @@ struct Engine::Impl {
         shared = cfg.sharedTail;
         size_t N = (size_t)std::ceil(sc.length * sr);
         if (N <= (size_t)B * 2) throw std::runtime_error("scene length too short for the tail block size");
-        const int initialP = (int)((N - 1) / B);
+        const int initialP = cfg.motionTail ? 0 : (int)((N - 1) / B);
         const int P = (int)std::ceil(20. * sr / B); // retain input history for later longer worker IRs
         activePartitions.resize((size_t)P);
         activeFdlSlots.resize((size_t)P);
@@ -870,6 +910,7 @@ struct Engine::Impl {
         if (shared) {
             for (int r = 0; r < R; ++r) {
                 sconv.push_back(std::make_unique<TailConv>()); auto& t=*sconv.back(); initConv(t, 1);
+                t.bakeSource = r;
             }
             lateGbuf[0].assign((size_t)R * S * 8, 0.f);
             lateGbuf[1].assign((size_t)R * S * 8, 0.f);
@@ -886,6 +927,19 @@ struct Engine::Impl {
             slewUp = (float)std::pow(10.0, perPeriod / 20.0); slewDn = 1.f / slewUp;
             trans.slotX.assign((size_t)R, 0); trans.slotH.assign((size_t)R, 0); trans.rho.assign((size_t)R, 0.f);
             trans.gNew.assign((size_t)R * S * 8, 0.f); trans.cmul.assign((size_t)R * 8, 1.f);
+        }
+        for (auto& gains : motionGains) {
+            gains.windows.resize(shared ? (size_t)R : (size_t)S * (size_t)R);
+            if (shared) {
+                gains.feed.resize((size_t)R * (size_t)S);
+                gains.feedStart.resize((size_t)R * (size_t)S);
+                gains.feedStep.resize((size_t)R * (size_t)S);
+            }
+        }
+        if (shared) {
+            motionDrive.resize((size_t)S);
+            motionDriveSum.resize((size_t)S);
+            motionFeedScratch.resize((size_t)cfg.ctrlInterval * 2);
         }
         bakeObjectTouched.assign((size_t)S + 1, 0);
         bakeAudioSourceValid.assign((size_t)S, 0);
@@ -950,7 +1004,7 @@ struct Engine::Impl {
             srcs[s]->lastGeom = geomSerial.load();
             srcs[s]->hist.assign(kHist, srcs[s]->t.pos);
             srcs[s]->stillPeriods = (int)kHist;
-            if (!shared) {
+            if (!shared && !cfg.motionTail) {
                 Transducer st = currentSource(s);
                 buildTail(s, latest->sc, st, initRc, 0, latest->serial);
                 srcs[s]->lastPattern = st.pattern;
@@ -958,7 +1012,7 @@ struct Engine::Impl {
                 srcs[s]->tail.curAtomic = 0;
             }
         }
-        if (shared) sharedRebuild(true);
+        if (shared && !cfg.motionTail) sharedRebuild(true);
         if (shared) for (auto& c : sconv) c->appliedScene = c->slot[0].sceneRevision;
         else for (auto& s : srcs) s->tail.appliedScene = s->tail.slot[0].sceneRevision;
         placeReceivers(effL0, std::min(std::max(params[S * 4 + 4].load(), 0.0), 3.0));
@@ -1080,12 +1134,14 @@ struct Engine::Impl {
         return {width>1?bakePool.get():nullptr,width,cancel};
     }
 
-    void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx, uint64_t sceneRevision, const std::function<bool()>& extraCancel = {}, bool cancelOnPose = true, bool decayOnly = false) {
+    void buildTail(int s, const Scene& scn, const Transducer& st, const std::vector<Transducer>& rc, int slotIdx, uint64_t sceneRevision, const std::function<bool()>& extraCancel = {}, bool cancelOnPose = true, bool decayOnly = false, bool motionPhoto = false) {
+        const auto request = motionRequest.load(std::memory_order_acquire);
+        if (bool(request & 1) != motionPhoto) throw std::runtime_error("Tail mode changed");
         bakePreempt.fetch_add(1);if(bakeRequested.load())bakeWaitReason=cancelOnPose&&extraCancel?7:5;
         TailConv& t = srcs[s]->tail;
         bool sparse = false;
         const auto rebuildPose=livePose();
-        const auto cancelled = [&]{return !running || geomSerial.load()!=sceneRevision || traceQualitySerial.load(std::memory_order_acquire)!=workerTraceQuality || (!decayOnly && qualitySerial.load(std::memory_order_acquire)!=workerQuality) || (cfg.cancelled && cfg.cancelled()) || (extraCancel && extraCancel()) || (cancelOnPose && livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
+        const auto cancelled = [&]{return !running || motionRequest.load(std::memory_order_relaxed)!=request || geomSerial.load()!=sceneRevision || traceQualitySerial.load(std::memory_order_acquire)!=workerTraceQuality || (!decayOnly && qualitySerial.load(std::memory_order_acquire)!=workerQuality) || (cfg.cancelled && cfg.cancelled()) || (extraCancel && extraCancel()) || (cancelOnPose && livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
         const auto execution=tailExecution(cancelled);
         TailHist h;
         if (decayOnly && !srcHist[s].h.empty()) {
@@ -1287,7 +1343,9 @@ struct Engine::Impl {
     // whose pose differs from the one its histogram was traced at (all of them when the listener moved) on copies, so a
     // cancelled re-trace changes nothing, and publishes a Transition (long crossfade, then the normalization handover)
     // instead of the short swap. The IR and gains it ends with are computed exactly as the constructor computes them.
-    bool sharedRebuild(bool initial, const std::vector<double>* settle = nullptr, const std::function<bool()>& settleCancel = {}, bool jumpRebuild = false, uint64_t jumpTag = 0) {
+    bool sharedRebuild(bool initial, const std::vector<double>* settle = nullptr, const std::function<bool()>& settleCancel = {}, bool jumpRebuild = false, uint64_t jumpTag = 0, MotionPhoto* photo = nullptr) {
+        const auto request = motionRequest.load(std::memory_order_acquire);
+        if (bool(request & 1) != (photo != nullptr)) return false;
         bakePreempt.fetch_add(1);if(bakeRequested.load())bakeWaitReason=jumpRebuild?1:settle?7:2;
         std::shared_ptr<World> wsnap;
         {
@@ -1301,11 +1359,21 @@ struct Engine::Impl {
             double rawLst[4];
             for (int i = 0; i < 4; ++i) rawLst[i] = settle ? (*settle)[(size_t)i] : params[S * 4 + i].load();
             resolvePose4(wsnap->geo, wsnap->serial, workerLstHist, rawLst, lst);
+            if (photo) {
+                lst[0] = photo->listener.x; lst[1] = photo->listener.y; lst[2] = photo->listener.z;
+                lst[3] = wsnap->sc.hasListener ? wsnap->sc.listenerYaw : yaw0;
+                scn.length = photo->length;
+            }
         }
         std::vector<Transducer> rc;
         resolvedReceivers(wsnap->geo, lst, rc, false);
         std::vector<std::array<double, 4>> poses((size_t)S);
         for (int s = 0; s < S; ++s) {
+            if (photo) {
+                const auto& st = photo->sources[(size_t)s];
+                poses[(size_t)s] = {st.pos.x, st.pos.y, st.pos.z, st.azimuthDeg};
+                continue;
+            }
             double rawS[4], effS[4];
             for (int i = 0; i < 4; ++i) rawS[i] = settle ? (*settle)[(size_t)(4 + 4 * s + i)] : params[s * 4 + i].load();
             resolvePose4(wsnap->geo, wsnap->serial, workerSrcHist[(size_t)s], rawS, effS);
@@ -1334,7 +1402,7 @@ struct Engine::Impl {
             scn.length = jumpTailLength(*wsnap, lst, rc, cacheHit, &poses);
             sharedLengthCheck = !cacheHit;
         }
-        const bool durationChanged=scn.length!=wsnap->sc.length;
+        const bool durationChanged=photo || scn.length!=wsnap->sc.length;
         const double dl = std::hypot(std::hypot(lst[0] - sLastLst[0], lst[1] - sLastLst[1]), lst[2] - sLastLst[2]);
         const double dYawL = std::fabs(std::remainder(lst[3] - sLastLst[3], 360.0));
         const int tsStart = transState.load(std::memory_order_acquire);
@@ -1359,8 +1427,8 @@ struct Engine::Impl {
         const bool decayOnly = (!initial && !settle && !jumpRebuild && dirty.empty() && workerQuality != sLastQuality && !cachedFinalizedAvg.h.empty());
         if (dirty.empty() && !decayOnly) return false;
         const auto rebuildPose=livePose();
-        const bool cancelOnPose = (settle != nullptr) || (!jumpRebuild && cfg.motionMode <= 0);
-        const auto cancelled=[&]{return !running||geomSerial.load()!=wsnap->serial||traceQualitySerial.load(std::memory_order_acquire)!=workerTraceQuality||(!decayOnly&&qualitySerial.load(std::memory_order_acquire)!=workerQuality)||(cfg.cancelled&&cfg.cancelled())||(settleCancel&&settleCancel())||(cancelOnPose&&livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
+        const bool cancelOnPose = !photo && ((settle != nullptr) || (!jumpRebuild && cfg.motionMode <= 0));
+        const auto cancelled=[&]{return !running||motionRequest.load(std::memory_order_relaxed)!=request||geomSerial.load()!=wsnap->serial||traceQualitySerial.load(std::memory_order_acquire)!=workerTraceQuality||(!decayOnly&&qualitySerial.load(std::memory_order_acquire)!=workerQuality)||(cfg.cancelled&&cfg.cancelled())||(settleCancel&&settleCancel())||(cancelOnPose&&livePoseFar(rebuildPose,cfg.motionDeadbandM,cfg.motionDeadbandDeg));};
         const auto execution=tailExecution(cancelled);
         busyGuard.arm();
         // Settle and jump re-traces work on copies and commit only when complete.
@@ -1382,10 +1450,10 @@ struct Engine::Impl {
         } else {
             // Retain raw moments in the cache; assess confidence only after pooling.
             auto traceSource = [&](int s, int count) {
-                Transducer st = currentSource(s);
+                Transducer st = photo ? photo->sources[(size_t)s] : currentSource(s);
                 st.pos = {poses[(size_t)s][0], poses[(size_t)s][1], poses[(size_t)s][2]};
                 st.azimuthDeg = poses[(size_t)s][3];
-                st.pattern = workerPattern(s);
+                if (!photo) st.pattern = workerPattern(s);
                 hist[(size_t)s] = traceTail(scn, st, rc, cfg.erOrder, count, scn.seed + 131 * s, false, cancelled, S==1?execution:TailExecution{});
                 hRays[(size_t)s] = count;
                 if (useCopies) return;
@@ -1443,9 +1511,12 @@ struct Engine::Impl {
                 Eavg[(size_t)r * NB + b] = e;
             }
         const int inactive = 1 - lateGcur.load();
-        auto& bakeRef=bakeRefPoseBuffers[(size_t)inactive];bakeRef.resize((size_t)(S+1)*4);for(int k=0;k<4;++k)bakeRef[(size_t)k]=lst[k];for(int s=0;s<S;++s)for(int k=0;k<4;++k)bakeRef[(size_t)(4+4*s+k)]=poses[(size_t)s][(size_t)k];if(initial)bakeAudioRefPose=bakeRef;
-        bakeNormBuffers[(size_t)inactive]=Eavg;
-        if(initial)bakeAudioNorm=Eavg;
+        auto& bakeRef=bakeRefPoseBuffers[(size_t)inactive];
+        if (!photo) {
+            bakeRef.resize((size_t)(S+1)*4);for(int k=0;k<4;++k)bakeRef[(size_t)k]=lst[k];for(int s=0;s<S;++s)for(int k=0;k<4;++k)bakeRef[(size_t)(4+4*s+k)]=poses[(size_t)s][(size_t)k];if(initial)bakeAudioRefPose=bakeRef;
+            bakeNormBuffers[(size_t)inactive]=Eavg;
+            if(initial)bakeAudioNorm=Eavg;
+        }
         std::lock_guard<std::mutex> snapshotLock(irSnapshotMx);
         std::vector<float> G((size_t)R * S * 8, 0.f);
         for (int r = 0; r < R; ++r)
@@ -1523,6 +1594,12 @@ struct Engine::Impl {
         if(cancelled()){
             renderedSeconds.store(sconv.front()->slot[sconv.front()->curAtomic.load()].samples/sr);
             throw std::runtime_error("Tail rebuild cancelled");
+        }
+        if (photo) {
+            photo->slots = std::move(wslot);
+            photo->feed = std::move(G);
+            ++refreshCount;
+            return true;
         }
         if (settle) {
             // the gains of the new pose in the old normalization, published first (exact), then the transition
@@ -1781,6 +1858,8 @@ struct Engine::Impl {
     }
 
 #include "baked_worker.inc"
+#include "motion_worker.inc"
+#include "motion_audio.inc"
 
     // One pass of the shared-tail worker (every 10 ms on the worker thread, or Engine::runWorkerStep()).
     bool sharedTailHandoverWaiting = false; // coordinator only
@@ -1793,6 +1872,7 @@ struct Engine::Impl {
             const uint64_t ack = ackSerial.load();
             worlds.erase(std::remove_if(worlds.begin(), worlds.end(), [&](const std::shared_ptr<World>& w) { return w->serial <= ack && w != latest && w.get()!=audioWorld.load(std::memory_order_acquire); }), worlds.end());
         }
+        if (motionWorkerStep()) return;
         for (auto& c : sconv) if (c->pending.load() >= 0) { sharedTailHandoverWaiting = true; return; }
         const uint64_t jser = jumpSerial.load(std::memory_order_acquire);
         const bool jumpPending = (jser != workerJumpSeen.load(std::memory_order_relaxed));
@@ -1929,7 +2009,8 @@ struct Engine::Impl {
 
     void workerLoopShared() {
         while (running) {
-            if (jumpSerial.load(std::memory_order_acquire) == workerJumpSeen.load(std::memory_order_relaxed))
+            if ((motionRequest.load(std::memory_order_relaxed) & 1) ||
+                jumpSerial.load(std::memory_order_acquire) == workerJumpSeen.load(std::memory_order_relaxed))
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             sharedWorkerStep();
             if (p7Enabled) {
@@ -1944,9 +2025,11 @@ struct Engine::Impl {
 
     void workerLoop() {
         while (running) {
-            if (jumpSerial.load(std::memory_order_acquire) == workerJumpSeen.load(std::memory_order_relaxed))
+            if ((motionRequest.load(std::memory_order_relaxed) & 1) ||
+                jumpSerial.load(std::memory_order_acquire) == workerJumpSeen.load(std::memory_order_relaxed))
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            perSourceWorkerStep(); bakeWorkerStep();
+            perSourceWorkerStep();
+            bakeWorkerStep();
         }
     }
 
@@ -1971,6 +2054,7 @@ struct Engine::Impl {
             const uint64_t ack = ackSerial.load();
             worlds.erase(std::remove_if(worlds.begin(), worlds.end(), [&](const std::shared_ptr<World>& w) { return w->serial <= ack && w != latest && w.get()!=audioWorld.load(std::memory_order_acquire); }), worlds.end());
         }
+        if (motionWorkerStep()) return;
         const uint64_t jser = jumpSerial.load(std::memory_order_acquire);
         const bool jumpPending = (jser != workerJumpSeen.load(std::memory_order_relaxed));
         if (jumpPending) anchorValid = false;
@@ -2184,7 +2268,8 @@ struct Engine::Impl {
         n.floorZones = ns.floorZones; n.ceilZones = ns.ceilZones;
         n.roughness = ns.roughness; n.roughSeed = ns.roughSeed; n.diffraction = ns.diffraction;
         n.length = ns.length;
-        n.length = cachedTailSeconds(n, cfg.erOrder, absorption, cancelled, tailExecution(cancelled));
+        if (!(motionRequest.load(std::memory_order_acquire) & 1))
+            n.length = cachedTailSeconds(n, cfg.erOrder, absorption, cancelled, tailExecution(cancelled));
         roomTailLength.store(n.length, std::memory_order_relaxed);
         auto w = std::make_shared<World>(n, maxWalls, absorption,ns.length);
         w->constructionPoseScale=constructionPoseScale;
@@ -2794,6 +2879,7 @@ struct Engine::Impl {
             std::array<double,7> rt;for(int b=0;b<7;++b)rt[b]=freezeRt60[b].load(std::memory_order_relaxed);tailFreeze.setRoomDecay(rt);
             worldChanged = true;
         }
+        motionBeginPeriod(motionRequest.load(std::memory_order_acquire));
         double rawLst[4];
         for (int i = 0; i < 4; ++i) rawLst[i] = params[S * 4 + i].load(std::memory_order_relaxed);
         const double spread = std::min(std::max(params[S * 4 + 4].load(std::memory_order_relaxed), 0.0), 3.0);
@@ -2896,7 +2982,7 @@ struct Engine::Impl {
                     stAccepted.fetch_add(1, std::memory_order_relaxed);
                 }
             }
-            if(bakeEnabled.load(std::memory_order_relaxed)||bakeSharedApplied)bakeAudioStep(audioJumped);
+            if(!motionAudio && (bakeEnabled.load(std::memory_order_relaxed)||bakeSharedApplied))bakeAudioStep(audioJumped);
             if (transState.load(std::memory_order_acquire) == 1) {
                 for (int r = 0; r < R; ++r) {
                     TailConv& t = *sconv[(size_t)r];
@@ -2967,7 +3053,7 @@ struct Engine::Impl {
                 }
             }
         }
-        if(!shared && bakeEnabled.load(std::memory_order_relaxed))bakeAudioStep(audioJumped);
+        if(!shared && !motionAudio && bakeEnabled.load(std::memory_order_relaxed))bakeAudioStep(audioJumped);
         else if(!shared){bakeAudioValid=false;passOff.store(false,std::memory_order_relaxed);std::fill(bakeAudioSourceValid.begin(),bakeAudioSourceValid.end(),0);}
         {
             const float gt = (float)std::min(std::max(params[S * 4 + 6].load(std::memory_order_relaxed), 0.0), 1.0);
@@ -3054,6 +3140,7 @@ struct Engine::Impl {
             spDoSolve[(size_t)s] = 0;
             if (want) ++dirtyCount;
         }
+        if (motionAudio) motionPeriod({lst[0], lst[1], lst[2]});
         const int rrStride = (S <= 4) ? 1 : (S <= 20 ? 4 : 6);
         rrStrideLast = rrStride;
         const bool forceAll = firstSolve || worldChanged || audioJumped || (rrStride == 1);
@@ -3842,7 +3929,11 @@ struct Engine::Impl {
         const bool useClean = !shared && t.hoSlot < 0 && t.cleanSynced.load(std::memory_order_acquire) < t.P;
         const float* fRe = useClean ? t.cleanRe.data() : t.fdlRe.data();
         const float* fIm = useClean ? t.cleanIm.data() : t.fdlIm.data();
-        bakeEqualize(t,sl,r,ar,ai);
+        if (motionAudio) {
+            const int bank = motionIncoming >= 0 && t.hoSlot < 0 ? motionIncoming : motionActive;
+            motionEqualize(t, sl, r, bank);
+        } else bakeEqualize(t,sl,r,ar,ai);
+        if (!eqPending && gcount <= motionNeutralUntil) motionNeutralize(sl, r);
         if (eqPending) { accumulateWindows(t, sl, r, fRe, fIm); return; }
         accumulateFdl(t, sl, r, fRe, fIm, ar, ai);
     }
@@ -3891,7 +3982,21 @@ struct Engine::Impl {
         t.preDoneQ = 0;
     }
     void accumulateHandover(TailConv& t,int old,int r,float* ar,float* ai) {
+        if (motionIncoming >= 0) {
+            const auto& fresh = t.slot[t.hoSlot];
+            motionEqualize(t, fresh, r, motionIncoming);
+            if (eqPending) accumulateWindows(t, fresh, r, t.freshRe.data(), t.freshIm.data());
+            else accumulateFresh(t, fresh, r, ar, ai);
+            inverse(ar, ai, eqFreshOut.data());
+            const auto& active = t.slot[old];
+            motionEqualize(t, active, r, motionActive);
+            if (eqPending) accumulateWindows(t, active, r, t.fdlRe.data(), t.fdlIm.data());
+            else accumulateFdl(t, active, r, t.fdlRe.data(), t.fdlIm.data(), ar, ai);
+            eqHasFresh = true;
+            return;
+        }
         bakeEqualize(t,t.slot[old],r,ar,ai);
+        if (!eqPending && gcount <= motionNeutralUntil) motionNeutralize(t.slot[old], r);
         if(eqPending){
             accumulateWindows(t,t.slot[old],r,t.fdlRe.data(),t.fdlIm.data());
             accumulateFresh(t,t.slot[t.hoSlot],r,accRe2.data(),accIm2.data());
@@ -3942,6 +4047,21 @@ struct Engine::Impl {
     }
 
     void convSlice(TailConv& t, int q) {
+        if (motionActive >= 0 || motionIncoming >= 0) {
+            t.preDoneQ = 0;
+            if (motionIncoming >= 0 || t.hoSlot >= 0 ||
+                (!shared && t.cleanSynced.load(std::memory_order_relaxed) < t.P)) {
+                t.motionSlices = 0;
+            } else if (q == 0 || t.motionSlices == q) {
+                if (q == 0) {
+                    std::fill(t.motionPreRe.begin(), t.motionPreRe.end(), 0.f);
+                    std::fill(t.motionPreIm.begin(), t.motionPreIm.end(), 0.f);
+                }
+                for (int r = 0; r < t.R; ++r) motionAccumulateSlice(t, r, q);
+                t.motionSlices = q + 1;
+            }
+            return;
+        }
         const bool canPre = (t.pending.load(std::memory_order_relaxed) < 0)
             && (t.longN == 0)
             && !bakeEnabled.load(std::memory_order_relaxed)
@@ -4078,8 +4198,12 @@ struct Engine::Impl {
         }
         const bool usePre = (!fade && t.longN == 0 && t.preDoneQ == 3 && t.cur == t.preCurSlot && t.hoSlot == t.preHoSlot
                              && !bakeEnabled.load(std::memory_order_relaxed)
+                             && motionActive < 0 && motionIncoming < 0
+                             && gcount > motionNeutralUntil
                              && (shared || t.cleanSynced.load(std::memory_order_relaxed) >= t.P));
         t.preDoneQ = 0;
+        const bool useMotionPre = motionActive >= 0 && motionIncoming < 0 && t.motionSlices == 3;
+        t.motionSlices = 0;
         if (t.hoSlot >= 0) ++t.hoAge;
         double ab = 0, aa = 0, bb = 0;  // products of the two outputs of a long crossfade, all channels
         for (int r = 0; r < t.R; ++r) {
@@ -4157,6 +4281,17 @@ struct Engine::Impl {
                     accumulateFdlRangeAdd(t, sl, r, k0, k1, t.fdlRe.data(), t.fdlIm.data(), t.fdlNz.data(), t.head, pr, pi);
                     accumulateFdlRangeAdd(t, sl, r, 0, 1, t.fdlRe.data(), t.fdlIm.data(), t.fdlNz.data(), t.head, pr, pi);
                     inverseRaw(pr, pi, blkA.data());
+                } else if (useMotionPre) {
+                    const auto& slot = t.slot[t.cur];
+                    motionEqualize(t, slot, r, motionActive);
+                    motionAccumulateSlice(t, r, 3);
+                    for (int w = 0; w < kBakeWinCount; ++w) {
+                        const size_t from = ((size_t)r * kBakeWinCount + w) * t.bins;
+                        const size_t to = (size_t)w * (B + 1);
+                        std::copy_n(t.motionPreRe.data() + from, B + 1, eqWinRe.data() + to);
+                        std::copy_n(t.motionPreIm.data() + from, B + 1, eqWinIm.data() + to);
+                    }
+                    inverse(accRe.data(), accIm.data(), blkA.data());
                 } else {
                     accumulate(t, t.slot[t.cur], r, accRe.data(), accIm.data());
                     inverse(accRe.data(), accIm.data(), blkA.data());
@@ -4199,7 +4334,7 @@ struct Engine::Impl {
                     stTransDone.fetch_add(1, std::memory_order_relaxed);
                 }
             }
-        } else if (t.hoSlot >= 0 && t.hoAge >= std::max(t.slot[t.hoSlot].partitions, t.slot[t.cur].partitions)+t.inputFadeBlocks+2) {
+        } else if (t.hoSlot >= 0 && t.hoAge >= (motionIncoming >= 0 ? t.slot[t.cur].partitions : std::max(t.slot[t.hoSlot].partitions, t.slot[t.cur].partitions))+t.inputFadeBlocks+2) {
             if (jumpHandoverAbort && shared) {
                 t.hoSlot = -1; t.hoAge = 0;
                 t.publishedHandover.store(-1, std::memory_order_release); t.legacyHandover = false;
@@ -4254,6 +4389,7 @@ struct Engine::Impl {
         } else {
             for (int s = 0; s < S; ++s) convBlock(srcs[(size_t)s]->tail, 0);
         }
+        motionFinishBlock();
         const size_t tr = tailMask + 1;
         for (int r = 0; r < R; ++r)
             for (int i = 0; i < B; ++i) tailRing[(size_t)r * tr + ((gcount + i) & tailMask)] = tailTmp[(size_t)r * B + i];
@@ -4275,6 +4411,7 @@ struct Engine::Impl {
                 for (int j = 0; j < m; ++j) {
                     float x = in[s][done + j];
                     sp.split.process(x, &sp.ring[(((size_t)(gcount + j)) & ringMask) * 8]);
+                    if (shared && motionAudio) motionDriveSum[(size_t)s] += x * x;
                     if (!shared) {
                         auto& t=sp.tail;const bool frozen=requestedFreeze.load(std::memory_order_relaxed);
                         const float cleanSample = frozen ? 0.f : x;
@@ -4295,7 +4432,9 @@ struct Engine::Impl {
             }
             const auto tbs1 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             if (p7Enabled) p7.bandSplitNs += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(tbs1 - tbs0).count();
-            if (shared) {
+            if (shared && (motionActive >= 0 || motionIncoming >= 0)) {
+                motionSharedInput(ph, m);
+            } else if (shared) {
                 const auto tlf0 = p7Enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 // late-field feed: per receiver, the sum over sources of band-weighted source signals
                 for (int r = 0; r < R; ++r) {
@@ -4502,7 +4641,10 @@ void Engine::setFreezeAvailable(bool available) {p_->freezeAvailable.store(avail
 void Engine::setSoloMask(int mask) { p_->soloMask.store(mask & 7, std::memory_order_relaxed); }
 void Engine::setReverbMix(double amount) { p_->reverbMix.store((float)clampTo(amount, 0.0, 1.0, 1.0), std::memory_order_relaxed); }
 void Engine::setTailQuality(int rays, bool adaptive) {
-    p_->requestedRays.store(std::min(std::max(rays, 8000), 384000));
+    const int bounded = std::clamp(rays, 8000, 384000);
+    if ((p_->motionRequest.load(std::memory_order_acquire) & 1) &&
+        p_->requestedRays.load() == bounded && p_->requestedAdaptive.load() == adaptive) return;
+    p_->requestedRays.store(bounded);
     p_->requestedAdaptive.store(adaptive);
     p_->traceQualitySerial.fetch_add(1, std::memory_order_release);
     p_->qualitySerial.fetch_add(1, std::memory_order_release);
@@ -4552,7 +4694,10 @@ int Engine::activeTaps() const { return p_->tapsActive; }
 int Engine::tailRefreshCount() const { return p_->refreshCount.load(); }
 bool Engine::autoLevelMoving() const {return p_->streamPos.load(std::memory_order_relaxed)<p_->autoMovingUntil.load(std::memory_order_relaxed);}
 std::shared_ptr<const AutoLevelEnergy> Engine::autoLevelEnergy() const { return std::atomic_load(&p_->autoEnergy); }
-void Engine::runWorkerStep() { if (p_->shared) p_->sharedWorkerStep(); else p_->perSourceWorkerStep(); p_->bakeWorkerStep(); }
+void Engine::runWorkerStep() {
+    if (p_->shared) p_->sharedWorkerStep(); else p_->perSourceWorkerStep();
+    p_->bakeWorkerStep();
+}
 Engine::MotionStats Engine::motionStats() const {
     MotionStats m;
     const auto& q = *p_;
@@ -4617,6 +4762,8 @@ std::vector<double> Engine::lateAppliedEnergy() const {
 uint64_t Engine::diffractionCapacityMisses() const { return p_->publishedDiffractionMisses.load(std::memory_order_relaxed); }
 Engine::DiffractionStats Engine::diffractionStats() const { return p_->dstats; }
 bool Engine::tailIsCurrent() const {
+    const auto motion = motionTailState();
+    if (motion != MotionTailState::Off) return motion == MotionTailState::Ready;
     const auto revision = p_->qualitySerial.load(std::memory_order_acquire);
     const auto scene = p_->geomSerial.load(std::memory_order_acquire);
     if (p_->cfg.tailThread && p_->jumpSerial.load(std::memory_order_acquire) != p_->workerJumpSeen.load(std::memory_order_acquire))
@@ -4626,6 +4773,22 @@ bool Engine::tailIsCurrent() const {
         for (const auto& c : p_->sconv) if (c->pending.load()>=0 || c->appliedRevision.load(std::memory_order_acquire)!=revision || c->appliedScene.load(std::memory_order_acquire)!=scene) return false;
     } else for (const auto& s : p_->srcs) if (s->tail.workerBusy.load(std::memory_order_acquire) || s->tail.pending.load()>=0 || s->tail.appliedRevision.load(std::memory_order_acquire)!=revision || s->tail.appliedScene.load(std::memory_order_acquire)!=scene) return false;
     return true;
+}
+void Engine::setMotionTail(bool enabled) noexcept {
+    auto& desired = p_->motionRequest;
+    auto request = desired.load(std::memory_order_relaxed);
+    while (bool(request & 1) != enabled &&
+           !desired.compare_exchange_weak(request, request + 1, std::memory_order_acq_rel)) {}
+}
+
+Engine::MotionTailState Engine::motionTailState() const noexcept {
+    const auto& q = *p_;
+    const auto request = q.motionRequest.load(std::memory_order_acquire);
+    if (!(request & 1)) return MotionTailState::Off;
+    return q.motionReadyRequest.load(std::memory_order_acquire) == request &&
+           q.motionReadyScene.load(std::memory_order_relaxed) == q.geomSerial.load(std::memory_order_acquire) &&
+           q.motionReadyQuality.load(std::memory_order_relaxed) == q.qualitySerial.load(std::memory_order_acquire)
+        ? MotionTailState::Ready : MotionTailState::Preparing;
 }
 std::shared_ptr<const TailDiagnostics> Engine::tailDiagnostics() const {
     std::lock_guard<std::mutex> lock(p_->diagnosticsMx);
@@ -4637,6 +4800,19 @@ bool Engine::copyTailForOffline(const Engine& reference) {
     auto& dst=*p_;auto& src=*reference.p_;
     if(&dst==&src||dst.cfg.tailThread||dst.S!=src.S||dst.R!=src.R||dst.sr!=src.sr||dst.B!=src.B||dst.shared!=src.shared)return false;
     std::lock_guard<std::mutex> lock(src.irSnapshotMx);
+    const auto sourceRequest = src.motionRequest.load(std::memory_order_acquire);
+    const auto targetRequest = dst.motionRequest.load(std::memory_order_acquire);
+    if ((sourceRequest & 1) != (targetRequest & 1)) return false;
+    const MotionPhoto* motion = nullptr;
+    if (sourceRequest & 1) {
+        if (reference.motionTailState() != MotionTailState::Ready) return false;
+        int bank = src.motionPending.load(std::memory_order_acquire);
+        if (bank < 0) bank = src.motionPublished.load(std::memory_order_acquire);
+        if (bank < 0) return false;
+        motion = &src.motionPhotos[bank];
+        if (motion->request != sourceRequest || motion->scene != src.geomSerial.load(std::memory_order_acquire) ||
+            motion->quality != src.qualitySerial.load(std::memory_order_acquire)) return false;
+    }
     // Retain the audible immutable world as well: reconstructing seeded furniture
     // from rounded project coordinates must not move an obstacle in an export.
     std::shared_ptr<World> audibleWorld;
@@ -4645,7 +4821,7 @@ bool Engine::copyTailForOffline(const Engine& reference) {
         const auto audibleSerial=src.ackSerial.load(std::memory_order_acquire);
         for(const auto& world:src.worlds)if(world->serial==audibleSerial){audibleWorld=world;break;}
     }
-    if(!audibleWorld)return false;
+    if(!audibleWorld || (motion && motion->scene != audibleWorld->serial))return false;
     dst.worlds.push_back(audibleWorld);dst.latest=audibleWorld;
     dst.geomSerial=audibleWorld->serial;dst.serialCounter=std::max(dst.serialCounter,audibleWorld->serial);
     std::atomic_store(&dst.analysisScene,std::shared_ptr<const Scene>(audibleWorld,&audibleWorld->sc));
@@ -4656,8 +4832,22 @@ bool Engine::copyTailForOffline(const Engine& reference) {
     int rowIndex=0;
     auto copy=[&](TailConv& to,const TailConv& from) {
         const int r=rowIndex++;
-        const auto& active=from.slot[transition?src.trans.slotH[(size_t)r]:from.curAtomic.load(std::memory_order_acquire)];
-        auto& target=to.slot[to.cur];target=active;
+        const int index = motion ? motion->slots[(size_t)r]
+            : transition ? src.trans.slotH[(size_t)r] : from.curAtomic.load(std::memory_order_acquire);
+        const auto& active=from.slot[index];
+        auto& target=to.slot[to.cur];
+        if (motion) {
+            target.samples=active.samples; target.partitions=active.partitions;
+            target.re=active.re; target.im=active.im;
+            target.bakeEqGain.assign((size_t)to.R, {});
+            for (auto& envelope : target.bakeEqGain)
+                for (auto& window : envelope) window.fill(1.f);
+            target.bakeEqLp.assign((size_t)to.R, {});
+            target.bakeEqSeen.assign((size_t)to.R, ~0ull);
+            const size_t scratch = (size_t)to.R * kBakeWinCount * to.bins;
+            to.motionPreRe.resize(scratch);
+            to.motionPreIm.resize(scratch);
+        } else target=active;
         target.revision=dst.qualitySerial.load();target.sceneRevision=dst.geomSerial.load();
         to.pending=-1;to.appliedRevision=target.revision;to.appliedScene=target.sceneRevision;
         longest=std::max(longest,target.samples);
@@ -4665,10 +4855,28 @@ bool Engine::copyTailForOffline(const Engine& reference) {
     if(dst.shared) {
         for(int r=0;r<dst.R;++r)copy(*dst.sconv[r],*src.sconv[r]);
         // Gain buffers are immutable to audio and protected from worker reuse here.
-        const auto& gain=src.lateGbuf[src.lateGcur.load(std::memory_order_acquire)];
+        const auto& gain=motion ? motion->feed : src.lateGbuf[src.lateGcur.load(std::memory_order_acquire)];
         dst.lateGbuf[0]=dst.lateGbuf[1]=dst.lateGuse=dst.lateGlocal=gain;
         dst.lateGcur=0;dst.lateGtarget=dst.lateGlocal.data();dst.lateGseen=dst.lateGserial.load();dst.lateGseenPub=dst.lateGseen;dst.gainMode=0;
     } else for(int s=0;s<dst.S;++s)copy(dst.srcs[s]->tail,src.srcs[s]->tail);
+    if (motion) {
+        auto& photo = dst.motionPhotos[0];
+        photo = *motion;
+        for (int i = 0; i < (dst.shared ? dst.R : dst.S); ++i)
+            photo.slots[(size_t)i] = dst.motionConv(i).cur;
+        photo.request = targetRequest;
+        photo.quality = dst.qualitySerial.load(std::memory_order_acquire);
+        auto& gains = dst.motionGains[0];
+        for (auto& envelope : gains.windows)
+            for (auto& window : envelope) window.fill(1.f);
+        for (auto& feed : gains.feed) feed.fill(1.f);
+        dst.motionActive = 0;
+        dst.motionPublished.store(0, std::memory_order_release);
+        dst.roomTailLength.store(photo.length, std::memory_order_relaxed);
+        dst.motionReadyScene.store(photo.scene, std::memory_order_relaxed);
+        dst.motionReadyQuality.store(photo.quality, std::memory_order_relaxed);
+        dst.motionReadyRequest.store(photo.request, std::memory_order_release);
+    }
     dst.renderedSeconds.store(longest/dst.sr);
     return true;
 }
@@ -4832,6 +5040,7 @@ void Engine::setBakedPaths(const std::vector<BakedPath>& declared, const std::ve
 }
 void Engine::requestPathBake(unsigned workers) {
     std::lock_guard<std::mutex>lock(p_->bakeRequestMx);
+    if (p_->motionRequest.load(std::memory_order_acquire) & 1) return;
 #if defined(_WIN32)
     if (bake_diag::enabled()) {
         p_->requestedDiagnostics.reset();

@@ -189,6 +189,26 @@ static void partB(const juce::File& scratch) {
         EditorPtr e(p->createEditor());
         check(dynamic_cast<VerbEditor*>(e.get()) != nullptr, "VERB_UI=native: native editor");
     }
+    {
+        std::vector<verbp::SourceCfg> sources(2);
+        sources[1].firstIn = 1;
+        p->setSources(sources);
+        verbp::MovementPath body;
+        body.points = {{2.0, 2.0, 1.3}, {4.0, 2.0, 1.3}};
+        verbp::MovementPath head;
+        head.follow.target = 0;
+        head.follow.offset = {0.0, 0.0, 0.35};
+        const bool linked = p->setMovementPath(0, body) && p->setMovementPath(1, head);
+        EditorPtr classic(p->createEditor());
+        juce::MemoryBlock state;
+        p->getStateInformation(state);
+        auto restored = makeProcessor();
+        restored->setStateInformation(state.getData(), (int)state.getSize());
+        EditorPtr reopened(restored->createEditor());
+        check(linked && dynamic_cast<VerbEditor*>(classic.get()) && dynamic_cast<VerbEditor*>(reopened.get())
+                  && restored->getMovementPath(0) == body && restored->getMovementPath(1) == head,
+              "V04d: opening and restoring a rig in Classic preserves both path records");
+    }
     setEnv("VERB_UI", "web");
     s.forceRuntimeMissing = true;
     verbweb::recordDiagnostics({});
@@ -844,6 +864,14 @@ static void partE(const juce::File& scratch) {
             pump(200);
             check(nativeOk && classic->newUiButtonShown(), "cycle " + std::to_string(i) + ": classic editor inside the same window shows \"New UI\"");
             if (!nativeOk) break;
+            if (i == 1) {
+                bool foundWander = false;
+                for (int ci = 0; ci < classic->getNumChildComponents(); ++ci) {
+                    if (auto* tgb = dynamic_cast<juce::ToggleButton*>(classic->getChildComponent(ci)))
+                        if (tgb->getButtonText() == "Wander") foundWander = true;
+                }
+                check(foundWander, "V04b classic editor fallback inside web shell exposes Wander control");
+            }
             classic->testClickNewUi();
             const bool back = waitFor([&] { return w->getMode() == VerbWebEditor::Mode::web && w->isReady(); }, 30000);
             check(back && w->getNativeEditor() == nullptr && w->getStats().readyCount == 1, "cycle " + std::to_string(i) + ": the web editor is ready again in place (mode web, classic editor gone)");

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -50,6 +51,34 @@ inline constexpr int kOrientMaxObject = 32;  // == kListener; static_assert'ed i
 enum class OrientMode : uint8_t { Manual = 0, AlongPath = 1, LookAt = 2 };
 
 inline constexpr double kMaxPathLfoRateHz = 8.0;
+inline constexpr double kMinPathWanderRateHz = 0.05;
+inline constexpr double kMaxPathWanderRateHz = 8.0;
+inline constexpr double kMaxPathWanderHorizM = 20.0;
+inline constexpr double kMaxPathWanderVertM = 10.0;
+inline constexpr double kDefaultEndlessPeriodS = 8.0;
+inline constexpr double kMinEndlessPeriodS = 0.25;
+inline constexpr double kMaxEndlessPeriodS = 3600.0;
+
+inline double endlessTransportPhase(int64_t samplePos, double sampleRate, double periodS) noexcept {
+    if (!(sampleRate > 0.0) || !(periodS > 0.0) || !std::isfinite(sampleRate) || !std::isfinite(periodS)) return 0.0;
+    const double periodSamples = periodS * sampleRate;
+    if (!(periodSamples > 0.0) || !std::isfinite(periodSamples)) return 0.0;
+    double rem = std::fmod((double)samplePos, periodSamples);
+    if (rem < 0.0) rem += periodSamples;
+    double phase = rem / periodSamples;
+    if (phase >= 1.0 || phase < 0.0 || !std::isfinite(phase)) phase = 0.0;
+    return phase;
+}
+
+inline double endlessTransportPhaseSec(double tSec, double periodS) noexcept {
+    if (!(periodS > 0.0) || !std::isfinite(tSec) || !std::isfinite(periodS)) return 0.0;
+    double rem = std::fmod(tSec, periodS);
+    if (rem < 0.0) rem += periodS;
+    double phase = rem / periodS;
+    if (phase >= 1.0 || phase < 0.0 || !std::isfinite(phase)) phase = 0.0;
+    return phase;
+}
+
 enum class LfoShape : uint8_t { Sine = 0, Triangle = 1, Saw = 2, Square = 3, SmoothRandom = 4 };
 
 inline const char* lfoShapeName(LfoShape s) noexcept {
@@ -142,6 +171,116 @@ struct PathLfo {
     }
 };
 
+inline double wanderHashNode(uint32_t seed, int axis, int64_t idx) noexcept {
+    uint64_t z = ((uint64_t)seed * 0x9E3779B97F4A7C15ULL)
+               ^ ((uint64_t)(axis + 1) * 0xD1B54A32D192ED03ULL)
+               ^ ((uint64_t)idx * 0x94D049BB133111EBULL + 0xBF58476D1CE4E5B9ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    const double u = (double)(z >> 11) * (1.0 / 9007199254740992.0); // [0, 1)
+    return u * 2.0 - 1.0; // [-1, 1)
+}
+
+inline double evaluateWanderAxis(uint32_t seed, int axis, double phase, double smoothness) noexcept {
+    const double s = std::clamp(std::isfinite(smoothness) ? smoothness : 0.8, 0.0, 1.0);
+    const double p = std::isfinite(phase) ? phase : 0.0;
+    const int64_t baseIdx = (int64_t)std::floor(p);
+    const double t = p - (double)baseIdx;
+    const double t2 = t * t, t3 = t2 * t;
+    const double n0 = wanderHashNode(seed, axis, baseIdx - 1);
+    const double n1 = wanderHashNode(seed, axis, baseIdx);
+    const double n2 = wanderHashNode(seed, axis, baseIdx + 1);
+    const double n3 = wanderHashNode(seed, axis, baseIdx + 2);
+    const double cr = 0.5 * ((2.0 * n1) +
+        (-n0 + n2) * t +
+        (2.0 * n0 - 5.0 * n1 + 4.0 * n2 - n3) * t2 +
+        (-n0 + 3.0 * n1 - 3.0 * n2 + n3) * t3);
+    const double omt = 1.0 - t;
+    const double bs = (1.0 / 6.0) * (
+        (omt * omt * omt) * n0 +
+        (3.0 * t3 - 6.0 * t2 + 4.0) * n1 +
+        (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) * n2 +
+        t3 * n3);
+    const double blended = (1.0 - s) * cr + s * bs;
+    const double rms = std::sqrt(std::max(1e-6, 0.27143476 - 0.14339413 * s + 0.03174841 * s * s));
+    return blended / rms;
+}
+
+struct PathWander {
+    bool enabled = false;
+    double ampHorizM = 0.5;
+    double ampVertM = 0.25;
+    double rateHz = 0.5;
+    double smoothness = 0.8;
+    bool pinEnds = true;
+    bool horizOnly = false;
+    uint32_t seed = 1;
+
+    bool isDefault() const noexcept {
+        return !enabled && ampHorizM == 0.5 && ampVertM == 0.25 && rateHz == 0.5 &&
+               smoothness == 0.8 && pinEnds == true && horizOnly == false && seed == 1;
+    }
+    bool isActive() const noexcept {
+        return enabled && (ampHorizM > 0.0 || (!horizOnly && ampVertM > 0.0));
+    }
+    bool operator==(const PathWander& b) const noexcept {
+        return enabled == b.enabled && ampHorizM == b.ampHorizM && ampVertM == b.ampVertM &&
+               rateHz == b.rateHz && smoothness == b.smoothness && pinEnds == b.pinEnds &&
+               horizOnly == b.horizOnly && seed == b.seed;
+    }
+    double endEnvelope(double uPath, bool closed) const noexcept {
+        if (closed || !pinEnds) return 1.0;
+        const double uc = std::clamp(std::isfinite(uPath) ? uPath : 0.0, 0.0, 1.0);
+        const double edge = std::min(uc, 1.0 - uc);
+        const double s = std::clamp(edge / 0.15, 0.0, 1.0);
+        return s * s * (3.0 - 2.0 * s);
+    }
+    double computePhase(double tSec, double uUnwrapped = 0.0) const noexcept {
+        return std::max(0.0, std::isfinite(tSec) ? tSec : 0.0) * rateHz
+             + (std::isfinite(uUnwrapped) ? uUnwrapped : 0.0);
+    }
+    void evaluateLocalOffsets(double tSec, double uUnwrapped, double uPath, bool closed,
+                              double& outHorizM, double& outVertM) const noexcept {
+        if (!isActive()) { outHorizM = 0.0; outVertM = 0.0; return; }
+        const double env = endEnvelope(uPath, closed);
+        if (env <= 0.0) { outHorizM = 0.0; outVertM = 0.0; return; }
+        const double phase = computePhase(tSec, uUnwrapped);
+        outHorizM = ampHorizM > 0.0 ? (ampHorizM * env * evaluateWanderAxis(seed, 0, phase, smoothness)) : 0.0;
+        outVertM = (!horizOnly && ampVertM > 0.0) ? (ampVertM * env * evaluateWanderAxis(seed, 1, phase, smoothness)) : 0.0;
+    }
+    void evaluateWorldDelta(double tSec, double uUnwrapped, double uPath, bool closed, double tangentYawDeg,
+                            double& dx, double& dy, double& dz) const noexcept {
+        double h = 0.0, v = 0.0;
+        evaluateLocalOffsets(tSec, uUnwrapped, uPath, closed, h, v);
+        const double rad = (std::isfinite(tangentYawDeg) ? tangentYawDeg : 0.0) * (3.14159265358979323846 / 180.0);
+        // Horizontal perpendicular unit vector in plan XY: (-sin(yaw), cos(yaw))
+        dx = -std::sin(rad) * h;
+        dy = std::cos(rad) * h;
+        dz = v;
+    }
+};
+
+// V04d: "Link to path" (rig). A follower has no own geometry: it takes the target's effective path parameter
+// (Position / Laps / Endless / LFO / timing) and pose, plus a manual offset in the target's path frame:
+// forward = horizontal tangent of the target's drawn path at the current parameter (held across horizontally
+// degenerate segments), left = horizontal perpendicular, up = world Z. Absent (target < 0) = ordinary path.
+inline constexpr double kMaxFollowOffsetM = 50.0;
+struct PathFollow {
+    int target = -1;                    // source index 0..kOrientMaxObject-1; -1 = not linked
+    PathPoint offset{0.0, 0.0, 0.0};    // forward, left, up (m)
+    bool followWander = true;           // false: ignore the target's Path wander displacement
+    bool active() const noexcept { return target >= 0; }
+    bool operator==(const PathFollow& b) const noexcept {
+        return target == b.target && offset == b.offset && followWander == b.followWander;
+    }
+};
+inline bool validPathFollow(const PathFollow& f) noexcept {
+    if (f.target < -1 || f.target >= kOrientMaxObject) return false;
+    for (double v : f.offset) if (!std::isfinite(v) || std::abs(v) > kMaxFollowOffsetM) return false;
+    return true;
+}
+
 struct MovementPath {
     std::vector<PathPoint> points;
     bool closed = false, smooth = false, orient = false, enabled = true;
@@ -151,12 +290,16 @@ struct MovementPath {
     PathPoint lookPos{0.0, 0.0, 0.0}; // fixed target when lookPoint
     double orientOffset = 0.0;
     int laps = 1;
+    bool endless = false;
+    double endlessPeriodS = kDefaultEndlessPeriodS;
     int group = -1;
     double start = 0.0, end = 100.0;
     std::vector<std::optional<double>> times;
     std::vector<PathEasing> easings;
     std::vector<AzimuthKey> azKeys;
     PathLfo lfo;
+    PathWander wander;
+    PathFollow follow;  // V04d
     bool hasCustomTiming() const noexcept {
         if (start != 0.0 || end != 100.0) return true;
         for (const auto& t : times) if (t.has_value()) return true;
@@ -165,7 +308,7 @@ struct MovementPath {
     }
     bool hasAzimuthKeys() const noexcept { return !azKeys.empty(); }
     bool operator==(const MovementPath& b) const {
-        if (!(points == b.points && closed == b.closed && smooth == b.smooth && orient == b.orient && lookAt == b.lookAt && lookPoint == b.lookPoint && lookTarget == b.lookTarget && lookPos == b.lookPos && orientOffset == b.orientOffset && enabled == b.enabled && laps == b.laps && group == b.group && start == b.start && end == b.end && azKeys == b.azKeys && lfo == b.lfo))
+        if (!(points == b.points && closed == b.closed && smooth == b.smooth && orient == b.orient && lookAt == b.lookAt && lookPoint == b.lookPoint && lookTarget == b.lookTarget && lookPos == b.lookPos && orientOffset == b.orientOffset && enabled == b.enabled && laps == b.laps && endless == b.endless && endlessPeriodS == b.endlessPeriodS && group == b.group && start == b.start && end == b.end && azKeys == b.azKeys && lfo == b.lfo && wander == b.wander && follow == b.follow))
             return false;
         const size_t n = std::max({points.size(), times.size(), b.times.size(), easings.size(), b.easings.size()});
         for (size_t i = 0; i < n; ++i) {
@@ -203,7 +346,7 @@ inline void normalizePathTiming(MovementPath& p) {
 }
 
 inline void normalizePathAzKeys(MovementPath& p) {
-    if (p.points.size() < 2) { p.azKeys.clear(); return; }
+    if (p.points.size() < 2 && !p.follow.active()) { p.azKeys.clear(); return; }
     if (p.azKeys.empty()) return;
     std::stable_sort(p.azKeys.begin(), p.azKeys.end(), [](const AzimuthKey& a, const AzimuthKey& b) {
         const bool af = std::isfinite(a.t), bf = std::isfinite(b.t);
@@ -250,18 +393,44 @@ inline bool validPathLfo(const PathLfo& l) noexcept {
     return true;
 }
 
+inline bool validPathWander(const PathWander& w) noexcept {
+    if (!std::isfinite(w.ampHorizM) || w.ampHorizM < 0.0 || w.ampHorizM > kMaxPathWanderHorizM) return false;
+    if (!std::isfinite(w.ampVertM) || w.ampVertM < 0.0 || w.ampVertM > kMaxPathWanderVertM) return false;
+    if (!std::isfinite(w.rateHz) || w.rateHz < kMinPathWanderRateHz || w.rateHz > kMaxPathWanderRateHz) return false;
+    if (!std::isfinite(w.smoothness) || w.smoothness < 0.0 || w.smoothness > 1.0) return false;
+    if (w.seed < 1 || w.seed > 999999) return false;
+    return true;
+}
+
 inline bool validPath(const MovementPath& p) {
     if (!validPathLfo(p.lfo)) return false;
+    if (!validPathWander(p.wander)) return false;
     if (!std::isfinite(p.orientOffset) || std::abs(p.orientOffset) > 360.0) return false;
     if (p.lookTarget < -1 || p.lookTarget > kOrientMaxObject) return false;
     for (int k = 0; k < 3; ++k)
         if (!std::isfinite(p.lookPos[(size_t)k]) || p.lookPos[(size_t)k] < (k == 2 ? 0 : -200) || p.lookPos[(size_t)k] > (k == 2 ? 30 : 200)) return false;
     if (p.laps < 1 || p.laps > 64) return false;
+    if (!std::isfinite(p.endlessPeriodS) || p.endlessPeriodS < kMinEndlessPeriodS || p.endlessPeriodS > kMaxEndlessPeriodS) return false;
     if (p.group < -1 || p.group > 31) return false;
     if (!std::isfinite(p.start) || !std::isfinite(p.end) || p.start < 0.0 || p.end > 100.0 || p.end - p.start < kMinPathWindowGap)
         return false;
     if (p.azKeys.size() > kMaxAzKeys) return false;
-    if (p.points.empty()) return p.times.empty() && p.easings.empty() && p.azKeys.empty() && p.lfo.isDefault();
+    if (!validPathFollow(p.follow)) return false;
+    if (p.follow.active()) {
+        // A follower stores no own geometry, timing, LFO, wander, Endless, Laps or Coupling (all inherited from the target).
+        if (!p.points.empty() || !p.times.empty() || !p.easings.empty() || !p.lfo.isDefault() || !p.wander.isDefault()
+            || p.endless || p.endlessPeriodS != kDefaultEndlessPeriodS || p.laps != 1 || p.group != -1 || p.start != 0.0 || p.end != 100.0)
+            return false;
+        for (size_t i = 0; i < p.azKeys.size(); ++i) {
+            const auto& k = p.azKeys[i];
+            if (!std::isfinite(k.t) || k.t < 0.0 || k.t > 100.0) return false;
+            if (!std::isfinite(k.azDeg) || k.azDeg < -180.0 || k.azDeg > 180.0) return false;
+            if ((uint8_t)k.easing > (uint8_t)AzimuthEasing::Hold) return false;
+            if (i > 0 && !(k.t > p.azKeys[i - 1].t)) return false;
+        }
+        return true;
+    }
+    if (p.points.empty()) return p.times.empty() && p.easings.empty() && p.azKeys.empty() && p.lfo.isDefault() && p.wander.isDefault() && !p.endless && p.endlessPeriodS == kDefaultEndlessPeriodS;
     if (p.points.size() < 2 || p.points.size() > 64) return false;
     for (const auto& q : p.points) for (int k = 0; k < 3; ++k)
         if (!std::isfinite(q[k]) || q[k] < (k == 2 ? 0 : -200) || q[k] > (k == 2 ? 30 : 200)) return false;
@@ -287,6 +456,38 @@ inline bool validPath(const MovementPath& p) {
         if (i > 0 && !(k.t > p.azKeys[i - 1].t)) return false;
     }
     return true;
+}
+
+// V04d: the path a follower actually runs: the target's geometry, timing, Laps, Endless, LFO (and wander when
+// followWander), with the follower's own enable / orientation / azimuth keys. An unusable target (missing, disabled,
+// fewer than 2 points, itself a follower, or the follower itself) yields an empty path: the follower stays static.
+inline MovementPath resolveFollowerPath(const MovementPath& f, const MovementPath* target, int self = -1) {
+    MovementPath r;
+    r.follow = f.follow;
+    r.enabled = f.enabled;
+    r.orient = f.orient; r.lookAt = f.lookAt; r.lookPoint = f.lookPoint; r.lookTarget = f.lookTarget; r.lookPos = f.lookPos;
+    r.orientOffset = f.orientOffset;
+    r.azKeys = f.azKeys;
+    if (!target || f.follow.target == self || target->follow.active() || !target->enabled || target->points.size() < 2) {
+        r.enabled = false;
+        return r;
+    }
+    const auto& t = *target;
+    r.points = t.points; r.closed = t.closed; r.smooth = t.smooth; r.laps = t.laps;
+    r.endless = t.endless; r.endlessPeriodS = t.endlessPeriodS;
+    r.start = t.start; r.end = t.end; r.times = t.times; r.easings = t.easings;
+    r.lfo = t.lfo;
+    if (f.follow.followWander) r.wander = t.wander;
+    r.group = -1;  // a follower is never a Coupling driver; its parameter comes from the target (and the target's group)
+    return r;
+}
+// V04d: local path frame -> world delta. forward = (cos yaw, sin yaw), left = (-sin yaw, cos yaw), up = world Z.
+inline void followOffsetDelta(double yawDeg, const PathPoint& off, double& dx, double& dy, double& dz) noexcept {
+    const double r = (std::isfinite(yawDeg) ? yawDeg : 0.0) * (3.14159265358979323846 / 180.0);
+    const double c = std::cos(r), s = std::sin(r);
+    dx = c * off[0] - s * off[1];
+    dy = s * off[0] + c * off[1];
+    dz = off[2];
 }
 
 template <size_t N>
@@ -340,15 +541,25 @@ struct CompiledPath {
     PathPoint lookPos{0.0,0.0,0.0};
     double orientOffset=0.0;
     int laps=1, group=-1;
+    bool endless = false;
+    double endlessPeriodS = kDefaultEndlessPeriodS;
     double startNorm = 0.0, endNorm = 1.0;
     bool hasTiming = false;
     std::vector<PathTimeKey> timeKeys;
     std::vector<AzimuthKey> azKeys;
     PathLfo lfo{};
+    PathWander wander{};
+    // V04d follower (built from resolveFollowerPath): target index, offset and the held horizontal heading per polyline segment.
+    int followTarget = -1;
+    PathPoint followOffset{0.0, 0.0, 0.0};
+    std::vector<double> followYawTab;
     bool hasAzimuthKeys() const noexcept { return !azKeys.empty(); }
     void build(const MovementPath& p) {
-        points.clear(); lengths.clear(); timeKeys.clear(); azKeys.clear(); lfo = p.lfo;
+        points.clear(); lengths.clear(); timeKeys.clear(); azKeys.clear(); lfo = p.lfo; wander = p.wander;
+        followTarget = p.follow.active() ? p.follow.target : -1; followOffset = p.follow.offset; followYawTab.clear();
         enabled=p.enabled && p.points.size()>=2;orient=p.orient;closed=p.closed;lookAt=p.lookAt;lookPoint=p.lookPoint;lookTarget=p.lookTarget;lookPos=p.lookPos;orientOffset=p.orientOffset;laps=std::clamp(p.laps,1,64);group=p.group;
+        endless = p.closed && p.endless;
+        endlessPeriodS = std::clamp(std::isfinite(p.endlessPeriodS) ? p.endlessPeriodS : kDefaultEndlessPeriodS, kMinEndlessPeriodS, kMaxEndlessPeriodS);
         startNorm = std::clamp(p.start, 0.0, 100.0) * 0.01;
         endNorm = std::clamp(p.end, 0.0, 100.0) * 0.01;
         hasTiming = p.hasCustomTiming();
@@ -378,6 +589,72 @@ struct CompiledPath {
             }
         }
         timeKeys.push_back({1.0, 1.0, PathEasing::Linear});
+        if (followTarget >= 0) buildFollowYaw();
+    }
+    // V04d: heading of segment i (points[i-1] -> points[i]) in plan; a segment without horizontal extent (vertical
+    // or zero length) holds the previous valid heading (the next one before the first valid; closed paths wrap).
+    void buildFollowYaw() {
+        const size_t n = points.size();
+        followYawTab.assign(n, std::numeric_limits<double>::quiet_NaN());
+        if (n < 2) { followYawTab.assign(n, 0.0); return; }
+        int firstValid = -1, lastValid = -1;
+        for (size_t i = 1; i < n; ++i) {
+            const double dx = points[i][0] - points[i - 1][0], dy = points[i][1] - points[i - 1][1];
+            if (std::hypot(dx, dy) > 1e-9) {
+                followYawTab[i] = std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
+                if (firstValid < 0) firstValid = (int)i;
+                lastValid = (int)i;
+            }
+        }
+        if (firstValid < 0) { std::fill(followYawTab.begin(), followYawTab.end(), 0.0); return; }
+        double held = closed ? followYawTab[(size_t)lastValid] : followYawTab[(size_t)firstValid];
+        for (size_t i = 1; i < n; ++i) {
+            if (std::isnan(followYawTab[i])) followYawTab[i] = held;
+            else held = followYawTab[i];
+        }
+        followYawTab[0] = followYawTab[1];
+    }
+    // Single-lap arc fraction of a (non-Endless) parameter u, exactly as evaluate() maps it.
+    double singleLapFrac(double u) const noexcept {
+        double frac = std::clamp(hasTiming ? evaluateTimeMap(u) : std::clamp(u, 0.0, 1.0), 0.0, 1.0);
+        if (closed) {
+            const int effLaps = endless ? 1 : laps;
+            const double phase = frac * effLaps;
+            frac = phase - std::floor(phase);
+        }
+        return frac;
+    }
+    // Follower frame heading at a single-lap arc fraction (same segment choice as evaluateSingleLapArcFraction).
+    double followYawAtSingleLap(double clamped) const noexcept {
+        if (points.size() < 2 || followYawTab.size() != points.size()) return 0.0;
+        double frac = std::clamp(clamped, 0.0, 1.0);
+        if (closed) frac = frac - std::floor(frac);
+        if (closed && frac == 0.0) return followYawTab[1];
+        // lower_bound: at a vertex (and during a stop on it) the incoming segment's heading is held until the
+        // target moves on; inside a segment it is the same segment as evaluateSingleLapArcFraction.
+        const double distance = frac * length();
+        auto it = std::lower_bound(lengths.begin(), lengths.end(), distance);
+        const size_t i = std::clamp<size_t>((size_t)(it - lengths.begin()), 1, points.size() - 1);
+        return followYawTab[i];
+    }
+    // Closest point of the drawn (target) polyline and the follower heading there.
+    bool projectFollowBase(double& x, double& y, double& z, double& yawOut) const noexcept {
+        if (points.size() < 2 || lengths.size() != points.size() || followYawTab.size() != points.size() || lengths.back() <= 1e-12) return false;
+        double best = 1e30, fBest = 0; size_t jBest = 0;
+        const double pp[3] = {x, y, z};
+        for (size_t j = 1; j < points.size(); ++j) {
+            double dot = 0, span = 0;
+            for (int k = 0; k < 3; ++k) { const double d = points[j][(size_t)k] - points[j - 1][(size_t)k]; dot += (pp[k] - points[j - 1][(size_t)k]) * d; span += d * d; }
+            const double f = span > 0 ? std::clamp(dot / span, 0., 1.) : 0;
+            double e = 0;
+            for (int k = 0; k < 3; ++k) { const double d = pp[k] - points[j - 1][(size_t)k] - f * (points[j][(size_t)k] - points[j - 1][(size_t)k]); e += d * d; }
+            if (e < best) { best = e; jBest = j; fBest = f; }
+        }
+        if (!jBest) return false;
+        const auto q = pathMix(points[jBest - 1], points[jBest], fBest);
+        x = q[0]; y = q[1]; z = q[2];
+        yawOut = followYawTab[jBest];
+        return true;
     }
     std::vector<double> computeTimes(const MovementPath& p) const {
         const int n = (int)p.points.size();
@@ -438,10 +715,10 @@ struct CompiledPath {
         const double e = applyPathEasing(timeKeys[lo].easing, s);
         return timeKeys[lo].f + e * (timeKeys[hi].f - timeKeys[lo].f);
     }
-    PathPoint evaluateArcFraction(double clamped,double* yaw=nullptr) const noexcept {
+    PathPoint evaluateSingleLapArcFraction(double clamped,double* yaw=nullptr) const noexcept {
         if(points.empty())return {};
         double frac=std::clamp(clamped,0.0,1.0);
-        if(closed){const double phase=frac*laps;frac=phase-std::floor(phase);}
+        if(closed){frac=frac-std::floor(frac);}
         if(closed && frac==0.0){
             size_t direction=1;
             while(direction+1<points.size() && lengths[direction]-lengths[direction-1]<=1e-12)++direction;
@@ -464,6 +741,29 @@ struct CompiledPath {
             if(lengths[ti]-lengths[ti-1]>1e-12)*yaw=std::atan2(points[ti][1]-points[ti-1][1],points[ti][0]-points[ti-1][0])*180.0/3.14159265358979323846;
         }
         return pathMix(points[i-1],points[i],span>1e-12?(distance-lengths[i-1])/span:0);
+    }
+    PathPoint evaluateArcFraction(double clamped,double* yaw=nullptr) const noexcept {
+        if(points.empty())return {};
+        double frac=std::clamp(clamped,0.0,1.0);
+        if(closed){
+            const int effLaps = endless ? 1 : laps;
+            const double phase=frac*effLaps;
+            frac=phase-std::floor(phase);
+        }
+        return evaluateSingleLapArcFraction(frac, yaw);
+    }
+    double endlessEffectiveU(double uBase, double transportPhase) const noexcept {
+        const double u0 = hasTiming ? evaluateTimeMap(uBase) : std::clamp(uBase, 0.0, 1.0);
+        if (!closed || !endless) return u0;
+        double u = u0 + transportPhase;
+        u -= std::floor(u);
+        if (u >= 1.0 || u < 0.0 || !std::isfinite(u)) u = 0.0;
+        return u;
+    }
+    PathPoint evaluateEndless(double uBase, double transportPhase, double* yaw = nullptr) const noexcept {
+        if (points.empty()) return {};
+        const double uEff = endlessEffectiveU(uBase, transportPhase);
+        return evaluateSingleLapArcFraction(uEff, yaw);
     }
     PathPoint evaluate(double u,double* yaw=nullptr) const noexcept {
         if(points.empty())return {};
@@ -558,4 +858,49 @@ public:
     void publish(const MovementPath& p) { slots[(size_t)back].build(p);back=middle.exchange(back|4)&3; }
     const CompiledPath& consume() noexcept { if(middle.load()&4)front=middle.exchange(front)&3;return slots[(size_t)front]; }
 };
+// ---- V04d: follower pose (pure) and Unlink conversion ----
+// Drawn pose of a follower at Position u (no wander, no room walls): target pose + offset in the path frame, z clamped
+// to 0..zTop. `c` is the follower's compiled (resolved) path. transportPhase is used when the target is Endless.
+inline PathPoint followerPoseAt(const CompiledPath& c, double u, double transportPhase, double zTop, double* yawOut = nullptr) noexcept {
+    if (c.points.size() < 2) return {};
+    double frac = 0.0;
+    PathPoint q;
+    if (c.closed && c.endless) { frac = c.endlessEffectiveU(u, transportPhase); q = c.evaluateSingleLapArcFraction(frac); }
+    else { frac = c.singleLapFrac(u); q = c.evaluate(u); }
+    const double yaw = c.followYawAtSingleLap(frac);
+    if (yawOut) *yawOut = yaw;
+    double dx = 0, dy = 0, dz = 0;
+    followOffsetDelta(yaw, c.followOffset, dx, dy, dz);
+    return {q[0] + dx, q[1] + dy, std::clamp(std::clamp(q[2], 0.0, zTop) + dz, 0.0, zTop)};
+}
+// Unlink: the follower becomes an ordinary path = its offset curve over one lap of the target's drawn geometry,
+// sampled uniformly in the target's arc fraction (samples points, smooth). Laps / Endless / period / window / LFO
+// (and wander when followWander) are copied from the target; per-point key times and easings are not (the points
+// differ); orientation, enable and azimuth keys stay the follower's own.
+inline MovementPath followerToOwnPath(const MovementPath& f, const MovementPath& t, double zTop, int samples = 64) {
+    MovementPath out;
+    out.enabled = f.enabled;
+    out.orient = f.orient; out.lookAt = f.lookAt; out.lookPoint = f.lookPoint; out.lookTarget = f.lookTarget; out.lookPos = f.lookPos;
+    out.orientOffset = f.orientOffset;
+    CompiledPath c;
+    c.build(resolveFollowerPath(f, &t));
+    if (c.points.size() < 2) return out;
+    const int n = std::clamp(samples, 2, 64);
+    for (int k = 0; k < n; ++k) {
+        const double sfrac = t.closed ? (double)k / (double)n : (double)k / (double)(n - 1);
+        const auto q = c.evaluateSingleLapArcFraction(sfrac);
+        double dx = 0, dy = 0, dz = 0;
+        followOffsetDelta(c.followYawAtSingleLap(sfrac), c.followOffset, dx, dy, dz);
+        out.points.push_back({std::clamp(q[0] + dx, -200.0, 200.0), std::clamp(q[1] + dy, -200.0, 200.0),
+                              std::clamp(std::clamp(q[2], 0.0, zTop) + dz, 0.0, std::min(30.0, zTop))});
+    }
+    out.closed = t.closed; out.smooth = true; out.laps = t.laps;
+    out.endless = t.endless; out.endlessPeriodS = t.endlessPeriodS;
+    out.start = t.start; out.end = t.end;
+    out.lfo = t.lfo;
+    if (f.follow.followWander) out.wander = t.wander;
+    out.azKeys = f.azKeys;
+    normalizePathAzKeys(out);
+    return out;
+}
 }

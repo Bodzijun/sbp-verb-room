@@ -64,7 +64,13 @@ int main() {
 #endif
     schemas.load(juce::File("web-ui/schema"));
     VerbProcessor p; p.setTailSettings({8000, false}); p.prepareToPlay(48000, 256);
-    p.loadSceneText(boxText(5,4,3,0,true), "Bridge test box", true); check(ready(p), "tiny test room loads");
+    p.loadSceneText(boxText(5,4,3,0,true), "Bridge test box", true);
+    const bool roomReady = ready(p);
+    check(roomReady, "tiny test room loads");
+    if (!roomReady) {
+        std::printf("Initial load state %d: %s\n", p.getLoadState(), p.getStatus().toRawUTF8());
+        return 1;
+    }
     if (juce::SystemStats::getEnvironmentVariable("VERB_T7_ONLY", {}).isNotEmpty()) return runT7RaysTest(p);
     if (juce::SystemStats::getEnvironmentVariable("VERB_T8_ONLY", {}).isNotEmpty()) return runT8ReviewTest(p);
     if (juce::SystemStats::getEnvironmentVariable("VERB_T9_ONLY", {}).isNotEmpty()) return runT9ReviewTest(p);
@@ -95,6 +101,25 @@ int main() {
     for(const auto& message:captured){const auto event=prop(message,"payload");if(prop(event,"event").toString()=="meters.output")outputEvent=prop(event,"peaks").isArray()&&prop(event,"rms").isArray()&&prop(event,"clips").isArray()&&(int)prop(event,"outputChannels")==p.numOutputChannels();}
     check(outputEvent,"E12 schema validated output telemetry includes all channels peak/RMS/clip");
     const auto clearClip=command(R"({"op":"output.resetClip","channel":0})");check(prop((*clearClip.getArray())[0],"kind").toString()=="ack","E12 clip reset command accepted");
+    check((bool)prop(prop(prop(prop(snap, "capabilities"), "features"), "tail.motion"), "available")
+          && prop(prop(snap, "document"), "motionTail").isVoid(), "MO3b capability is optional and default document is Off");
+    command(R"({"op":"tail.setMotion","enabled":true})");
+    const auto motionSnap = prop(bridge.snapshot(), "payload");
+    check((bool)prop(prop(motionSnap, "document"), "motionTail")
+          && prop(prop(motionSnap, "load"), "motionTail").toString() == "preparing",
+          "MO3b snapshot exposes preparing Motion");
+    command(R"({"op":"telemetry.subscribe","topics":["status"]})");
+    captured.clear();
+    bridge.tick(true, 990);
+    bool motionEvent = false;
+    for (const auto& message : captured) {
+        const auto event = prop(message, "payload");
+        if (prop(event, "event").toString() == "status.load")
+            motionEvent = prop(event, "motionTail").toString() == "preparing"
+                       && !(bool)prop(event, "rebuilding") && !(bool)prop(event, "tailCurrent");
+    }
+    check(motionEvent, "MO3b preparing appears in validated status without the legacy rebuild banner");
+    command(R"({"op":"tail.setMotion","enabled":false})");
     auto* mix = p.apvts.getParameter("mix"); HostListener listener; mix->addListener(&listener);
     const auto gesture = bridge.parameterBatch(array({obj({{"type","begin"},{"id","mix"}}),obj({{"type","change"},{"id","mix"},{"value",37.5}}),obj({{"type","end"},{"id","mix"}})}));
     check((bool)prop(gesture,"ok") && listener.begins == 1 && listener.changes == 1 && listener.ends == 1, "gesture reaches host begin/change/end exactly once");
@@ -1062,6 +1087,173 @@ int main() {
               && prop(prop((*failRep.getArray())[0], "payload"), "code").toString() == "ioError",
               "G10 app.openExternal returns ioError when OS launcher returns false");
         bridge.setExternalUrlLauncher({});
+    }
+    {
+        // V04a: endless and endlessPeriodS bridge commands, snapshot omission when default, and schema validation
+        const auto doc0 = prop(prop(bridge.snapshot(), "payload"), "document");
+        const auto p0Init = prop(doc0, "paths")[0];
+        check(!p0Init.getDynamicObject()->hasProperty("endless") && !p0Init.getDynamicObject()->hasProperty("endlessPeriodS"),
+              "V04a default snapshot omits endless and endlessPeriodS");
+        const auto setCircle = command(R"({"op":"path.set","object":0,"points":[[4,4,1.5],[3,5,1.5],[2,4,1.5],[3,3,1.5]],"enabled":true,"closed":true,"smooth":true,"endless":true,"endlessPeriodS":7.5})");
+        check(prop((*setCircle.getArray())[0], "kind").toString() == "ack",
+              "V04a bridge accepts path.set with endless and endlessPeriodS");
+        const auto p0On = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "paths")[0];
+        check((bool)prop(p0On, "endless") && std::abs((double)prop(p0On, "endlessPeriodS") - 7.5) < 1e-9,
+              "V04a snapshot exposes endless=true and endlessPeriodS=7.5");
+        const auto offFlags = command(R"({"op":"path.setFlags","object":0,"endless":false,"endlessPeriodS":8})");
+        check(prop((*offFlags.getArray())[0], "kind").toString() == "ack",
+              "V04a bridge accepts path.setFlags resetting endless to default");
+        const auto p0Off = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "paths")[0];
+        check(!p0Off.getDynamicObject()->hasProperty("endless") && !p0Off.getDynamicObject()->hasProperty("endlessPeriodS"),
+              "V04a snapshot omits endless and endlessPeriodS again when default");
+        command(R"({"op":"path.clear","object":0})");
+    }
+    {
+        // V04b: path.setWander, path.set / path.setFlags with wander, snapshot omission when default, and schema validation
+        const auto doc0 = prop(prop(bridge.snapshot(), "payload"), "document");
+        const auto p0Init = prop(doc0, "paths")[0];
+        check(!p0Init.getDynamicObject()->hasProperty("wander"),
+              "V04b default snapshot omits wander");
+        const auto setPath = command(R"({"op":"path.set","object":0,"points":[[4,4,1.5],[3,5,1.5],[2,4,1.5],[3,3,1.5]],"enabled":true,"closed":true,"smooth":true,"wander":{"enabled":true,"ampHorizM":0.75,"ampVertM":0.35,"rateHz":1.2,"smoothness":0.85,"pinEnds":true,"horizOnly":false,"seed":42}})");
+        check(prop((*setPath.getArray())[0], "kind").toString() == "ack",
+              "V04b bridge accepts path.set with wander");
+        const auto p0On = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "paths")[0];
+        const auto wOn = prop(p0On, "wander");
+        check(wOn.isObject() && (bool)prop(wOn, "enabled")
+              && std::abs((double)prop(wOn, "ampHorizM") - 0.75) < 1e-9
+              && std::abs((double)prop(wOn, "ampVertM") - 0.35) < 1e-9
+              && std::abs((double)prop(wOn, "rateHz") - 1.2) < 1e-9
+              && std::abs((double)prop(wOn, "smoothness") - 0.85) < 1e-9
+              && (int)prop(wOn, "seed") == 42,
+              "V04b snapshot exposes wander object with all configured fields");
+        const auto updWander = command(R"({"op":"path.setWander","object":0,"wander":{"enabled":true,"ampHorizM":0.9,"ampVertM":0.4,"rateHz":0.6,"smoothness":0.9,"pinEnds":false,"horizOnly":true,"seed":777}})");
+        check(prop((*updWander.getArray())[0], "kind").toString() == "ack",
+              "V04b bridge accepts path.setWander");
+        const auto wUpd = prop(prop(prop(prop(bridge.snapshot(), "payload"), "document"), "paths")[0], "wander");
+        check(wUpd.isObject() && (bool)prop(wUpd, "horizOnly") && !(bool)prop(wUpd, "pinEnds") && (int)prop(wUpd, "seed") == 777,
+              "V04b snapshot reflects path.setWander update");
+        const auto rstWander = command(R"({"op":"path.setWander","object":0,"wander":{"enabled":false,"ampHorizM":0.5,"ampVertM":0.25,"rateHz":0.5,"smoothness":0.8,"pinEnds":true,"horizOnly":false,"seed":1}})");
+        check(prop((*rstWander.getArray())[0], "kind").toString() == "ack",
+              "V04b bridge accepts path.setWander resetting wander to default");
+        const auto p0Off = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "paths")[0];
+        check(!p0Off.getDynamicObject()->hasProperty("wander"),
+              "V04b snapshot omits wander again when default");
+        command(R"({"op":"path.clear","object":0})");
+    }
+    {
+        // V04c: trigger zones in the document snapshot, route zoneId, live occupancy in status.load (schema-validated envelopes)
+        const auto doc0 = prop(prop(bridge.snapshot(), "payload"), "document");
+        check(!doc0.getDynamicObject()->hasProperty("zones"), "V04c default snapshot omits zones");
+        const auto mk = command(R"({"op":"zone.create","kind":"box","name":"Whole room","points":[[-1000,-1000],[1000,1000]],"colour":"#22c55e"})");
+        check(prop((*mk.getArray())[0], "kind").toString() == "ack", "V04c bridge accepts zone.create");
+        const auto mk2 = command(R"({"op":"zone.create","kind":"polygon","points":[[2,2],[3,2],[2.5,3]],"edge":0.2})");
+        check(prop((*mk2.getArray())[0], "kind").toString() == "ack", "V04c bridge accepts a polygon zone.create");
+        const auto bad = command(R"({"op":"zone.create","kind":"polygon","points":[[0.5,0.5],[2,2],[2,0.5],[0.5,2]]})");
+        check(prop((*bad.getArray())[0], "kind").toString() == "error", "V04c bridge reports a self-intersecting zone as an error");
+        const auto zDoc = prop(prop(bridge.snapshot(), "payload"), "document");
+        const auto zs = prop(zDoc, "zones");
+        check(zs.isArray() && zs.size() == 2 && (int)prop(zs[0], "id") == 1 && prop(zs[0], "kind").toString() == "box" && prop(zs[0], "colour").toString() == "#22c55e"
+              && prop(zs[1], "kind").toString() == "polygon" && prop(zs[1], "points").size() == 3 && std::abs((double)prop(zs[0], "hysteresis") - 0.05) < 1e-9,
+              "V04c snapshot exposes document.zones (ids, kind, points, colour, hysteresis)");
+        command(R"({"op":"modulation.addRoute","route":{"enabled":true,"object":0,"driver":"inZone","zoneId":1,"curve":{"inputRange":[0,1],"outputRange":[0,1],"invert":false,"clamp":true,"nodes":[{"x":0,"y":0,"smooth":false},{"x":1,"y":1,"smooth":false}]},"targetObject":-1,"target":"none","hostOut":1,"attackMs":0,"releaseMs":0}})");
+        const auto rts = prop(prop(prop(prop(bridge.snapshot(), "payload"), "document"), "modulation"), "routes");
+        check(rts.isArray() && rts.size() == 1 && prop(rts[0], "driver").toString() == "inZone" && (int)prop(rts[0], "zoneId") == 1,
+              "V04c snapshot route carries driver inZone + zoneId");
+        // place source 1 and the listener inside the 2..6 x 2..4 box (earlier tests left the listener outside the room)
+        for (auto [o, ax, v] : { std::tuple<int, int, float>{0, 0, 4.f}, {0, 1, 3.f}, {0, 2, 1.5f}, {verbp::kListener, 0, 3.f}, {verbp::kListener, 1, 3.f}, {verbp::kListener, 2, 1.5f} })
+            if (auto* pp = p.apvts.getParameter(verbp::paramId(o, ax))) pp->setValueNotifyingHost(pp->convertTo0to1(v));
+        command(R"({"op":"zone.set","id":1,"points":[[2,2],[6,4]]})");
+        if (auto* mp = p.apvts.getParameter("mode")) mp->setValueNotifyingHost(1.0f);
+        juce::AudioBuffer<float> zblk(std::max(2, p.getTotalNumOutputChannels()), 128);
+        juce::MidiBuffer zmidi;
+        for (int i = 0; i < 600; ++i) { zblk.clear(); stage2Process(p, zblk, zmidi); }  // > Creative blend ramp
+        check(std::abs(p.modOutParameter(0)->getValue() - 1.0f) < 1e-3f, "V04c Mod Out 1 = 1 while source 1 is inside the zone (Creative), got " + std::to_string(p.modOutParameter(0)->getValue()));
+        captured.clear();
+        bridge.tick(true, 100500);
+        bool sawOcc = false;
+        for (const auto& m : captured) {
+            auto pl = prop(m, "payload");
+            if (prop(pl, "event").toString() == "status.load" && pl.getDynamicObject()->hasProperty("zones")) {
+                const auto occ = prop(prop(pl, "zones"), "occupancy");
+                if (occ.isArray() && occ.size() == 2 && (int)prop(occ[0], "id") == 1) {
+                    const auto objs = prop(occ[0], "objects");
+                    bool has0 = false, has32 = false;
+                    for (int k = 0; objs.isArray() && k < objs.size(); ++k) { has0 |= (int)objs[k] == 0; has32 |= (int)objs[k] == 32; }
+                    sawOcc = has0 && has32;
+                }
+            }
+        }
+        check(sawOcc, "V04c status.load.zones.occupancy lists source 0 and the listener (32) inside zone 1");
+        command(R"({"op":"zone.set","id":1,"points":[[1,1],[1.5,1.5]]})");
+        for (int i = 0; i < 600; ++i) { zblk.clear(); stage2Process(p, zblk, zmidi); }  // > Creative blend ramp
+        check(std::abs(p.modOutParameter(0)->getValue()) < 1e-6f, "V04c Mod Out 1 = 0 after the zone was shrunk away from the source (live edit)");
+        command(R"({"op":"zone.delete","id":1})");
+        command(R"({"op":"zone.delete","id":2})");
+        command(R"({"op":"modulation.setRoutes","routes":[]})");
+        if (auto* mp = p.apvts.getParameter("mode")) mp->setValueNotifyingHost(0.0f);
+        for (int i = 0; i < 600; ++i) { zblk.clear(); stage2Process(p, zblk, zmidi); }  // > Creative blend ramp
+        captured.clear();
+        bridge.tick(true, 100600);
+        bool anyZones = false;
+        for (const auto& m : captured) { auto pl = prop(m, "payload"); if (prop(pl, "event").toString() == "status.load" && pl.getDynamicObject()->hasProperty("zones")) anyZones = true; }
+        check(!anyZones && !prop(prop(bridge.snapshot(), "payload"), "document").getDynamicObject()->hasProperty("zones"), "V04c zones and occupancy disappear again after deleting all zones");
+    }
+    {
+        // V04d: Link to path (rig): document.paths[i].follow in the schema-validated snapshot, link / setFollow / unlink acks, no chains
+        while ((int)p.getSources().size() < 3) command(R"({"op":"source.add"})");
+        const auto setT = command(R"({"op":"path.set","object":0,"points":[[1,1,1.2],[3,1,1.2],[3,3,1.2],[1,3,1.2]],"enabled":true,"closed":true,"smooth":true})");
+        check(prop((*setT.getArray())[0], "kind").toString() == "ack", "V04d bridge accepts the target path");
+        const auto lnk = command(R"({"op":"path.link","objects":[1,2],"target":0,"offset":[0,0.25,0.6]})");
+        check(prop((*lnk.getArray())[0], "kind").toString() == "ack", "V04d bridge accepts path.link with objects[]");
+        const auto snap = bridge.snapshot();
+        record(snap);
+        const auto paths = prop(prop(prop(snap, "payload"), "document"), "paths");
+        const auto f1 = prop(paths[1], "follow");
+        check(f1.isObject() && (int)prop(f1, "target") == 0 && prop(f1, "frame").toString() == "path" && (bool)prop(f1, "followWander")
+              && prop(f1, "offset").size() == 3 && std::abs((double)prop(f1, "offset")[1] - 0.25) < 1e-9 && std::abs((double)prop(f1, "offset")[2] - 0.6) < 1e-9
+              && prop(paths[1], "points").size() == 0,
+              "V04d snapshot exposes paths[1].follow {target, offset, followWander, frame} and no own points (schema-validated)");
+        check(!paths[0].getDynamicObject()->hasProperty("follow"), "V04d the target has no follow record");
+        juce::AudioBuffer<float> rigBlock(std::max(2, p.getTotalNumOutputChannels()), 128);
+        juce::MidiBuffer rigMidi;
+        for (int i = 0; i < 16; ++i) {
+            rigBlock.clear();
+            stage2Process(p, rigBlock, rigMidi);
+        }
+        captured.clear();
+        bridge.tick(true, 100700);
+        bool sawRigPoses = false;
+        for (const auto& message : captured) {
+            const auto payload = prop(message, "payload");
+            const auto poses = prop(payload, "rigPoses");
+            if (prop(payload, "event").toString() != "status.load" || poses.size() != 3)
+                continue;
+            sawRigPoses = true;
+            for (int source = 0; source < poses.size(); ++source) {
+                const auto xyz = prop(poses[source], "xyz");
+                const auto expected = p.livePosition(source);
+                sawRigPoses &= (int)prop(poses[source], "source") == source && xyz.size() == 3;
+                for (int axis = 0; axis < 3; ++axis)
+                    sawRigPoses &= (double)xyz[axis] == expected[(size_t)axis];
+            }
+        }
+        check(sawRigPoses, "V04d status.load publishes current target and follower positions during playback");
+        const auto sf = command(R"({"op":"path.setFollow","object":2,"offset":[0.1,-0.3,-1.1],"followWander":false})");
+        check(prop((*sf.getArray())[0], "kind").toString() == "ack", "V04d bridge accepts path.setFollow");
+        const auto f2 = prop(prop(prop(prop(bridge.snapshot(), "payload"), "document"), "paths")[2], "follow");
+        check(!(bool)prop(f2, "followWander") && std::abs((double)prop(f2, "offset")[2] + 1.1) < 1e-9, "V04d snapshot reflects the new offset and Follow wander OFF");
+        const auto chain = command(R"({"op":"path.link","object":0,"target":1})");
+        check(prop((*chain.getArray())[0], "kind").toString() == "error", "V04d bridge reports a chain as an error");
+        const auto ul = command(R"({"op":"path.unlink","object":2})");
+        const auto p2 = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "paths")[2];
+        check(prop((*ul.getArray())[0], "kind").toString() == "ack" && !p2.getDynamicObject()->hasProperty("follow") && prop(p2, "points").size() == 64,
+              "V04d path.unlink: own path of 64 points, follow record gone");
+        record(bridge.snapshot());
+        command(R"({"op":"path.clear","object":0})");
+        command(R"({"op":"path.clear","object":1})");
+        command(R"({"op":"path.clear","object":2})");
+        const auto pc = prop(prop(prop(bridge.snapshot(), "payload"), "document"), "paths");
+        check(!pc[1].getDynamicObject()->hasProperty("follow"), "V04d cleared rig leaves no follow records");
     }
     std::printf("FINAL web_bridge: %d pass, %d fail\n", passes, fails);
     return fails ? 1 : 0;

@@ -14,7 +14,7 @@ const require = createRequire(import.meta.url);
 const { chromium } = require('C:/Users/User/AppData/Local/ms-playwright-go/1.57.0/package');
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const SHOTS_DIR = path.join(REPO_ROOT, 'out', 'G2', 'shots');
+const SHOTS_DIR = process.env.VERB_BROWSER_SHOTS_DIR || path.join(REPO_ROOT, 'out', 'G2', 'shots');
 
 function stateWithPath(patch = {}) {
   const paths = Array.from({ length: 33 }, () => ({

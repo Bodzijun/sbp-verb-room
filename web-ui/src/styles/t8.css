@@ -28,9 +28,12 @@
 .energy-strip {flex-wrap:wrap}
 .rebuild-indicator {visibility:hidden;flex:0 0 103px;position:relative;font-size:11px;height:16px;color:var(--text-strong)!important}
 .rebuild-indicator i {display:block;position:absolute;bottom:0;height:1px;width:30%;background:var(--accent);animation:rebuild-activity 1.3s ease-in-out infinite alternate}
-.footer {display:grid;grid-template-columns:minmax(0,1fr) 103px minmax(0,1fr) auto;gap:8px}
+.footer {--tail-status-width:103px;display:grid;grid-template-columns:minmax(0,1fr) var(--tail-status-width) minmax(0,1fr) auto;gap:8px}
+.footer:has(.motion-status) {--tail-status-width:132px}
 .footer>span:first-child {min-width:0;max-width:none!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rebuilding .rebuild-indicator {visibility:visible}
+.rebuild-indicator.motion-status {visibility:visible;white-space:nowrap}
+.rebuild-indicator i[hidden] {display:none}
 .rebuilding .decay-graph canvas,.rebuilding .rt-large,.rebuilding .rt-band {opacity:.45}
 .decay-graph {position:relative}
 .updating-label {display:none;position:absolute;right:12px;top:28px;color:var(--muted);font-size:11px}

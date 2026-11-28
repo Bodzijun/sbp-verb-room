@@ -10,9 +10,17 @@ export function valueField(input, { get, min, max, step=0.001, display=String, e
     if(!grab) return;
     const g=grab; grab=null; if(input.hasPointerCapture(g.id))input.releasePointerCapture(g.id);
     if(g.moved && !cancel) commit(g.value);
-    end(); input.removeAttribute('data-gesture-active'); paint();
+    end(!!cancel); input.removeAttribute('data-gesture-active'); paint();
     window.dispatchEvent(new Event('verb-control-end'));
   };
+  const onEscDuringDrag=e=>{
+    if(grab && e.key==='Escape'){
+      e.preventDefault();
+      e.stopPropagation();
+      finish(true);
+    }
+  };
+  window.addEventListener('keydown',onEscDuringDrag,true);
   input.addEventListener('pointerdown',e=>{
     if(e.button!==0||input.disabled||!input.readOnly) return;
     e.preventDefault(); grab={id:e.pointerId,y:e.clientY,initial:get(),value:get(),moved:false}; input.setPointerCapture(e.pointerId);
@@ -40,5 +48,5 @@ export function valueField(input, { get, min, max, step=0.001, display=String, e
   const cancel=()=>finish(true),visibility=()=>{if(document.hidden) cancel();};
   window.addEventListener('blur',cancel); window.addEventListener('verb-ui-error',cancel); window.addEventListener('verb-gestures-reset',cancel); document.addEventListener('visibilitychange',visibility);
   paint();
-  return ()=>{cancel();window.removeEventListener('blur',cancel); window.removeEventListener('verb-ui-error',cancel); window.removeEventListener('verb-gestures-reset',cancel);document.removeEventListener('visibilitychange',visibility);};
+  return ()=>{cancel();window.removeEventListener('keydown',onEscDuringDrag,true);window.removeEventListener('blur',cancel); window.removeEventListener('verb-ui-error',cancel); window.removeEventListener('verb-gestures-reset',cancel);document.removeEventListener('visibilitychange',visibility);};
 }

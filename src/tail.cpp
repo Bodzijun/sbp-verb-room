@@ -173,14 +173,14 @@ struct EnergySegment { Vec3 p,d;double L,path;std::array<double,NB> e;double x0,
 struct EnergyCapture {std::vector<EnergySegment> segments;double rz0=0,rz1=0,rd=0;std::atomic<size_t>* count=nullptr;};
 struct EnergyCaptureFull:std::runtime_error {EnergyCaptureFull():std::runtime_error("Analysis segment budget"){} };
 static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv, int order, int rays, int seed, bool finalize,
-    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr, int firstRay=0,int lastRay=-1,const TailTracePrepared* prepared=nullptr,TailHist* recycle=nullptr,EnergyCapture* capture=nullptr,double minDetectRadius=0.) {
+    bool integrated = false, const std::function<bool()>& cancelled = {}, const std::function<void(double)>& progress = {}, TraceCRN* crn = nullptr, int firstRay=0,int lastRay=-1,const TailTracePrepared* prepared=nullptr,TailHist* recycle=nullptr,EnergyCapture* capture=nullptr,double minDetectRadius=0.,const double* windowEnds=nullptr,size_t windows=0) {
     std::unique_ptr<TailTracePrepared> owned;
     if(!prepared){owned=std::make_unique<TailTracePrepared>(sc,rcv,minDetectRadius);prepared=owned.get();}
     const auto& g=prepared->g;const int R=prepared->R;const double c=prepared->c;
     const auto& airDb=prepared->airDb;
     TailHist out=recycle?std::move(*recycle):TailHist{};
     out.binDur = 0.001;
-    out.nBins = integrated ? 1 : (size_t)std::ceil(sc.length / out.binDur) + 2;
+    out.nBins = windows ? windows : integrated ? 1 : (size_t)std::ceil(sc.length / out.binDur) + 2;
     out.h.resize(R);
     for (auto& r : out.h)
         for (auto& b : r) b.assign(out.nBins, 0.0);
@@ -201,7 +201,7 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
     // receivers' height slab, then search their X-sorted sphere bounds.
     std::vector<int> receiverOrder;
     double rz0 = 1e30, rz1 = -1e30;
-    if (integrated) {
+    if (integrated || windows) {
         receiverOrder.resize((size_t)R); std::iota(receiverOrder.begin(), receiverOrder.end(), 0);
         std::sort(receiverOrder.begin(), receiverOrder.end(), [&](int a, int b) { return rcv[a].pos.x < rcv[b].pos.x; });
         for (const auto& r : rcv) { rz0 = std::min(rz0, r.pos.z - rd); rz1 = std::max(rz1, r.pos.z + rd); }
@@ -287,6 +287,10 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
                         vol = Vs * sphere.reach;
                     }
                     size_t bin = integrated ? 0 : (size_t)(mid / c / out.binDur);
+                    if (windows) {
+                        const double binCenter = (bin + .5) * out.binDur;
+                        bin = static_cast<size_t>(std::upper_bound(windowEnds, windowEnds + windows - 1, binCenter) - windowEnds);
+                    }
                     if (bin >= out.nBins) return;
                     double grb[NB];
                     dirGainBands(rcv[r], d * -1.0, grb);
@@ -298,7 +302,7 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
                         if (crn) crn->rayAcc[(size_t)r * NB + b] += contrib;
                     }
                 };
-                if (!integrated) {
+                if (!integrated && !windows) {
                     for (int r = 0; r < R; ++r) record(r);
                 } else if (R > 0) {
                     double a = 0, b = L;
@@ -376,16 +380,16 @@ static TailHist traceTailImpl(const Scene& sc, const Transducer& src, const std:
     return out;
 }
 
-TailHist traceTail(const Scene& sc,const Transducer& src,const std::vector<Transducer>& rcv,int order,int rays,int seed,bool finalize,const std::function<bool()>& cancelled,const TailExecution& execution,double minDetectRadius){
+static TailHist traceTailBinned(const Scene& sc,const Transducer& src,const std::vector<Transducer>& rcv,int order,int rays,int seed,bool finalize,const std::function<bool()>& cancelled,const TailExecution& execution,double minDetectRadius,const double* windowEnds,size_t windows){
     using Clock=std::chrono::steady_clock;auto prepare=Clock::now();
     constexpr int chunk=1024;const TailTracePrepared prepared(sc,rcv,minDetectRadius);
     TailHist out;bool initialized=false;
-    const size_t bytes=(size_t)(std::ceil(sc.length/.001)+2)*std::max<size_t>(1,rcv.size())*NB*16;
+    const size_t bytes=(windows ? windows : (size_t)(std::ceil(sc.length/.001)+2))*std::max<size_t>(1,rcv.size())*NB*16;
     const unsigned width=execution.pool?std::max(1u,std::min<unsigned>(execution.workers,(unsigned)std::max<size_t>(1,128u*1024u*1024u/std::max<size_t>(1,bytes)))):1;
     const int chunks=std::max(1,(rays+chunk-1)/chunk);
     std::vector<double> work(chunks,0.);std::atomic<bool> failed{false};
     auto stop=[&]{return failed.load()||(cancelled&&cancelled());};
-    auto run=[&](int j,TailHist recycled=TailHist{}){auto t=Clock::now();auto h=traceTailImpl(sc,src,rcv,order,rays,seed,false,false,stop,{},nullptr,j*chunk,std::min(rays,(j+1)*chunk),&prepared,&recycled);work[j]=std::chrono::duration<double,std::milli>(Clock::now()-t).count();return h;};
+    auto run=[&](int j,TailHist recycled=TailHist{}){auto t=Clock::now();auto h=traceTailImpl(sc,src,rcv,order,rays,seed,false,false,stop,{},nullptr,j*chunk,std::min(rays,(j+1)*chunk),&prepared,&recycled,nullptr,0.,windowEnds,windows);work[j]=std::chrono::duration<double,std::milli>(Clock::now()-t).count();return h;};
     auto merge=[&](TailHist& h){auto t=Clock::now();if(!initialized){out=std::move(h);initialized=true;}
         else for(size_t r=0;r<rcv.size();++r)for(int b=0;b<NB;++b)for(size_t k=0;k<out.nBins;++k){out.h[r][b][k]+=h.h[r][b][k];out.h2[r][b][k]+=h.h2[r][b][k];}
         if(execution.stats)execution.stats->mergeMs+=std::chrono::duration<double,std::milli>(Clock::now()-t).count();
@@ -405,6 +409,17 @@ TailHist traceTail(const Scene& sc,const Transducer& src,const std::vector<Trans
     }
     if(execution.stats)for(double ms:work)execution.stats->workMs+=ms;
     if(finalize)finalizeTail(out);return out;
+}
+
+TailHist traceTail(const Scene& sc,const Transducer& src,const std::vector<Transducer>& rcv,int order,int rays,int seed,bool finalize,const std::function<bool()>& cancelled,const TailExecution& execution,double minDetectRadius) {
+    return traceTailBinned(sc,src,rcv,order,rays,seed,finalize,cancelled,execution,minDetectRadius,nullptr,0);
+}
+
+TailHist traceTailWindows(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
+                          int order, int rays, const double* windowEnds, size_t windows,
+                          const TailExecution& execution, double minDetectRadius) {
+    return traceTailBinned(sc, src, rcv, order, rays, sc.seed, false, execution.cancelled,
+                           execution, minDetectRadius, windowEnds, windows);
 }
 
 std::vector<std::array<double, NB>> traceTailEnergy(const Scene& sc, const Transducer& src, const std::vector<Transducer>& rcv,
