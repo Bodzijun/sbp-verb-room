@@ -466,7 +466,7 @@ void EditorBridge::tick(bool isVisible, double now) {
             const bool trPlaying = audioActive && tr.playing;
             statusPayload.getDynamicObject()->setProperty("transport", obj({
                 {"playing", trPlaying},
-                {"samplePos", (int64_t)(trPlaying ? tr.samplePos : 0)},
+                {"samplePos", (juce::int64)(trPlaying ? tr.samplePos : 0)},
                 {"timeSec", trPlaying && std::isfinite(tr.timeSec) ? tr.timeSec : 0.0},
                 {"sampleRate", tr.sampleRate > 0.0 && std::isfinite(tr.sampleRate) ? tr.sampleRate : 48000.0}
             }));
@@ -508,7 +508,7 @@ void EditorBridge::tick(bool isVisible, double now) {
                 // V04e: MIDI out indicator: send counter + last message [status, data1, data2] (only once something was sent).
                 const uint32_t sent = proc.webMidiSendCount(i), last = proc.webMidiLastMessage(i);
                 if (sent > 0 && (last >> 24) != 0)
-                    ro.getDynamicObject()->setProperty("midi", obj({{"count", (int64_t)sent},
+                    ro.getDynamicObject()->setProperty("midi", obj({{"count", (juce::int64)sent},
                         {"last", array({(int)(last & 0xff), (int)((last >> 8) & 0xff), (int)((last >> 16) & 0xff)})}}));
                 routeArr.add(ro);
             }
