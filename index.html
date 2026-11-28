@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Verb Room is a physically based room reverb for VST3 hosts. Draw a room and listen as sources and the listener move through it.">
-  <title>Verb Room 0.4.0 – Physically based room reverb</title>
+  <meta name="description" content="Verb Room is a physically based VST3 room reverb. Draw a room, then use Motion to update the late tail in real time as sources and the listener move.">
+  <title>Verb Room 0.4.0 – Physically based room reverb with Motion</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230a121b%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%273%27 fill=%27%2318b0ca%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%209%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%272.2%27 opacity=%27.7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2713.5%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%271.6%27 opacity=%27.4%27/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
   <link rel="alternate" hreflang="uk" href="uk/index.html">
@@ -17,6 +17,7 @@
       <nav class="section-nav" aria-label="On this page">
         <a href="#room-details">Room details</a>
         <a href="#modulation">Modulation</a>
+        <a href="#whats-new">What’s new</a>
         <a href="#comparison">Compare</a>
       </nav>
       <nav class="languages" aria-label="Language">
@@ -32,10 +33,10 @@
         <div class="hero-copy">
           <p class="release">VST3 · 0.4.0 alpha</p>
           <h1 id="title">Draw the room.<br><em>Hear it move.</em></h1>
-          <p class="lead">A physically based room reverb. Build a space from walls and materials, then move sound sources and the listener through it.</p>
+          <p class="lead">A physically based room reverb. Build a space from walls and materials, then move sound sources and the listener through it. With Motion, the late reverb follows that movement in real time without Bake.</p>
           <div class="hero-actions">
             <a class="cta" href="#download">Download</a>
-            <a class="cta secondary" href="#video"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Watch the motion demo</a>
+            <a class="cta secondary" href="#video-040"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Watch the motion demo</a>
             <a class="cta secondary" href="#support" data-support-open>Support the project</a>
           </div>
         </div>
@@ -114,7 +115,7 @@
             <p class="promise">Model real rooms, animate movement, and output immersive formats.</p>
             <ul>
                 <li>Recreate the acoustic character of a film, TV, or game location by modeling its walls and surface materials.</li>
-                <li>Draw a flyby, walkthrough, or vehicle path. Automate the source or listener in your DAW and bake the late tail along the route.</li>
+                <li>Draw a flyby, walkthrough, or vehicle path. Automate the source or listener in your DAW and use Bake for the late tail or let Motion update it live.</li>
                 <li>Choose mono, stereo, 5.1, 7.1, or 7.1.4, or use first- to third-order AmbiX in an immersive or VR audio workflow.</li>
             </ul>
             <a class="section-link" href="#model">See movement and output formats</a>
@@ -141,12 +142,12 @@
           <li>
             <span class="step-number" aria-hidden="true">03</span>
             <h3>Set them moving</h3>
-            <p>Draw a path for a source or the listener and automate its position in your DAW.</p>
+            <p>Draw a path for a source or the listener, or start with one of eight shapes. Use Endless to loop a closed path and Path wander in Creative to add variation.</p>
           </li>
           <li>
             <span class="step-number" aria-hidden="true">04</span>
-            <h3>Bake and play</h3>
-            <p>Precompute the late tail along the path. Baked tables reload with presets and DAW sessions.</p>
+            <h3>Bake or go live</h3>
+            <p>Bake precomputes the late tail along the path. Motion updates it in real time as the scene moves.</p>
           </li>
         </ol>
       </div>
@@ -163,7 +164,7 @@
           <li>7 octave bands</li>
           <li>AmbiX 1–3</li>
           <li>Automatable positions</li>
-          <li>Baked paths</li>
+          <li>Baked paths and live Motion</li>
         </ul>
         <div class="features">
           <div>
@@ -360,6 +361,31 @@
       </div>
     </section>
 
+    <section class="section video-section" id="video-040" aria-labelledby="video-040-title">
+      <div class="wrap video-grid">
+        <div>
+          <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+          <h2 id="video-040-title">Motion in Verb Room 0.4.0</h2>
+          <p>In this demo, a walker’s head and footsteps follow one trajectory with Link to path, and a fly moves around the room with Path wander. In a trigger zone, MIDI out tells a sampler to play creaking floorboards.</p>
+          <p class="note">The video connects to YouTube after you press play. If the player shows an error, <a href="https://www.youtube.com/watch?v=hhbdxk2U1IA">open the 0.4.0 demo on YouTube</a>.</p>
+        </div>
+        <div>
+          <div class="video" data-yt="hhbdxk2U1IA" data-title="Verb Room 0.4.0 demo: Motion, paths and MIDI" hidden>
+            <button class="video-trigger" type="button">
+              <img src="assets/motion-0.4-poster.webp" width="1035" height="527" alt="REAPER with Verb Room’s 3D room view and a sampler" loading="lazy">
+              <span class="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Play the 0.4.0 demo</span>
+            </button>
+          </div>
+          <noscript>
+            <a class="video-fallback" href="https://www.youtube.com/watch?v=hhbdxk2U1IA">
+              <img src="assets/motion-0.4-poster.webp" width="1035" height="527" alt="REAPER with Verb Room’s 3D room view and a sampler" loading="lazy">
+              <span class="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Watch the 0.4.0 demo on YouTube</span>
+            </a>
+          </noscript>
+        </div>
+      </div>
+    </section>
+
     <section class="section video-section" aria-labelledby="video">
       <div class="wrap video-grid">
         <div>
@@ -390,7 +416,7 @@
         <div>
           <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
           <h2 id="modulation-title">Let motion shape the sound</h2>
-          <p>In Creative mode, the distance, speed or angle between a source and the listener can control how that source and the room sound. Pick what to follow, draw a curve, choose what it changes.</p>
+          <p>In Creative mode, the distance, speed or angle between a source and the listener can control how that source and the room sound. Pick what to follow, draw a curve, choose what it changes. Trigger zones can drive routes, and routes can also send MIDI out.</p>
           <ul class="chips" role="list">
             <li>Routes with a curve editor</li>
             <li>Gain, filters, shelves, room levels</li>
@@ -423,6 +449,34 @@
           </div>
         </div>
         <p class="note">Modulation works in Creative mode and does nothing in Physical mode. The editor is part of the web interface; the Linux build uses the classic interface without it.</p>
+      </div>
+    </section>
+
+    <section class="section" id="whats-new" aria-labelledby="whats-new-title">
+      <div class="wrap">
+        <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+        <h2 id="whats-new-title">What’s new in 0.4.0</h2>
+        <div class="features">
+          <div>
+            <h3>Motion</h3>
+            <p>Motion is a separate switch beside Physical and Creative. It adapts the late tail in real time without Bake. Switch Motion off to access existing baked tables again.</p>
+            <p>On cold start, you hear direct sound and early reflections while the tail prepares (about 0.5–1.6 seconds in the measured scenes). With five or more sources, Motion uses a shared decay shape.</p>
+          </div>
+          <div>
+            <h3>Paths and rigs</h3>
+            <p>Start with Circle, Ellipse, Figure-8, Square, Rectangle, Triangle, Star or Spiral. Endless loops closed paths while the host transport plays. In Creative, Path wander adds smooth variation across the path.</p>
+            <p>Link to path moves a whole rig, such as body, head and feet, along one trajectory with local offsets. Unlink converts an offset curve into an independent path. Use Motion for linked followers or draw separate paths to Bake them.</p>
+          </div>
+          <div>
+            <h3>Trigger zones</h3>
+            <p>Draw up to 16 box or polygon zones with soft edges and hysteresis. In Creative, the In zone, Zone index and Distance to zone drivers feed the modulation matrix, which can send their results to Mod Out 1–16.</p>
+          </div>
+          <div>
+            <h3>MIDI out</h3>
+            <p>In Creative while the transport plays, modulation routes can send note gates, triggers, CC and keyswitches. The VST3 MIDI output carries events generated by Verb Room. Incoming MIDI is dropped.</p>
+            <p>In REAPER, a track that receives audio cannot directly send MIDI generated by its effect to another track. The tested Windows workaround uses Default App Loopback (A) and (B). See the <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Manual_en.md#midi-out">MIDI out routing steps</a>. Routing in other hosts and on real macOS and Linux systems remains unverified.</p>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -604,6 +658,7 @@
         <ul>
           <li>Verb Room is alpha software. Windows is the platform tested in REAPER. Automated performance checks cover multi-source scenes. Live listening and performance on older four-core systems remain open.</li>
           <li>Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 through 0.4.0 have yet to be tested on a Mac. When the macOS editor has focus, click outside it to use host shortcuts the editor does not handle. The Linux build has the classic interface only and has not been tried in a real host yet.</li>
+          <li>Allow for Motion’s start-up and shared decay with five or more sources. Linked followers use the live tail. Cross-track MIDI out in Creative during playback was tested in REAPER on Windows. See <a href="#whats-new">the 0.4.0 details</a> for routing and Bake options.</li>
           <li>Geometry is 2.5D: vertical walls and horizontal floors, ceilings, and plates. The model covers geometric acoustics without low-frequency room modes. The tail is a statistical estimate.</li>
           <li>Large scenes can be CPU-intensive, especially with third-order AmbiX in Creative mode. Try Physical mode for large sessions. A large-scene path bake can take about 1–2 minutes depending on the scene, CPU, and system load.</li>
           <li>Existing presets, scenes, and projects still load. Moving objects in Manual mode with tables baked in an earlier build may need one fresh Bake path. Tables baked in 0.2.0 still require a fresh bake.</li>
@@ -616,13 +671,12 @@
         <h2 id="changes">What changed in 0.4.0</h2>
         <div>
           <ul>
-            <li><strong>Motion.</strong> A separate switch next to Physical and Creative: the late tail adapts in real time as sources and the listener move, with no Bake step.</li>
-            <li><strong>Path shapes, Endless and wander.</strong> Eight path shapes (circle, figure-8, star, spiral and more), Endless playback from the host transport, and a shared random wander for a natural flying feel.</li>
-            <li><strong>Link to path.</strong> Move a whole rig (body, head, hands, feet) along one path with local offsets. Linked followers are not baked: use them with Motion, or draw separate paths if you need Bake.</li>
-            <li><strong>Trigger zones, Mod Out and MIDI out.</strong> Draw up to 16 zones; entering one drives the modulation matrix, <code>Mod Out</code> parameters and MIDI notes or CC for a sampler, for example footsteps that change surface by zone. In REAPER the MIDI route to another track needs a loopback; the manual has the steps.</li>
-            <li><strong>Stems workflow.</strong> The manual explains rendering stems by soloing source groups, backed by a sum-of-stems regression test.</li>
+            <li><strong>Motion.</strong> Real-time updates to the late tail in Physical or Creative.</li>
+            <li><strong>Paths and rigs.</strong> Eight shapes, Endless, Path wander and Link to path.</li>
+            <li><strong>Trigger zones, Mod Out and MIDI out.</strong> Zone-driven modulation and MIDI events in Creative.</li>
+            <li><strong>Stems workflow.</strong> Render groups in separate passes with Source Solo. In the four-source static regression, the sum matched the full mix to floating-point precision.</li>
           </ul>
-          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.4.0_en.md">Read the 0.4.0 release notes</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_en.md">See the roadmap to 1.0</a></p>
+          <p><a href="#video-040">Watch the 0.4.0 demo</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.4.0_en.md">Read the 0.4.0 release notes</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_en.md">See the roadmap to 1.0</a></p>
           <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Manual_en.md">Read the user manual</a>, including a guide to baking paths.</p>
         </div>
       </div>

@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Verb Room — фізично змодельований кімнатний ревербератор VST3. Намалюйте кімнату й послухайте, як вона звучить під час руху джерел і слухача.">
-  <title>Verb Room 0.4.0 — Фізично змодельований кімнатний ревербератор</title>
+  <meta name="description" content="Verb Room — фізично змодельований ревербератор VST3. Намалюйте кімнату, і Motion оновлюватиме пізній хвіст у реальному часі під час руху.">
+  <title>Verb Room 0.4.0 — Фізично змодельований ревербератор із Motion</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230a121b%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%273%27 fill=%27%2318b0ca%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%209%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%272.2%27 opacity=%27.7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2713.5%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%271.6%27 opacity=%27.4%27/%3E%3C/svg%3E">
   <link rel="stylesheet" href="../style.css">
   <link rel="alternate" hreflang="en" href="../index.html">
@@ -17,6 +17,7 @@
       <nav class="section-nav" aria-label="На цій сторінці">
         <a href="#room-details">Деталі кімнати</a>
         <a href="#modulation">Модуляція</a>
+        <a href="#whats-new">Що нового</a>
         <a href="#comparison">Порівняння</a>
       </nav>
       <nav class="languages" aria-label="Мова">
@@ -32,10 +33,10 @@
         <div class="hero-copy">
           <p class="release">VST3 · 0.4.0 альфа</p>
           <h1 id="title">Намалюйте кімнату.<br><em>Почуйте її в русі.</em></h1>
-          <p class="lead">Фізично змодельований ревербератор. Побудуйте простір зі стін і матеріалів та рухайте в ньому джерела звуку й слухача.</p>
+          <p class="lead">Фізично змодельований ревербератор. Побудуйте простір зі стін і матеріалів та рухайте в ньому джерела звуку й слухача. У Motion пізня реверберація реагує на цей рух у реальному часі без Bake.</p>
           <div class="hero-actions">
             <a class="cta" href="#download">Завантажити</a>
-            <a class="cta secondary" href="#video"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Переглянути демо руху</a>
+            <a class="cta secondary" href="#video-040"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Переглянути демо руху</a>
             <a class="cta secondary" href="#support" data-support-open>Підтримати проєкт</a>
           </div>
         </div>
@@ -114,7 +115,7 @@
             <p class="promise">Моделюйте реальні приміщення, відтворюйте рух і працюйте з імерсивними форматами.</p>
             <ul>
                 <li>Передайте акустичний характер локації для кіно, телебачення чи гри, змоделювавши її стіни й матеріали поверхонь.</li>
-                <li>Намалюйте траєкторію прольоту, проходу чи проїзду. Автоматизуйте рух джерела або слухача в DAW і запечіть пізній хвіст уздовж шляху.</li>
+                <li>Намалюйте траєкторію прольоту, проходу чи проїзду. Автоматизуйте рух джерела або слухача в DAW і скористайтеся Bake або оновлюйте пізній хвіст наживо через Motion.</li>
                 <li>Вибирайте моно, стерео, 5.1, 7.1 чи 7.1.4 або використовуйте AmbiX від першого до третього порядку для імерсивного звуку й VR.</li>
             </ul>
             <a class="section-link" href="#model">Переглянути можливості руху й формати виходу</a>
@@ -141,12 +142,12 @@
           <li>
             <span class="step-number" aria-hidden="true">03</span>
             <h3>Задайте рух</h3>
-            <p>Намалюйте шлях для джерела або слухача й автоматизуйте його позицію в DAW.</p>
+            <p>Намалюйте траєкторію джерела чи слухача або виберіть одну з восьми форм. Endless повторює замкнений шлях, а Path wander у Creative додає відхилення.</p>
           </li>
           <li>
             <span class="step-number" aria-hidden="true">04</span>
-            <h3>Запечіть і відтворіть</h3>
-            <p>Заздалегідь розрахуйте пізній хвіст уздовж шляху. Запечені таблиці відновлюються з пресетів і проєктів DAW.</p>
+            <h3>Bake або робота наживо</h3>
+            <p>Bake заздалегідь обчислює пізній хвіст уздовж траєкторії. Motion оновлює його в реальному часі під час руху.</p>
           </li>
         </ol>
       </div>
@@ -163,7 +164,7 @@
           <li>7 октавних смуг</li>
           <li>AmbiX 1–3</li>
           <li>Автоматизація позицій</li>
-          <li>Запечені траєкторії</li>
+          <li>Запечені траєкторії й Motion наживо</li>
         </ul>
         <div class="features">
           <div>
@@ -360,6 +361,31 @@
       </div>
     </section>
 
+    <section class="section video-section" id="video-040" aria-labelledby="video-040-title">
+      <div class="wrap video-grid">
+        <div>
+          <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+          <h2 id="video-040-title">Motion у Verb Room 0.4.0</h2>
+          <p>У цьому демо голова й кроки людини рухаються однією траєкторією завдяки Link to path, а муха літає кімнатою з Path wander. У зоні-тригері MIDI out запускає в семплері скрип паркетних дощок.</p>
+          <p class="note">Відео під’єднується до YouTube після натискання кнопки відтворення. Якщо плеєр показує помилку, <a href="https://www.youtube.com/watch?v=hhbdxk2U1IA">відкрийте демо 0.4.0 на YouTube</a>.</p>
+        </div>
+        <div>
+          <div class="video" data-yt="hhbdxk2U1IA" data-title="Демо Verb Room 0.4.0: Motion, траєкторії та MIDI" hidden>
+            <button class="video-trigger" type="button">
+              <img src="../assets/motion-0.4-poster.webp" width="1035" height="527" alt="REAPER із тривимірним виглядом кімнати у Verb Room і семплером" loading="lazy">
+              <span class="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Відтворити демо 0.4.0</span>
+            </button>
+          </div>
+          <noscript>
+            <a class="video-fallback" href="https://www.youtube.com/watch?v=hhbdxk2U1IA">
+              <img src="../assets/motion-0.4-poster.webp" width="1035" height="527" alt="REAPER із тривимірним виглядом кімнати у Verb Room і семплером" loading="lazy">
+              <span class="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v9L12 8Z"/></svg>Переглянути демо 0.4.0 на YouTube</span>
+            </a>
+          </noscript>
+        </div>
+      </div>
+    </section>
+
     <section class="section video-section" aria-labelledby="video">
       <div class="wrap video-grid">
         <div>
@@ -390,7 +416,7 @@
         <div>
           <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
           <h2 id="modulation-title">Нехай рух формує звук</h2>
-          <p>У режимі Creative відстань, швидкість чи кут між джерелом і слухачем можуть керувати тим, як звучить це джерело й кімната. Оберіть, за чим стежити, намалюйте криву й виберіть, що вона змінює.</p>
+          <p>У режимі Creative відстань, швидкість чи кут між джерелом і слухачем можуть керувати тим, як звучить це джерело й кімната. Оберіть, за чим стежити, намалюйте криву й виберіть, що вона змінює. Зони-тригери також можуть керувати маршрутами, а маршрути можуть надсилати події через MIDI out.</p>
           <ul class="chips" role="list">
             <li>Маршрути з редактором кривої</li>
             <li>Гучність, фільтри, шельфи, рівні кімнати</li>
@@ -423,6 +449,34 @@
           </div>
         </div>
         <p class="note">Модуляція працює в режимі Creative і нічого не робить у Physical. Редактор є частиною веб-інтерфейсу; збірка для Linux має класичний інтерфейс без нього.</p>
+      </div>
+    </section>
+
+    <section class="section" id="whats-new" aria-labelledby="whats-new-title">
+      <div class="wrap">
+        <svg class="divider-wave" viewBox="0 0 128 28" aria-hidden="true"><path d="M0 14h24l5-5 5 10 6-15 6 20 7-13 7 7 6-7 5 6 5-3h52"/></svg>
+        <h2 id="whats-new-title">Що нового в 0.4.0</h2>
+        <div class="features">
+          <div>
+            <h3>Motion</h3>
+            <p>Motion — окремий перемикач поруч із Physical і Creative. Він адаптує пізній хвіст у реальному часі без Bake. Після вимкнення Motion наявні запечені таблиці знову доступні.</p>
+            <p>Під час холодного запуску спершу чути прямий звук і ранні відбиття, поки готується хвіст (близько 0,5–1,6 с у виміряних сценах). Від п’яти джерел Motion використовує спільну форму згасання.</p>
+          </div>
+          <div>
+            <h3>Траєкторії та зв’язані джерела</h3>
+            <p>Виберіть Circle, Ellipse, Figure-8, Square, Rectangle, Triangle, Star або Spiral. Endless повторює замкнену траєкторію під час відтворення в хості. У Creative функція Path wander додає плавні відхилення від шляху.</p>
+            <p>Link to path веде групу джерел, як-от тіло, голову й ноги, однією траєкторією з локальними зміщеннями. Unlink перетворює криву зі зміщенням на самостійну траєкторію. Для прив’язаних джерел використовуйте Motion, а для Bake намалюйте окремі траєкторії.</p>
+          </div>
+          <div>
+            <h3>Зони-тригери</h3>
+            <p>Намалюйте до 16 зон прямокутної чи багатокутної форми з м’якими краями й гістерезисом. У Creative драйвери In zone, Zone index і Distance to zone керують матрицею модуляції, яка може передавати їхні результати на Mod Out 1–16.</p>
+          </div>
+          <div>
+            <h3>MIDI out</h3>
+            <p>У Creative під час відтворення маршрути модуляції можуть надсилати ноти в режимах Gate і Trigger, CC та кейсвічі. Через MIDI-вихід VST3 проходять події, які генерує Verb Room. Вхідні MIDI-події відкидаються.</p>
+            <p>У REAPER трек, що приймає аудіо, не може напряму передавати MIDI від свого ефекту на інший трек. На Windows спрацювала схема з Default App Loopback (A) і (B). Дивіться <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Manual_uk.md#midi-out">кроки маршрутизації MIDI out</a>. Маршрутизацію в інших хостах і на реальних системах macOS та Linux ще не перевіряли.</p>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -604,6 +658,7 @@
         <ul>
           <li>Verb Room — альфа-версія. Плагін тестували в REAPER під Windows. Автоматизовані перевірки продуктивності охоплюють сцени з багатьма джерелами. Прослуховування в реальних сесіях і тести продуктивності на старіших чотириядерних системах ще попереду.</li>
           <li>Версію 0.2.0 перевіряв на реальному Mac тестувальник зі спільноти; 0.2.1–0.4.0 на Mac ще не перевіряли. Щоб скористатися командами хоста, яких редактор macOS не обробляє, клацніть поза вікном плагіна. Збірка для Linux має лише класичний інтерфейс, і в реальному хості її ще не пробували.</li>
+          <li>Враховуйте час запуску Motion і спільне згасання від п’яти джерел. Прив’язані джерела використовують живий хвіст. Передачу MIDI out між треками в Creative під час відтворення перевірено в REAPER на Windows. Варіанти маршрутизації та Bake описано в <a href="#whats-new">огляді 0.4.0</a>.</li>
           <li>Геометрія 2,5D обмежена вертикальними стінами й горизонтальними підлогами, стелями та плитами. Модель ґрунтується на геометричній акустиці без низькочастотних кімнатних мод. Пізній хвіст оцінюється статистично.</li>
           <li>Великі сцени можуть відчутно навантажувати процесор, особливо з AmbiX третього порядку в Creative. Для таких проєктів спробуйте Physical. Запікання шляху у великій сцені може тривати близько 1–2 хвилин залежно від сцени, процесора й навантаження.</li>
           <li>Наявні пресети, сцени й проєкти завантажуються. Для рухомих об’єктів у режимі Manual із таблицями з попередніх збірок може знадобитися повторний Bake path. Для таблиць, запечених у 0.2.0, повторне запікання досі обов’язкове.</li>
@@ -616,13 +671,12 @@
         <h2 id="changes">Що змінилося у 0.4.0</h2>
         <div>
           <ul>
-            <li><strong>Motion.</strong> Окремий перемикач поруч із Physical і Creative: пізній хвіст адаптується в реальному часі, коли рухаються джерела й слухач, без кроку Bake.</li>
-            <li><strong>Форми траєкторій, Endless і wander.</strong> Вісім форм (коло, вісімка, зірка, спіраль та інші), безкінечне відтворення від транспорту хоста й спільне випадкове відхилення для природного польоту.</li>
-            <li><strong>Link to path.</strong> Увесь рій (тіло, голова, руки, ноги) рухається по одній траєкторії з локальними зсувами. Ведені джерела не запікаються: користуйтеся ними з Motion, а для Bake малюйте окремі траєкторії.</li>
-            <li><strong>Зони-тригери, Mod Out і MIDI out.</strong> До 16 зон; вхід у зону керує матрицею модуляції, параметрами <code>Mod Out</code> і MIDI-нотами чи CC для семплера, наприклад кроками, що змінюють покриття за зоною. У REAPER для MIDI на інший трек потрібен loopback; кроки є в посібнику.</li>
-            <li><strong>Stems workflow.</strong> Посібник описує рендер стемів через Solo груп джерел, а регресійний тест перевіряє, що сума стемів дорівнює мастеру.</li>
+            <li><strong>Motion.</strong> Оновлення пізнього хвоста в реальному часі у Physical або Creative.</li>
+            <li><strong>Траєкторії та зв’язані джерела.</strong> Вісім форм, Endless, Path wander і Link to path.</li>
+            <li><strong>Зони-тригери, Mod Out і MIDI out.</strong> Зони керують модуляцією й MIDI-подіями у Creative.</li>
+            <li><strong>Рендер стемів.</strong> Рендерте групи окремими проходами через Source Solo. У статичному тесті з чотирма джерелами сума збіглася з повним міксом із точністю чисел із рухомою комою.</li>
           </ul>
-          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.4.0_uk.md">Повні нотатки випуску 0.4.0</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_uk.md">Дорожня карта до 1.0</a></p>
+          <p><a href="#video-040">Переглянути демо 0.4.0</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.4.0_uk.md">Повні нотатки випуску 0.4.0</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_uk.md">Дорожня карта до 1.0</a></p>
           <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Manual_uk.md">Посібник користувача</a>, зокрема про запікання шляхів.</p>
         </div>
       </div>

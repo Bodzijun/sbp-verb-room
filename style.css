@@ -323,11 +323,14 @@ pre code { padding: 0; }
   .steps { gap: .85rem; }
 }
 
-.section-nav { display: none; }
-@media (min-width: 62rem) {
-  .section-nav { display: flex; gap: clamp(1rem, 2.5vw, 2rem); margin-inline-end: clamp(.5rem, 2vw, 1.5rem); }
-  .section-nav a { color: var(--muted); font-size: .9375rem; font-weight: 650; }
-  .section-nav a:hover { color: var(--accent); }
+.section-nav { display: flex; gap: clamp(1rem, 2.5vw, 2rem); margin-inline-end: clamp(.5rem, 2vw, 1.5rem); }
+.section-nav a { color: var(--muted); font-size: .9375rem; font-weight: 650; }
+.section-nav a:hover { color: var(--accent); }
+@media (max-width: 61.99rem) {
+  main [id] { scroll-margin-top: 7.5rem; }
+  .masthead .wrap { flex-wrap: wrap; gap: .15rem .5rem; padding-block: .35rem; }
+  .section-nav { order: 1; flex-basis: 100%; gap: .25rem; justify-content: space-between; flex-wrap: wrap; margin-inline-end: 0; }
+  .section-nav a { display: flex; align-items: center; min-height: 1.75rem; font-size: .8125rem; }
 }
 
 .detail-grid {
