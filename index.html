@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Verb Room is a physically based room reverb for VST3 hosts. Draw a room and listen as sources and the listener move through it.">
-  <title>Verb Room 0.3.1 – Physically based room reverb</title>
+  <title>Verb Room 0.4.0 – Physically based room reverb</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230a121b%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%273%27 fill=%27%2318b0ca%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%209%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%272.2%27 opacity=%27.7%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2713.5%27 fill=%27none%27 stroke=%27%2318b0ca%27 stroke-width=%271.6%27 opacity=%27.4%27/%3E%3C/svg%3E">
   <link rel="stylesheet" href="style.css">
   <link rel="alternate" hreflang="uk" href="uk/index.html">
@@ -30,7 +30,7 @@
     <section class="hero" aria-labelledby="title">
       <div class="wrap hero-grid">
         <div class="hero-copy">
-          <p class="release">VST3 · 0.3.1 alpha</p>
+          <p class="release">VST3 · 0.4.0 alpha</p>
           <h1 id="title">Draw the room.<br><em>Hear it move.</em></h1>
           <p class="lead">A physically based room reverb. Build a space from walls and materials, then move sound sources and the listener through it.</p>
           <div class="hero-actions">
@@ -521,7 +521,7 @@
 
     <section class="section" id="download" aria-labelledby="download-title">
       <div class="wrap">
-        <h2 id="download-title">Download Verb Room 0.3.1</h2>
+        <h2 id="download-title">Download Verb Room 0.4.0</h2>
         <p class="narrow">Windows x64, macOS Universal and Linux x86_64. Pay what you want, including zero. Payments support development.</p>
         <div class="download-actions">
           <a class="cta" href="https://ko-fi.com/s/405ebacfcc">Get Verb Room on Ko-fi</a>
@@ -561,16 +561,16 @@
         <h3 class="checksum-title">Package SHA-256</h3>
         <dl class="hashes">
           <div>
-            <dt>VerbRoom-0.3.1-win64.zip</dt>
-            <dd><code>696980f7f95f4c71efc83c74d6811505db9bf4089ff66168f546bcec806488bc</code></dd>
+            <dt>VerbRoom-0.4.0-win64.zip</dt>
+            <dd><code>6868ed40fb25dd9a2dae3bd26016c8a182bd600f6ab16e1f03c51125d115c561</code></dd>
           </div>
           <div>
-            <dt>VerbRoom-0.3.1-macos-universal.zip</dt>
-            <dd><code>33b4bbf940d1cccbfea133f32786bb7cdc188963eb190bb2abd6f532a0ac614c</code></dd>
+            <dt>VerbRoom-0.4.0-macos-universal.zip</dt>
+            <dd><code>ef1b55b1c014d63b03b55f7ba750f10eb216e45e162974836251548f7afc1e3e</code></dd>
           </div>
           <div>
-            <dt>VerbRoom-0.3.1-linux-x86_64.tar.gz</dt>
-            <dd><code>ec8277ce9fc3b40ce6ee4fd0c75a4947bab825d2b47d0ee2e54fb7b8bd92fdc1</code></dd>
+            <dt>VerbRoom-0.4.0-linux-x86_64.tar.gz</dt>
+            <dd><code>cc54bfebbdfd63caf2ada412a28134aa2b9b82ab1785fd8b97ad6e50df02e12d</code></dd>
           </div>
         </dl>
       </div>
@@ -603,7 +603,7 @@
         <h2 id="limits">Known limitations</h2>
         <ul>
           <li>Verb Room is alpha software. Windows is the platform tested in REAPER. Automated performance checks cover multi-source scenes. Live listening and performance on older four-core systems remain open.</li>
-          <li>Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 through 0.3.1 have yet to be tested on a Mac. When the macOS editor has focus, click outside it to use host shortcuts the editor does not handle. The Linux build has the classic interface only and has not been tried in a real host yet.</li>
+          <li>Version 0.2.0 was tested on a real Mac by a community tester; 0.2.1 through 0.4.0 have yet to be tested on a Mac. When the macOS editor has focus, click outside it to use host shortcuts the editor does not handle. The Linux build has the classic interface only and has not been tried in a real host yet.</li>
           <li>Geometry is 2.5D: vertical walls and horizontal floors, ceilings, and plates. The model covers geometric acoustics without low-frequency room modes. The tail is a statistical estimate.</li>
           <li>Large scenes can be CPU-intensive, especially with third-order AmbiX in Creative mode. Try Physical mode for large sessions. A large-scene path bake can take about 1–2 minutes depending on the scene, CPU, and system load.</li>
           <li>Existing presets, scenes, and projects still load. Moving objects in Manual mode with tables baked in an earlier build may need one fresh Bake path. Tables baked in 0.2.0 still require a fresh bake.</li>
@@ -613,14 +613,16 @@
 
     <section class="section" aria-labelledby="changes">
       <div class="wrap split">
-        <h2 id="changes">What changed in 0.3.1</h2>
+        <h2 id="changes">What changed in 0.4.0</h2>
         <div>
           <ul>
-            <li><strong>Wide output buses.</strong> Host output buses of up to 64 channels are accepted, for example 2 / 64 or 16 / 64 on a 64-channel track with the 32-source VSL setup. Channels beyond the rendered layout are silent instead of passing dry inputs through.</li>
-            <li><strong>Baked tails survive reload.</strong> A baked late tail stays valid after saving and reloading a project with a fixed source directivity pattern. Caches saved by 0.3.0 and 0.2.x still load. A thread race in tail tracking is fixed as well.</li>
-            <li><strong>Clearer dry-signal routing.</strong> A hint above the Sources rack explains M / S / Gain versus channels the host passes on, a warning appears when Positioned dry is off with Ambisonics or surround, and the manual has new sections with a signal-flow diagram.</li>
+            <li><strong>Motion.</strong> A separate switch next to Physical and Creative: the late tail adapts in real time as sources and the listener move, with no Bake step.</li>
+            <li><strong>Path shapes, Endless and wander.</strong> Eight path shapes (circle, figure-8, star, spiral and more), Endless playback from the host transport, and a shared random wander for a natural flying feel.</li>
+            <li><strong>Link to path.</strong> Move a whole rig (body, head, hands, feet) along one path with local offsets. Linked followers are not baked: use them with Motion, or draw separate paths if you need Bake.</li>
+            <li><strong>Trigger zones, Mod Out and MIDI out.</strong> Draw up to 16 zones; entering one drives the modulation matrix, <code>Mod Out</code> parameters and MIDI notes or CC for a sampler, for example footsteps that change surface by zone. In REAPER the MIDI route to another track needs a loopback; the manual has the steps.</li>
+            <li><strong>Stems workflow.</strong> The manual explains rendering stems by soloing source groups, backed by a sum-of-stems regression test.</li>
           </ul>
-          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.3.1_en.md">Read the 0.3.1 release notes</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_en.md">See the roadmap to 1.0</a></p>
+          <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Release_0.4.0_en.md">Read the 0.4.0 release notes</a> · <a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Roadmap_1.0_en.md">See the roadmap to 1.0</a></p>
           <p><a href="https://github.com/Bodzijun/sbp-verb-room/blob/main/docs/Manual_en.md">Read the user manual</a>, including a guide to baking paths.</p>
         </div>
       </div>
@@ -638,7 +640,7 @@
       </div>
     </section>
   </main>
-  <footer class="footer"><div class="wrap"><p>Verb Room 0.3.1 · SBP</p><div class="footer-links"><a href="#support" data-support-open>Support the project</a><a lang="uk" hreflang="uk" href="uk/index.html">Українська версія</a></div></div></footer>
+  <footer class="footer"><div class="wrap"><p>Verb Room 0.4.0 · SBP</p><div class="footer-links"><a href="#support" data-support-open>Support the project</a><a lang="uk" hreflang="uk" href="uk/index.html">Українська версія</a></div></div></footer>
   <dialog class="support-dialog" id="support-dialog" aria-labelledby="support-dialog-title">
     <div class="support-dialog-panel">
       <div class="support-dialog-head">
